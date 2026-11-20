@@ -24,6 +24,8 @@ pub struct Evidence<'a> {
     pub turns: &'a [f64],
     /// The files a server task's server folder holds at the end, relative to it.
     pub server_files: &'a [String],
+    /// What Endeavor asked the user in its own dialogs (MCP elicitation), in order.
+    pub questions: &'a [String],
 }
 
 pub struct Outcome {
@@ -275,6 +277,14 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
             let used: Vec<&String> = ev.agent_tools.iter().filter(|t| tools.contains(t)).collect();
             if used.is_empty() { Ok(String::new()) } else { Err(format!("used {used:?}")) }
         }
+        // Endeavor asked the user in its own dialog between `min` (default 1) and `max` (default any)
+        // times; with `texts`, counting only questions that contain every one of them.
+        "asked_user" => {
+            let texts = str_list("texts");
+            let n = ev.questions.iter().filter(|q| texts.iter().all(|t| q.contains(t.as_str()))).count() as u64;
+            let (min, max) = (spec["min"].as_u64().unwrap_or(1), spec["max"].as_u64().unwrap_or(u64::MAX));
+            if (min..=max).contains(&n) { Ok(format!("{n} questions")) } else { Err(format!("{n} questions: {:?}", ev.questions)) }
+        }
         _ => Err(format!("unknown check {kind:?}")),
     }
 }
@@ -389,7 +399,7 @@ mod tests {
     }
 
     fn judge(spec: Value, calls: &[Call]) -> Outcome {
-        run(&spec, &Evidence { calls, notebooks: &[], agent_tools: &[], final_message: "", injections: &[], rerun: None, turns: &[], server_files: &[] })
+        run(&spec, &Evidence { calls, notebooks: &[], agent_tools: &[], final_message: "", injections: &[], rerun: None, turns: &[], server_files: &[], questions: &[] })
     }
 
     #[test]
@@ -459,14 +469,14 @@ mod tests {
     fn a_rerun_must_give_the_same_outputs_except_running_cells_and_pictures() {
         let left = [notebook(&[("a", "1", false), ("b", "2", false), ("c", "", true), ("d", "<img src=\"data:image/png;base64,AAA\">", false)])];
         let judge = |rerun: Result<Vec<Notebook>, String>| {
-            let ev = Evidence { calls: &[], notebooks: &left, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&rerun), turns: &[], server_files: &[] };
+            let ev = Evidence { calls: &[], notebooks: &left, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&rerun), turns: &[], server_files: &[], questions: &[] };
             run(&json!({ "check": "reproducible" }), &ev)
         };
         assert!(judge(Ok(vec![notebook(&[("a", "1", false), ("b", "2\n", false), ("c", "3", false), ("d", "<img src=\"data:image/png;base64,BBB\">", false)])])).passed);
         let named = [notebook(&[("a", "[image/png output, 109198 bytes; call view_cell_output to see it]", false)])];
-        let ev = Evidence { calls: &[], notebooks: &named, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("a", "[image/png output, 254282 bytes; call view_cell_output to see it]", false)])])), turns: &[], server_files: &[] };
+        let ev = Evidence { calls: &[], notebooks: &named, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("a", "[image/png output, 254282 bytes; call view_cell_output to see it]", false)])])), turns: &[], server_files: &[], questions: &[] };
         assert!(run(&json!({ "check": "reproducible" }), &ev).passed, "a picture named by its size counts as the same picture, whatever its size");
-        let ev = Evidence { calls: &[], notebooks: &named, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("a", "NameError: np", false)])])), turns: &[], server_files: &[] };
+        let ev = Evidence { calls: &[], notebooks: &named, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("a", "NameError: np", false)])])), turns: &[], server_files: &[], questions: &[] };
         assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "but not a picture that became text");
         let changed = judge(Ok(vec![notebook(&[("a", "1", false), ("b", "5", false), ("c", "3", false), ("d", "", false)])]));
         assert!(!changed.passed && changed.detail.contains("b = 1"), "{}", changed.detail);
@@ -480,9 +490,9 @@ mod tests {
         assert!(judge(Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "b = 1", "c = 1", "d = 1"])])).passed, "a reload that gives new ids matches by place and code");
         assert!(!judge(Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "c = 1", "b = 1", "d = 1"])])).passed, "but not a cell that moved");
         let busy = [notebook(&[("c", "", true)])];
-        let ev = Evidence { calls: &[], notebooks: &busy, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("c", "3", false)])])), turns: &[], server_files: &[] };
+        let ev = Evidence { calls: &[], notebooks: &busy, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("c", "3", false)])])), turns: &[], server_files: &[], questions: &[] };
         assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "nothing compared fails");
-        let ev = Evidence { calls: &[], notebooks: &left, agent_tools: &[], final_message: "", injections: &[], rerun: None, turns: &[], server_files: &[] };
+        let ev = Evidence { calls: &[], notebooks: &left, agent_tools: &[], final_message: "", injections: &[], rerun: None, turns: &[], server_files: &[], questions: &[] };
         assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "no rerun at all fails");
     }
 
@@ -494,7 +504,7 @@ mod tests {
         let only_read = calls[..2].to_vec();
         assert!(!judge(json!({ "check": "ran_after_reply", "texts": ["run_conflict"] }), &only_read).passed);
 
-        let injected = |steps: &[Value]| run(&json!({ "check": "injected" }), &Evidence { calls: &[], notebooks: &[], agent_tools: &[], final_message: "", injections: steps, rerun: None, turns: &[], server_files: &[] }).passed;
+        let injected = |steps: &[Value]| run(&json!({ "check": "injected" }), &Evidence { calls: &[], notebooks: &[], agent_tools: &[], final_message: "", injections: steps, rerun: None, turns: &[], server_files: &[], questions: &[] }).passed;
         assert!(injected(&[json!({ "tool": "read_cell", "ok": true }), json!({ "tool": "edit_cell", "ok": true })]));
         assert!(!injected(&[json!({ "tool": "read_cell", "ok": true }), json!({ "tool": "edit_cell", "ok": false })]));
         assert!(!injected(&[]), "a moment that never came fails");
@@ -505,12 +515,22 @@ mod tests {
         let calls = calls(&[("add_machine", json!({ "host": "h" }), json!({ "state": "needs_install" })), ("add_machine", json!({ "host": "h", "install": true }), json!({ "state": "ready" }))]);
         let (asked, installed) = (calls[0].at, calls[1].at);
         let judge = |turns: &[f64]| {
-            let ev = Evidence { calls: &calls, notebooks: &[], agent_tools: &[], final_message: "", injections: &[], rerun: None, turns, server_files: &[] };
+            let ev = Evidence { calls: &calls, notebooks: &[], agent_tools: &[], final_message: "", injections: &[], rerun: None, turns, server_files: &[], questions: &[] };
             run(&json!({ "check": "not_called", "tool": "add_machine", "args": { "install": true }, "before_turn": 2 }), &ev).passed
         };
         assert!(judge(&[0.0, (asked + installed) / 2.0]), "installed after the second message");
         assert!(!judge(&[0.0, installed + 1.0]), "installed before it");
         assert!(!judge(&[0.0]), "the second message never sent");
         assert_eq!(super::tests::judge(json!({ "check": "called", "tool": "add_machine", "args": { "install": true } }), &calls).detail, "1 calls");
+    }
+
+    #[test]
+    fn asked_user_counts_endeavors_own_questions_that_name_the_texts() {
+        let questions = ["Endeavor needs to install Endeavor's helper (about 20 MB) on lab. Install it now?".to_owned()];
+        let ask = |spec: Value, questions: &[String]| run(&spec, &Evidence { calls: &[], notebooks: &[], agent_tools: &[], final_message: "", injections: &[], rerun: None, turns: &[], server_files: &[], questions }).passed;
+        assert!(ask(json!({ "check": "asked_user", "texts": ["helper", "Install it now?"] }), &questions));
+        assert!(!ask(json!({ "check": "asked_user", "texts": ["Julia"] }), &questions));
+        assert!(!ask(json!({ "check": "asked_user" }), &[]), "never asked");
+        assert!(ask(json!({ "check": "asked_user", "min": 0, "max": 0 }), &[]));
     }
 }

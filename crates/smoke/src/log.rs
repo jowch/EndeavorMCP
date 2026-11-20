@@ -89,3 +89,15 @@ pub fn turns(path: &Path) -> Vec<f64> {
     let Ok(file) = File::open(path) else { return Vec::new() };
     BufReader::new(file).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str::<Value>(&l).ok()).filter(|e| e["dir"] == "user").filter_map(|e| e["t"].as_f64()).collect()
 }
+
+/// What Endeavor asked the user in its own dialogs (`elicitation/create` from the server), in order.
+pub fn questions(path: &Path) -> Vec<String> {
+    let Ok(file) = File::open(path) else { return Vec::new() };
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|l| serde_json::from_str::<Value>(&l).ok())
+        .filter(|e| e["dir"] == "out" && e["msg"]["method"] == "elicitation/create")
+        .map(|e| e["msg"]["params"]["message"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}

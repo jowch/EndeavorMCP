@@ -332,9 +332,17 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     let depot = if setup["depot"] == "empty" { work.join("depot").display().to_string() } else { depot.to_owned() };
     let ssh = setup["ssh"] == true;
     let limit = setup["minutes"].as_u64().map_or(AGENT_LIMIT, |m| Duration::from_secs(m * 60));
+    let mut problems_before: Vec<String> = Vec::new();
     std::fs::write(work.join("settings.json"), json!({ "julia": julia, "r": r, "depot": depot, "ssh": ssh }).to_string()).unwrap();
     if task.join("inject.json").is_file() {
         std::fs::copy(task.join("inject.json"), work.join("inject.json")).unwrap();
+    }
+    // The user's answer to Endeavor's own dialogs (`"dialog": "accept"` or `"decline"`). In `claude -p`
+    // no one sees a dialog, and Claude Code closes it at once unless a hook answers it.
+    if let Some(answer) = setup["dialog"].as_str()
+        && let Err(e) = answer_dialogs(work, &project, answer)
+    {
+        problems_before.push(format!("setting up the dialog's answer: {e}"));
     }
     let mut turns = messages(&std::fs::read_to_string(task.join("prompt.md")).unwrap(), &std::fs::read_to_string(task.join("followup.md")).unwrap_or_default());
     // `{server_folder}` in a message is the folder on the server task's server where a notebook may go.
@@ -343,7 +351,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
         *turn = turn.replace("{server_folder}", &server_folder.display().to_string());
     }
     let specs: Value = std::fs::read_to_string(task.join("checks.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({ "checks": [] }));
-    let mut problems: Vec<String> = Vec::new();
+    let mut problems: Vec<String> = std::mem::take(&mut problems_before);
     if !setup["minutes"].is_null() && setup["minutes"].as_u64().is_none() {
         problems.push(format!("setup.json: minutes must be a whole number, not {}", setup["minutes"]));
     }
@@ -382,6 +390,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
         drop(server);
     }
     let turns_at = crate::log::turns(&work.join("mcp.jsonl"));
+    let questions = crate::log::questions(&work.join("mcp.jsonl"));
 
     let (notebooks, read_error) = match read {
         Ok(n) => (n, None),
@@ -389,7 +398,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     };
     let wants_rerun = specs["checks"].as_array().into_iter().flatten().any(|c| c["check"] == "reproducible");
     let rerun = (wants_rerun && read_error.is_none()).then(|| rerun(&notebooks, task, work, &project, endeavor));
-    let ev = Evidence { calls: &calls, notebooks: &notebooks, agent_tools: &agent.tools, final_message: &agent.final_message, injections: &injections, rerun: rerun.as_ref(), turns: &turns_at, server_files: &server_files };
+    let ev = Evidence { calls: &calls, notebooks: &notebooks, agent_tools: &agent.tools, final_message: &agent.final_message, injections: &injections, rerun: rerun.as_ref(), turns: &turns_at, server_files: &server_files, questions: &questions };
     let outcomes: Vec<checks::Outcome> = specs["checks"].as_array().into_iter().flatten().map(|spec| checks::run(spec, &ev)).collect();
     if let Some(e) = &agent.problem {
         problems.push(e.clone());
@@ -692,6 +701,23 @@ fn foreign_tools_used(transcript: &str) -> Vec<String> {
     used.sort();
     used.dedup();
     used
+}
+
+/// A hook in the project's Claude settings that answers every MCP dialog with `answer`, and logs
+/// what it was asked to `dialogs.jsonl`.
+fn answer_dialogs(work: &Path, project: &Path, answer: &str) -> Result<(), String> {
+    if !matches!(answer, "accept" | "decline") {
+        return Err(format!("setup.json: dialog must be \"accept\" or \"decline\", not {answer:?}"));
+    }
+    let script = work.join("answer-dialog.sh");
+    let reply = json!({ "hookSpecificOutput": { "hookEventName": "Elicitation", "action": answer, "content": {} } });
+    let log = work.join("dialogs.jsonl");
+    std::fs::write(&script, format!("#!/bin/sh\ncat >> '{}'\necho >> '{}'\necho '{reply}'\n", log.display(), log.display())).map_err(|e| e.to_string())?;
+    let settings = project.join(".claude/settings.json");
+    let mut current: Value = std::fs::read_to_string(&settings).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
+    current["hooks"]["Elicitation"] = json!([{ "hooks": [{ "type": "command", "command": format!("sh '{}'", script.display()) }] }]);
+    std::fs::create_dir_all(project.join(".claude")).map_err(|e| e.to_string())?;
+    std::fs::write(&settings, current.to_string()).map_err(|e| e.to_string())
 }
 
 fn stop_runtime(endeavor: &Path, work: &Path) {
