@@ -521,6 +521,11 @@ impl Bridge {
             "endeavor/file_info" => return Some(answer(notebooks::file_info(&text("path", "")))),
             "endeavor/new_notebook" => {
                 let owner = text("owner", "");
+                // The app's New notebook, in the session's kind: never Python, which it can't show yet
+                // (the agent's own calls are refused in `refusal`, #358). Its chip doesn't offer Python today.
+                if opens_python("new_notebook", &json!({}), self.notebooks.kind(&owner)) {
+                    return Some(answer(Err(PYTHON_NOT_IN_APP.to_owned())));
+                }
                 let folder = self.folder(&owner);
                 return Some(answer(self.notebooks.new_for(&owner, &folder)));
             }
@@ -812,6 +817,8 @@ impl Bridge {
         // ponytail: the app has no pane for marimo's page yet (Endeavor #1). Refused by caller, not by
         // runtime, since the app and the plugin may share one (#358): the plugin's sessions open Python
         // notebooks on the app's runtime too, and the app's never do on the plugin's.
+        // Only opening or making one is refused: an app session is bound to its one notebook
+        // (`endeavor/set_notebook`), so it never reaches a Python notebook a plugin session opened.
         if caller.app && opens_python(tool, arguments, self.notebooks.kind(&caller.owner)) {
             return Some(PYTHON_NOT_IN_APP.to_owned());
         }

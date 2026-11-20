@@ -1163,6 +1163,10 @@ fn python_notebooks_are_refused_to_the_apps_sessions_and_not_to_the_plugins_on_o
     }
     // A Julia notebook is the app's as before.
     assert!(!text(&mcp(&core, &call(3, "open_notebook", "/w/fit.jl"), &app).1).contains("not yet in the Endeavor app"));
+    // The app's own New notebook, in a session of the Python kind, makes none either.
+    app_call(&core, r#"{"jsonrpc":"2.0","id":4,"method":"endeavor/set_session_folder","params":{"owner":"7","folder":"/w","kind":"python"}}"#);
+    let made = app_call(&core, r#"{"jsonrpc":"2.0","id":5,"method":"endeavor/new_notebook","params":{"owner":"7"}}"#);
+    assert!(made.contains("unsupported") && made.contains("not yet in the Endeavor app"), "{made}");
 }
 
 #[test]
