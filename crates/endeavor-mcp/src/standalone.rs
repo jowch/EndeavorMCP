@@ -916,12 +916,15 @@ fn julia_ran_here(depot: &str) -> bool {
 
 /// What the background Julia runs, in the runtime folder (`ENDEAVOR_RUNTIME`). It takes the lock
 /// or exits; leaves a folder whose packages aren't all installed to the runtime's own
-/// `Pkg.instantiate` (two installs into one depot at once aren't safe); precompiles; and writes the
+/// `Pkg.instantiate` (two installs into one depot at once aren't safe); removes compiled files of
+/// ours that can't be read (runtime/cache_guard.jl); precompiles; and writes the
 /// marker (`ENDEAVOR_PRECOMPILED`), or the failure marker.
 const PRECOMPILE_SCRIPT: &str = r#"
 using FileWatching.Pidfile: mkpidlock
 const R = ENV["ENDEAVOR_RUNTIME"]
 lock = try mkpidlock(joinpath(R, ".precompiling"); wait=false, stale_age=60) catch; exit(0) end
+include(joinpath(R, "cache_guard.jl"))
+endeavor_drop_unreadable_caches(; log=devnull)
 import Pkg
 all(d -> d.source === nothing || isdir(d.source), values(Pkg.dependencies())) || exit(0)
 try

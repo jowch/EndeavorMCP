@@ -13,6 +13,11 @@
 # reads that file for boot progress and for a crash's last lines, so flush often.
 const log_flusher = Timer(_ -> (flush(stdout); flush(stderr)), 0.25; interval=0.25)
 
+# Before anything opens the runtime's compiled files: one this user can't read would
+# make this start, and every later one, fail (cache_guard.jl).
+include(joinpath(@__DIR__, "cache_guard.jl"))
+endeavor_drop_unreadable_caches()
+
 import Pkg
 # EndeavorRuntimeWarm is left out of setup's precompile, which it would slow by
 # about 30 s on Windows: it's loaded only once it's precompiled, which the runtime
