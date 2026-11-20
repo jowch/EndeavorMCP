@@ -1277,7 +1277,7 @@ impl Relay {
                 entry
             })
             .collect();
-        let running = crate::runtime::look(&self.options.state_dir(), false, false).alive().is_some();
+        let running = crate::runtime::look(&self.local.state_dir(), false, false).alive().is_some();
         let local_state = match (target.is_local() && !target.active, running) {
             (true, _) => "stopped from this session",
             (false, true) => "running",
@@ -1682,7 +1682,7 @@ impl Relay {
         let provider = self.provider_for(&server, install, true)?;
         if !matches!(provider.status().state, State::Ready(_) | State::Starting { .. } | State::Queued(_)) {
             // Not waited for: a start another process has under way here, which a look would wait for and the stop is for.
-            let starting_here = server.id == LOCAL && crate::runtime::lock_state(&self.options.state_dir()).is_held();
+            let starting_here = server.id == LOCAL && crate::runtime::lock_state(&self.local.state_dir()).is_held();
             let wait = if starting_here { Duration::ZERO } else { deadline.left() };
             match provider.ensure(Want::Attach { install }, wait, true) {
                 Outcome::NeedsInstall(info) => return Ok(needs_install_result(&name, &info, "stop_machine")),

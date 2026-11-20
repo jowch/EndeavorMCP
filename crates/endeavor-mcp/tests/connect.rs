@@ -445,6 +445,42 @@ fn without_a_state_dir_a_restart_after_the_older_folders_runtime_stopped_is_in_t
     helper.exits();
 }
 
+/// A connection that only browses (nothing attached) decides the folder when it checks or starts, not when
+/// it began: once the runtime in the app's older folder stopped and the plugin started one in its own
+/// folder, the check finds that one and a start joins it (#434).
+#[test]
+fn without_a_state_dir_an_idle_connection_finds_the_plugins_runtime_once_the_older_one_stopped() {
+    let dir = state_dir("apps-old-folder-idle");
+    let (home, xdg) = (dir.join("home"), dir.join("xdg"));
+    let (old, folder) = (home.join(".cache/endeavor/state"), xdg.join("endeavor/serve").join(this_host()));
+    std::fs::create_dir_all(&old).unwrap();
+    let older = FakeRuntime::start(&old, &this_host());
+    let endeavor = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+        command.args(args).env("HOME", &home).env("XDG_STATE_HOME", &xdg);
+        command
+    };
+    let mut helper = Helper::spawn(endeavor(&["connect", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent", "--depot", "/nonexistent"]));
+    helper.hello();
+    assert!(matches!(check(&helper, 1), RuntimeState::Running { .. }), "the one in the older folder");
+
+    let stop = endeavor(&["stop"]).output().unwrap();
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+    let until = Instant::now() + Duration::from_secs(10);
+    while older.alive() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::fs::create_dir_all(&folder).unwrap();
+    let plugins = FakeRuntime::start(&folder, &this_host());
+    assert!(matches!(check(&helper, 2), RuntimeState::Running { .. }), "the plugin's, with no event in between");
+    helper.request_start(None, true);
+    let ToApp::Ready { pid, reattached, .. } = helper.next() else { panic!("expected Ready") };
+    assert_eq!((pid, reattached), (plugins.pid, true), "a start joins the plugin's runtime");
+    assert!(!old.join("runtime.json").exists());
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
 /// The next message that isn't about how the start is going.
 fn after_start(helper: &Helper) -> ToApp {
     loop {

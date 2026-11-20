@@ -494,6 +494,31 @@ fn a_runtime_replaced_by_another_process_is_noticed_and_the_new_one_is_found() {
     assert_eq!((after.pid, after.token.as_str()), (other, "other"));
 }
 
+/// `mcp` keeps the folder of the runtime it uses while it uses it: one that an app of before #110 starts in
+/// the older folder meanwhile doesn't make it look gone. Once it is gone, the folder is decided again (#434).
+#[cfg(unix)]
+#[test]
+fn mcp_keeps_its_runtimes_folder_while_ready_and_decides_again_once_it_is_gone() {
+    let (port, _seen) = fake_core();
+    let (dir, old) = (crate::client::scratch("pinned-plugins"), crate::client::scratch("pinned-older"));
+    let me = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::process::id(), "started": null, "token": "t0k", "port": port });
+    std::fs::write(dir.join("runtime.json"), me.to_string()).unwrap();
+    let Ok(Command::Mcp(mut options)) = parsed("mcp") else { panic!() };
+    (options.state_dir, options.older_state_dir) = (dir.clone(), Some(old.clone()));
+    let local = target::Local::new(options);
+    let crate::client::Outcome::Ready(ready) = target::Provider::ensure(&local, crate::client::Want::Attach { install: false }, Duration::ZERO, false) else { panic!("the runtime wasn't found") };
+    assert_eq!(ready.pid, std::process::id());
+
+    let other = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::os::unix::process::parent_id(), "started": null, "token": "other", "port": port });
+    std::fs::write(old.join("runtime.json"), other.to_string()).unwrap();
+    assert!(matches!(target::Provider::status(&local).state, crate::client::State::Ready(r) if r.pid == std::process::id()), "still its own runtime");
+    assert_eq!(local.state_dir(), dir);
+
+    std::fs::remove_file(dir.join("runtime.json")).unwrap();
+    assert_eq!(target::Provider::status(&local).state, crate::client::State::Connected, "its runtime is gone");
+    assert_eq!(local.state_dir(), old, "and the folder is decided again: the older one, where one is alive now");
+}
+
 #[test]
 fn the_relay_passes_on_an_event_stream_event_by_event() {
     let (port, seen) = fake_core();
