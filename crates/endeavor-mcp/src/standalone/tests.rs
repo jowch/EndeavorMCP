@@ -674,7 +674,7 @@ fn approve_install_asks_the_user_first_where_the_client_can() {
     relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
     let tools: Value = serde_json::from_str(out.lines().last().unwrap()).unwrap();
     let approve = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "approve_install").unwrap().clone();
-    assert!(approve["description"].as_str().unwrap().contains("don't ask in the chat first"), "{approve}");
+    assert!(approve["description"].as_str().unwrap().contains("Don't ask in the chat"), "{approve}");
     out.clear();
     let call = |id: u64, notebook: &str| json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "approve_install", "arguments": { "notebook_id": notebook } } }).to_string();
     let question = || loop {

@@ -2280,7 +2280,7 @@ fn where_the_client_cant_show_a_dialog_the_user_says_yes_on_a_page_in_their_brow
     front.click_pages(Some("decline"));
     let declined = front.ok("use_machine", json!({ "machine": "lab", "install": true }));
     assert_eq!((declined["state"].as_str(), declined["install_declined"].clone()), (Some("ready"), json!(true)), "{declined}");
-    assert!(text(&declined).contains("clicked Don't install") && text(&declined).contains("10 minutes") && text(&declined).contains("(not a dialog)") && text(&declined).contains("Don't mention the page") && !text(&declined).contains("Changed your mind"), "{declined}");
+    assert!(text(&declined).contains("clicked Don't install") && text(&declined).contains("10 minutes") && text(&declined).contains("(not a dialog)") && text(&declined).contains("don't say how to get it later") && !text(&declined).contains("Changed your mind"), "{declined}");
     assert_eq!(front.pages.lock().unwrap().len(), 2);
     // An agent that asks again at once gets the same no, and the user gets no new page.
     front.click_pages(Some("install"));

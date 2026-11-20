@@ -4,8 +4,9 @@
 //! agent was trusted to ask first. Haiku 4.5 often didn't ("Let me approve that for you"). So where
 //! the client can show a form (MCP elicitation), the front asks the user before it passes the call
 //! on, and nothing downloads unless they say yes there. A client that can't show one has them
-//! asked on a page in their browser (`install_page`, #388), and with no browser, nothing downloads
-//! through the agent: the notebook page's own button is the user's way.
+//! asked on a page in their browser (`install_page`, #388), and with no browser, nothing downloads:
+//! the agent tells the user where it can be approved (the Endeavor app, or a new Claude Code
+//! session in a terminal), since the notebook's page has no button for it (#402).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -63,11 +64,11 @@ const CANCELLED: &str = "cancelled";
 use crate::mcp::ASK_IN_CHAT;
 
 /// The same where the front asks the user itself: asking in the chat too would have them say yes twice.
-const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size, and nothing downloads unless they say yes there. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or close the dialog, the call fails with `download_declined` or `download_not_answered`.";
+const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size, and nothing downloads unless they say yes there. First write one line telling the user that Endeavor is asking for their OK in a dialog, and for what; then call it in the same reply. Don't ask in the chat. If they say no or close the dialog, the call fails with `download_declined` or `download_not_answered`.";
 
 /// `approve_install`'s words where the client can't show a dialog and Endeavor asks the user on a
 /// page in their browser instead (#388).
-const ASKED_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what downloads and its size, and nothing downloads unless they click Install there. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or haven't answered yet, the call fails with `download_declined` or `download_not_answered`.";
+const ASKED_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what downloads and its size, and nothing downloads unless they click Install there. First write one line telling the user that Endeavor is asking for their OK on a page in their browser, and for what; then call it in the same reply. Don't ask in the chat. If they say no or haven't answered yet, the call fails with `download_declined` or `download_not_answered`.";
 
 /// The start of the answer when the user asks again after a no on the page.
 pub(super) const HELD_NO: &str = "The user already clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, less than 10 minutes ago, so nothing was installed, and ";
@@ -78,13 +79,13 @@ pub(super) const CHANGED_MIND: &str = "If they want it now, the only way is the 
 const CANT_ASK: &str = "Endeavor can't ask the user from this app (no dialog, and no browser it can open), so it can't be approved here: calling it installs nothing, however often it is called. Tell the user what it would install and its size where known, that it needs their OK, and that this app can't ask them for it: it can be approved only from the Endeavor desktop app (a program they install, not a web page): they close this notebook here, then open its file in the app, which asks them, or by asking again in a new Claude Code session in a terminal (not `claude -p`), which shows Endeavor's dialog. The notebook's page (its browser_url) can't approve it either: it has no button for this, so don't send them there to approve it. Don't work around it.";
 
 /// The runtime's asking step where Endeavor asks the user on a page in their browser.
-const ASK_STEP_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what it would install: tell the user it needs their OK, then call approve_install now; don't ask in the chat first.";
+const ASK_STEP_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what it would install. First write one line telling the user that Endeavor is asking for their OK on a page in their browser, and for what; then call approve_install now, in the same reply. Don't ask in the chat.";
 
 /// The same where no one can be asked.
 const ASK_STEP_CANT: &str = "Endeavor can't ask the user from this app, so this can't be approved here: approve_install installs nothing. Tell the user what it would install and its size where known, that it needs their OK, and that this app can't ask them for it: it can be approved only from the Endeavor desktop app (a program they install, not a web page): they close this notebook here, then open its file in the app, which asks them, or by asking again in a new Claude Code session in a terminal (not `claude -p`), which shows Endeavor's dialog. The notebook's page (its browser_url) can't approve it either: it has no button for this, so don't send them there to approve it. Then end your reply.";
 
 /// The runtime's asking step (`notebooks::ASK_STEP`) where the front asks the user itself.
-const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what it would install: tell the user it needs their OK, then call approve_install now; don't ask in the chat first.";
+const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what it would install. First write one line telling the user that Endeavor is asking for their OK in a dialog, and for what; then call approve_install now, in the same reply. Don't ask in the chat.";
 
 /// The machine tools' words about asking the user before `install: true`, and what they say where
 /// the front asks the user itself (#378). Each chat wording is in machine_tools.json (a test checks).
@@ -307,7 +308,7 @@ impl Consent {
             Clicked::Install => return Asked::Yes,
             Clicked::Dropped => return Asked::Dropped,
             Clicked::Declined if again_after_no => return Asked::No(tool_error(&format!("download_declined::The user already clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, less than 10 minutes ago, so nothing downloads, the cells that need it stay queued, and calling approve_install gets this same answer until those 10 minutes pass. {}", CHANGED_MIND), false)),
-            Clicked::Declined => "download_declined::The user clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, so nothing downloads and the cells that need it stay queued. Their no stands for 10 minutes: until then, calling approve_install gets this same answer. In your reply, say plainly that nothing was downloaded, and stop there. Don't mention the page, the browser or a button, don't ask them to reconsider, and don't call approve_install again unless they ask for the download themselves. After the 10 minutes, a new approve_install call asks them again.",
+            Clicked::Declined => "download_declined::The user clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, so nothing downloads and the cells that need it stay queued. Their no stands for 10 minutes: until then, calling approve_install gets this same answer. Your reply is one plain sentence that nothing was downloaded, as they chose, and nothing more: don't say how to get it later (no tool names, no prompt, no page, no browser, no button), don't ask them to reconsider, and don't call approve_install again unless they ask for the download themselves. After the 10 minutes, a new approve_install call asks them again.",
             Clicked::NotYet => "download_not_answered::Endeavor opened a web page (not a dialog) in the user's browser that names what downloads and its size, and nothing downloads until they click Install there. They haven't answered yet, so nothing downloads and the cells that need it stay queued. Tell the user that a web page is open in their browser and to answer it there (don't call it a dialog), and end your reply. Once they say they clicked Install, call approve_install again: their click holds for 10 minutes.",
             Clicked::NoBrowser => DOWNLOAD_CANT_ASK,
         };

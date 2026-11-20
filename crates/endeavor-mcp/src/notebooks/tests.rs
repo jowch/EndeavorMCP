@@ -544,6 +544,8 @@ impl Engine {
                     json!({ "png": "iVBORw==", "mime": "text/html", "interactive": true })
                 } else if code.contains("html") {
                     json!({ "png": Value::Null, "mime": "text/html" })
+                } else if code.contains("gr plot") {
+                    json!({ "png": "iVBORw==", "mime": "image/png" })
                 } else {
                     json!({ "png": if code.contains("plot") { json!("iVBORw==") } else { Value::Null }, "mime": "text/plain" })
                 }
@@ -2227,6 +2229,12 @@ fn view_cell_output_sends_the_png_the_engine_renders() {
         Reply::Json(_) => panic!("no image"),
     }
     assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y}: its output (text/plain) has no PNG rendering; read_cell shows it as text")));
+    // A plain image, such as Plots.jl's default backend draws, is said to be still (#407).
+    s.engine.open("44444444-0000-4000-8000-000000000004", "/n/g.jl", &[(X, "gr plot(x)")]);
+    match s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": "44444444-0000-4000-8000-000000000004", "cell_id": X }), &Folder::Process, Instant::now()).unwrap() {
+        Reply::Image { meta, .. } => assert_eq!((&meta["interactive"], &meta["message"]), (&json!(false), &json!(super::tools::STATIC_PICTURE))),
+        Reply::Json(_) => panic!("no image"),
+    }
     s.engine.with(NB, |nb| nb.cells[0].errored = true);
     assert_eq!(view(X).err(), Some(format!("ArgumentError: no_image::Cell {X} errored; read_cell shows the error")));
     // A cell that hasn't run yet has no output, which isn't a text output (trial 18).
