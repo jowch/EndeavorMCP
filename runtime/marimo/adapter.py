@@ -739,16 +739,27 @@ xlsxwriter yaml yarl zarr
 
 
 def near_miss(module):
-    """The widely used package `module` is likely a typo of, or None: one within an edit or two
-    (one, for a short name), or the same name but for case, `-` or `_`. Only a hint, for the
-    question and the agent: the user still decides."""
+    """The widely used package `module` may be a typo of, or None. Only a hint, for the question and
+    the agent: the user still decides. Kept narrow, since real packages sit close to common ones
+    (pysam and pyyaml, nilearn and sklearn, boto and boto3): the same first letter, neither name the
+    start of the other, and one edit for a name under 8 letters, two from 8 up; or the same name but
+    for case, `-` or `_`."""
     if module in COMMON_MODULES:
         return None
-    plain = re.sub(r"[-_.]", "", module.lower())
+    low = module.lower()
+    plain = re.sub(r"[-_.]", "", low)
     best = None
     for c in COMMON_MODULES:
-        d = 0 if plain == re.sub(r"[-_.]", "", c.lower()) else edits(module.lower(), c.lower())
-        if d <= (1 if len(c) < 5 else 2) and (best is None or (d, c) < best):
+        other = c.lower()
+        if plain == re.sub(r"[-_.]", "", other):
+            d = 0
+        elif low[:1] != other[:1] or low.startswith(other) or other.startswith(low):
+            continue
+        else:
+            d = edits(low, other)
+            if d > (1 if len(low) < 8 else 2):
+                continue
+        if best is None or (d, c) < best:
             best = (d, c)
     return best and best[1]
 

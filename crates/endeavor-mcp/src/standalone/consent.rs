@@ -607,13 +607,14 @@ pub(super) fn waiting_in(listed: &str, notebook: &Value) -> Waiting {
 }
 
 /// The packages of a download that are a letter or two from a widely used one (#416), as a sentence
-/// for the question: " pandsa isn't pandas: check the import for a typo." Empty when there are none.
+/// for the question: " pandsa is close to pandas: if pandsa is a typo for pandas, don't install it,
+/// and fix the import." Only a hint: real packages sit close to common ones. Empty when there are none.
 pub(crate) fn near_misses(download: &Value) -> String {
     download["packages"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|p| Some(format!(" {} isn't {}: check the import for a typo.", p["package"].as_str()?, p["close_to"].as_str()?)))
+        .filter_map(|p| Some(format!(" {0} is close to {1}: if {0} is a typo for {1}, don't install it, and fix the import.", p["package"].as_str()?, p["close_to"].as_str()?)))
         .collect()
 }
 
@@ -1104,7 +1105,7 @@ mod tests {
         let close = listed.replace(r#"{\"package\":\"pandsa\"}"#, r#"{\"package\":\"pandsa\",\"close_to\":\"pandas\"}"#);
         assert_ne!(close, listed);
         let waiting = waiting_in(&close, &json!("00000000-0000-0000-0000-000000000355"));
-        assert_eq!(Consent::download_question(&waiting).unwrap(), "Python needs to install pandsa, new to the notebook /data/typo.py, before its cells can run. pandsa isn't pandas: check the import for a typo. Install it now?");
+        assert_eq!(Consent::download_question(&waiting).unwrap(), "Python needs to install pandsa, new to the notebook /data/typo.py, before its cells can run. pandsa is close to pandas: if pandsa is a typo for pandas, don't install it, and fix the import. Install it now?");
     }
 
     #[test]
