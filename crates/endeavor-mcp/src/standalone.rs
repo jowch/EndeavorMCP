@@ -1158,7 +1158,9 @@ impl Relay {
             // Which client this is and whether it says it draws views: a host's log shows only method names.
             let client = &message["params"]["clientInfo"];
             let dialogs = if self.consent.can_ask() { "yes" } else { "no" };
-            eprintln!("[ Info: Client {} {}: draws views: {}; shows dialogs: {dialogs}", client["name"].as_str().unwrap_or("?"), client["version"].as_str().unwrap_or("?"), if draws { "yes" } else { "no" });
+            // With what it said of elicitation, which is all there is to tell a client that takes
+            // dialogs and never shows them (`claude -p`) from one that shows them.
+            eprintln!("[ Info: Client {} {}: draws views: {}; shows dialogs: {dialogs} (elicitation: {})", client["name"].as_str().unwrap_or("?"), client["version"].as_str().unwrap_or("?"), if draws { "yes" } else { "no" }, message["params"]["capabilities"]["elicitation"]);
         }
         let views = self.views.load(std::sync::atomic::Ordering::SeqCst);
         if let Some(reply) = crate::mcp::answer_locally(&message, self.options.skills_plugin, self.options.folder.is_none(), views) {
@@ -1252,14 +1254,21 @@ impl Relay {
             let began = Instant::now();
             self.consent.looking(&message);
             let waiting = self.waiting_download(&message["params"]["arguments"]["notebook_id"], deadline);
-            let dialog = self.consent.can_ask();
-            let asked = if dialog {
-                self.consent.ask(&message, waiting, &|line| self.write(line))
-            } else {
+            let mut dialog = self.consent.can_ask();
+            let page = self.page_shows();
+            let mut asked = if dialog { self.consent.ask(&message, waiting.clone(), page, &|line| self.write(line)) } else { consent::Asked::NoDialog };
+            // No dialog, or one the client said it would show and didn't (#381): the page.
+            if matches!(asked, consent::Asked::NoDialog) {
+                dialog = false;
                 // The click and the call after it within what a client gives a call (`machines::PAGE_CALL`).
                 let wait = machines::page_wait().min(machines::PAGE_CALL.saturating_sub(began.elapsed() + Duration::from_secs(10)));
-                self.consent.ask_on_page(&message, waiting, self.page_shows(), wait, &self.pages, &machines::open_page)
-            };
+                asked = self.consent.ask_on_page(&message, waiting, page, wait, &self.pages, &machines::open_page, &|line| self.write(line));
+            } else if matches!(asked, consent::Asked::Silent) {
+                // A dialog with no answer yet, which may not be up at all (`claude -p`): the page asks
+                // as well, for as long as the dialog would have waited, and the first answer counts.
+                let wait = consent::ANSWER_WAIT.saturating_sub(began.elapsed());
+                asked = self.consent.ask_on_page(&message, waiting, page, wait, &self.pages, &machines::open_page, &|line| self.write(line));
+            }
             match asked {
                 consent::Asked::No(result) => return self.answer_call(&message, tool.as_deref(), result),
                 consent::Asked::Dropped => return,
@@ -1267,6 +1276,9 @@ impl Relay {
                 consent::Asked::Yes if dialog => deadline = machines::Deadline::after(start_wait()),
                 consent::Asked::Yes => deadline = machines::Deadline::after(machines::PAGE_CALL.saturating_sub(began.elapsed()).max(machines::MIN_INSTALL)),
                 consent::Asked::Unasked => {}
+                // Not reached (`ask_on_page` answers for itself), but a call nobody asked about
+                // never passes on as if they had said yes.
+                consent::Asked::NoDialog | consent::Asked::Silent => return self.answer_call(&message, tool.as_deref(), consent::download_cant_ask()),
             }
         }
         // These two use a runtime that is running, and start none.

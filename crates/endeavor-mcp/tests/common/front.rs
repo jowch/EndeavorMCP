@@ -20,7 +20,9 @@ pub struct Front {
     stderr: Arc<Mutex<Vec<String>>>,
     id: u64,
     /// How the client answers a dialog the front shows (MCP elicitation): "accept", "decline" or
-    /// "cancel". None: the client can't show one.
+    /// "cancel", "error" for a client that says it can show one and answers with an error (#381), or
+    /// "silent" for one that never answers.
+    /// None: the client can't show one.
     pub dialog: Option<&'static str>,
     /// The dialogs the front asked for, in order.
     pub asked: Vec<Value>,
@@ -127,7 +129,13 @@ impl Front {
             if reply["method"] == "elicitation/create" {
                 self.asked.push(reply.clone());
                 let action = self.dialog.expect("a dialog from a front told the client can't show one");
-                self.send(json!({ "jsonrpc": "2.0", "id": reply["id"], "result": { "action": action, "content": {} } }));
+                if action == "silent" {
+                    // Takes it and never answers, as Claude Code's `-p` does.
+                } else if action == "error" {
+                    self.send(json!({ "jsonrpc": "2.0", "id": reply["id"], "error": { "code": -32601, "message": "Method not found" } }));
+                } else {
+                    self.send(json!({ "jsonrpc": "2.0", "id": reply["id"], "result": { "action": action, "content": {} } }));
+                }
                 continue;
             }
             if reply["id"] == json!(id) {

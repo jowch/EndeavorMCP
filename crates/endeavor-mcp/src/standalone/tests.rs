@@ -687,7 +687,7 @@ fn approve_install_asks_the_user_first_where_the_client_can() {
     let ask = |id: u64, answer: &'static str| {
         let calling = { let relay = relay.clone(); let line = call(id, nb); std::thread::spawn(move || relay.handle(&line)) };
         let question = question();
-        assert_eq!(question["params"]["message"], "R needs to download ALL 1.44.0 (11 MB) before the cells of the notebook leukemia.R can run. Download it now?");
+        assert_eq!(question["params"]["message"], "R needs to download ALL 1.44.0 (11 MB) before the cells of the notebook /data/leukemia.R can run. Download it now?");
         out.clear();
         relay.handle(&json!({ "jsonrpc": "2.0", "id": question["id"], "result": { "action": answer } }).to_string());
         calling.join().unwrap();
