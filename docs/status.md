@@ -440,6 +440,11 @@ Next:
   packages, once per runtime folder, Julia and depot, but only where Julia
   notebooks ran before and Julia is already installed. So the first open after
   an update doesn't run without the warm package: about 24 s instead of 45 s here.
+  Before either loads anything, a compiled file of those two packages in our own
+  depot that the user can't read is removed, so Julia compiles it again. One left
+  `--w-------`, once another runtime version had compiled there too, made every
+  start fail with "Permission denied" (#372). Only our first depot is looked at,
+  and never `~/.julia`.
 - Julia starts only when it's needed (#76). With `--julia-when-needed` the
   core writes `runtime.json` and answers at once, finds Julia itself (and
   downloads it only with `--install-julia`) the first time a Julia notebook is
