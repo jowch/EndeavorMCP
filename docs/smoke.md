@@ -254,6 +254,7 @@ makes it reported only: a failed soft check doesn't fail the task.
 | `asked_user` `texts`, `min` (1), `max` | Endeavor asked the user in its own dialog between `min` and `max` times, counting only questions that contain every one of `texts` |
 | `never_ran` `texts` | some code cell (not `md"..."`) contains every one of `texts`, and none of those cells ran: each is still queued or has no output, and none has an error |
 | `code_lacks` `texts` | no cell's code contains any of `texts` |
+| `page_opened` `path`, `min` (1), `max` | Endeavor opened a page in the stand-in browser (`"browser": true`) between `min` and `max` times, counting only links that contain `path` |
 | `agent_tools_not_used` `tools` | the agent didn't use these tools of its own (read from Claude's transcript) |
 
 An unknown check fails. A check on the last message is loose by design: it
@@ -273,7 +274,7 @@ something subtle, make it soft.
 | `N7-plot` | a plot | the agent looks at the picture (`view_cell_output`) before it reports. The plotting package is new to the notebook, so the run asks first (#397), and the harness says yes in the dialog |
 | `N8-one-notebook` | N1, then "make a separate notebook" in the same session | `one_notebook`: no second notebook; a section in this one, or a new session |
 | `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: Endeavor asks about DataFrames, the harness says yes, and the agent waits through the install and reports the table (#58) |
-| `N14-asks-first` | N7's plot with Plots, with no one to say yes | the ask with no answer: Endeavor's page opens in the stand-in browser and nobody clicks (the reply must say a web page was opened, so a dialog that went unanswered doesn't pass), so the agent asks through Endeavor, nothing installs or runs, it installs no other way, and it names the package that waits for the user's OK |
+| `N14-asks-first` | N7's plot with Plots, with no one to say yes | the ask with no answer: Endeavor's page opens in the stand-in browser and nobody clicks (the stand-in browser must have got the install page, and the reply must say so, so a dialog that went unanswered doesn't pass), so the agent asks through Endeavor, nothing installs or runs, it installs no other way, and it names the package that waits for the user's OK |
 | `N10-big-notebook` | change one value in an open notebook of 42 cells and report a count | what a larger notebook costs: reads, and each change's reply |
 | `N11-logged-warning` | change a cutoff in an open notebook whose parsing cell logs a `@warn` that 2 of 8 CSV rows were left out, and report the mean; the count is only in the warning | that what a cell logs reaches the agent, and it passes a warning on (#257) |
 | `N12-moved-widget` | report a mean from an open notebook whose cutoff slider the user moved on the page from its default just before the agent looks | that the agent hears a result used a moved widget (`uses_moved_input`), and says which value it used and what the file's default is |

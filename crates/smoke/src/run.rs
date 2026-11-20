@@ -399,6 +399,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     }
     let turns_at = crate::log::turns(&work.join("mcp.jsonl"));
     let questions = crate::log::questions(&work.join("mcp.jsonl"));
+    let pages: Vec<String> = std::fs::read_to_string(work.join("browser.txt")).unwrap_or_default().lines().map(str::to_owned).collect();
 
     let (notebooks, read_error) = match read {
         Ok(n) => (n, None),
@@ -406,7 +407,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     };
     let wants_rerun = specs["checks"].as_array().into_iter().flatten().any(|c| c["check"] == "reproducible");
     let rerun = (wants_rerun && read_error.is_none()).then(|| rerun(&notebooks, task, work, &project, endeavor));
-    let ev = Evidence { calls: &calls, notebooks: &notebooks, agent_tools: &agent.tools, final_message: &agent.final_message, injections: &injections, rerun: rerun.as_ref(), turns: &turns_at, server_files: &server_files, questions: &questions };
+    let ev = Evidence { calls: &calls, notebooks: &notebooks, agent_tools: &agent.tools, final_message: &agent.final_message, injections: &injections, rerun: rerun.as_ref(), turns: &turns_at, server_files: &server_files, questions: &questions, pages: &pages };
     let outcomes: Vec<checks::Outcome> = specs["checks"].as_array().into_iter().flatten().map(|spec| checks::run(spec, &ev)).collect();
     if let Some(e) = &agent.problem {
         problems.push(e.clone());
