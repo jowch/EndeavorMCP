@@ -538,6 +538,9 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
         .current_dir(project)
         .env_clear()
         .envs(agent_env())
+        // The signed-in account's claude.ai connectors: `--setting-sources` doesn't keep them out, and they
+        // load after the first turn has started, so only a later turn's first event lists them.
+        .env("ENABLE_CLAUDEAI_MCP_SERVERS", "false")
         .env("ENDEAVOR_BIN", exe)
         .env("SMOKE_ENDEAVOR", endeavor)
         .env("SMOKE_WORK", work)
@@ -660,7 +663,35 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
             _ => {}
         }
     }
+    // A server that connects after a turn's first event isn't in it: the tools the agent used catch that.
+    let foreign = foreign_tools_used(&text);
+    if run.problem.is_none() && !foreign.is_empty() {
+        run.problem = Some(format!("the agent used other tools: {foreign:?}"));
+    }
     run
+}
+
+/// The tools beyond ours and the built-ins that the agent used, from the
+/// transcript. A call Claude Code refused because the agent hasn't got that
+/// tool (`Bash`, say) doesn't count: the harness kept it out, and trying it is
+/// the agent's mistake, which a task's checks judge.
+fn foreign_tools_used(transcript: &str) -> Vec<String> {
+    let events: Vec<Value> = transcript.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let parts = |kind: &'static str| {
+        events.iter().filter(move |e| e["type"] == kind).flat_map(|e| e["message"]["content"].as_array().cloned().unwrap_or_default())
+    };
+    let refused: std::collections::HashSet<String> = parts("user")
+        .filter(|p| p["type"] == "tool_result" && p["content"].as_str().is_some_and(|c| c.starts_with("<tool_use_error>Error: No such tool available:")))
+        .filter_map(|p| p["tool_use_id"].as_str().map(str::to_owned))
+        .collect();
+    let mut used: Vec<String> = parts("assistant")
+        .filter(|p| p["type"] == "tool_use" && !p["id"].as_str().is_some_and(|id| refused.contains(id)))
+        .filter_map(|p| p["name"].as_str().map(str::to_owned))
+        .filter(|t| !BUILT_IN_TOOLS.contains(&t.as_str()) && !t.starts_with(&format!("{OUR_SERVER}__")))
+        .collect();
+    used.sort();
+    used.dedup();
+    used
 }
 
 fn stop_runtime(endeavor: &Path, work: &Path) {
@@ -824,6 +855,25 @@ mod tests {
         assert_eq!(row("N9", std::slice::from_ref(&failed), Some("#58"))["status"], "expected failure");
         assert_eq!(row("N9", &[passed], Some("#58"))["status"], "pass: #58 may be fixed");
         assert_eq!(row("N1", &[failed], None)["models"], json!(["m", "n"]));
+    }
+
+    #[test]
+    fn a_tool_the_agent_hasnt_got_is_its_mistake_but_another_tool_that_ran_is_a_leak() {
+        let call = |id: &str, name: &str| json!({ "type": "assistant", "message": { "id": id, "content": [{ "type": "tool_use", "id": id, "name": name, "input": {} }] } }).to_string();
+        let answer = |id: &str, content: &str| json!({ "type": "user", "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": id, "content": content, "is_error": content.starts_with('<') }] } }).to_string();
+        let transcript = [
+            call("t1", "Bash"),
+            answer("t1", "<tool_use_error>Error: No such tool available: Bash</tool_use_error>"),
+            call("t2", "mcp__plugin_endeavor_endeavor__new_notebook"),
+            answer("t2", "{}"),
+            call("t3", "Read"),
+            answer("t3", "text"),
+            call("t4", "mcp__claude_ai_x__y"),
+            answer("t4", "done"),
+        ]
+        .join("\n");
+        assert_eq!(foreign_tools_used(&transcript), ["mcp__claude_ai_x__y"]);
+        assert!(foreign_tools_used(&transcript.replace("mcp__claude_ai_x__y", "Read")).is_empty());
     }
 
     #[test]
