@@ -207,9 +207,11 @@ fn with_user_depot_from(depot: &str, theirs: Option<&str>, home: &Path, sep: cha
 /// server keeps, as `Env::state_dir` and `Env::cluster_state_dir` give it, for the
 /// launcher in `$ln`. It runs before any binary is installed, so it can't ask one.
 /// Like `runtime::default_state_dir`, a plain server's is the app's older folder while a
-/// runtime of this node recorded there is alive (here: while `kill -0` reaches its pid).
+/// runtime of this node recorded there is alive (here: while `kill -0` reaches its pid and `ps`
+/// shows it was started with `--state-dir` that folder, or can't say what it is). A reused pid or a
+/// zombie shows other arguments, so it doesn't count, as it doesn't for the helper.
 /// `uname -n` is what `gethostname` returns.
-pub(crate) const PICK_STATE_DIR_SH: &str = r#"if [ -n "$st" ]; then pd="$sd"; else case "${XDG_STATE_HOME:-}" in /*) pd="$XDG_STATE_HOME";; *) pd="$HOME/.local/state";; esac; case "$ln" in slurm) pd="$pd/endeavor/cluster";; *) pd="$pd/endeavor/serve/$(uname -n)"; po="$HOME/.cache/endeavor/state"; pj=$(cat "$po/runtime.json" 2>/dev/null); case "$pj" in *node?:?"$(uname -n)"?[,}]*pid?:[0-9]*) pk=${pj#*pid?:}; pk=$(printf %s "$pk" | tr ",}" "  " | cut -d" " -f1); if [ -n "$pk" ] && [ -z "$(printf %s "$pk" | tr -d 0-9)" ] && kill -0 "$pk" 2>/dev/null; then pd="$po"; fi;; esac;; esac; fi"#;
+pub(crate) const PICK_STATE_DIR_SH: &str = r#"if [ -n "$st" ]; then pd="$sd"; else case "${XDG_STATE_HOME:-}" in /*) pd="$XDG_STATE_HOME";; *) pd="$HOME/.local/state";; esac; case "$ln" in slurm) pd="$pd/endeavor/cluster";; *) pd="$pd/endeavor/serve/$(uname -n)"; po="$HOME/.cache/endeavor/state"; pj=$(cat "$po/runtime.json" 2>/dev/null); case "$pj" in *node?:?"$(uname -n)"?[,}]*pid?:[0-9]*) pk=${pj#*pid?:}; pk=$(printf %s "$pk" | tr ",}" "  " | cut -d" " -f1); if [ -n "$pk" ] && [ -z "$(printf %s "$pk" | tr -d 0-9)" ] && kill -0 "$pk" 2>/dev/null; then pa=$(ps -p "$pk" -o args= 2>/dev/null) || pa=; case "$pa" in "" | *"--state-dir $po"*) pd="$po";; esac; fi;; esac;; esac; fi"#;
 
 #[cfg(test)]
 mod tests {
@@ -322,12 +324,17 @@ mod tests {
         };
         let env = Env { home: home.clone(), node: crate::hostname(), ..Env::default() };
         let record = |node: &str, pid: i64| std::fs::write(old.join("runtime.json"), serde_json::json!({ "launcher": "process", "node": node, "pid": pid, "started": 1, "token": "t", "port": 1 }).to_string()).unwrap();
-        let me = std::process::id() as i64;
-        record(&crate::hostname(), me);
+        let mut core = Command::new("sh").args(["-c", "sleep 60; :", "core", "--state-dir"]).arg(&old).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        let core_pid = i64::from(core.id());
+        record(&crate::hostname(), core_pid);
         assert_eq!(in_home("process"), old, "alive, of this node");
         assert_eq!(in_home("slurm"), env.cluster_state_dir(), "a cluster's is its own");
-        record("another-node", me);
+        record("another-node", core_pid);
         assert_eq!(in_home("process"), env.state_dir(), "another node's");
+        record(&crate::hostname(), std::process::id() as i64);
+        assert_eq!(in_home("process"), env.state_dir(), "alive, and not a core of that folder: a reused pid");
+        let _ = core.kill();
+        let _ = core.wait();
         record(&crate::hostname(), i64::from(i32::MAX));
         assert_eq!(in_home("process"), env.state_dir(), "gone");
     }

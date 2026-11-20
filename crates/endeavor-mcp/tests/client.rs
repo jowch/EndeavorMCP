@@ -642,12 +642,22 @@ fn the_default_state_folders_are_looked_in_when_none_is_given() {
 #[test]
 fn a_runtime_alive_in_the_apps_older_folder_is_reported_when_no_state_folder_is_given() {
     let place = Place::new("no-install-apps-old");
-    let runtime = FakeRuntime::start(&place.home.join(".cache/endeavor/state"));
-    let pid = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(place.home.join(".cache/endeavor/state/runtime.json")).unwrap()).unwrap()["pid"].as_u64().unwrap() as u32;
+    let old = place.home.join(".cache/endeavor/state");
+    std::fs::create_dir_all(&old).unwrap();
     let options = Options { allow_install: false, root: String::new(), state: String::new(), ..place.options() };
     let needs = || connect(&Server::default(), &looking(&place, None), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
+    let record = |pid: u32| std::fs::write(old.join("runtime.json"), serde_json::json!({ "launcher": "process", "node": hostname(), "pid": pid, "token": "t" }).to_string()).unwrap();
+    // A process alive under that pid that is no core of that folder (a reused pid) doesn't count.
+    let other = core_like();
+    record(other.0.id());
+    assert_eq!(needs().running, None);
+    let mut core = Command::new("sh").args(["-c", "sleep 60; :", "core", "--state-dir"]).arg(&old).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).process_group(0).spawn().unwrap();
+    let pid = core.id();
+    record(pid);
     assert_eq!(needs().running, Some(Running::Process { pid, checked: true }));
-    drop(runtime);
+    // SAFETY: ends the group it leads, its `sleep` too.
+    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    let _ = core.wait();
     wait_gone(pid);
     assert_eq!(needs().running, None, "once it has stopped, the plugin's folder, where nothing runs");
 }
