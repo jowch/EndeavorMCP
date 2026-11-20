@@ -472,8 +472,12 @@ function _with_staged_downstream(nb, cells)
     topology = current_topology(nb)
     staged = lock(() -> (s = get(_STAGED, nb.notebook_id, nothing); s === nothing ? Pluto.Cell[] : collect(s.cells)), _NOTIFY_LOCK)
     isempty(staged) && return cells
-    order = Pluto.PlutoDependencyExplorer.topological_order(topology, collect(cells))
-    reached = union(Set(order.runnable), keys(order.errable))
+    # Reached through the staged edits, or through what a staged cell used before them.
+    reached = Set{Pluto.Cell}()
+    for t in (topology, nb.topology)
+        order = Pluto.PlutoDependencyExplorer.topological_order(t, collect(cells))
+        union!(reached, order.runnable, keys(order.errable))
+    end
     return vcat(collect(cells), [c for c in staged if c in reached && !(c in cells)])
 end
 
