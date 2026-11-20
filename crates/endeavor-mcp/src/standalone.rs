@@ -917,7 +917,7 @@ fn julia_ran_here(depot: &str) -> bool {
 /// What the background Julia runs, in the runtime folder (`ENDEAVOR_RUNTIME`). It takes the lock
 /// or exits; leaves a folder whose packages aren't all installed to the runtime's own
 /// `Pkg.instantiate` (two installs into one depot at once aren't safe); removes compiled files of
-/// ours that can't be read (runtime/cache_guard.jl); precompiles; and writes the
+/// ours that can't be read (runtime/cache_guard.jl), before and after; precompiles; and writes the
 /// marker (`ENDEAVOR_PRECOMPILED`), or the failure marker.
 const PRECOMPILE_SCRIPT: &str = r#"
 using FileWatching.Pidfile: mkpidlock
@@ -927,11 +927,20 @@ include(joinpath(R, "cache_guard.jl"))
 endeavor_drop_unreadable_caches(; log=devnull)
 import Pkg
 all(d -> d.source === nothing || isdir(d.source), values(Pkg.dependencies())) || exit(0)
-try
+ok = try
     Pkg.precompile(["EndeavorRuntime", "EndeavorRuntimeWarm"])
+    true
+catch
+    false
+end
+# A runtime folder removed while this ran (it outlives the server) leaves the file Julia was
+# writing unreadable (#383): removed again here, so the next start doesn't trip on it.
+endeavor_drop_unreadable_caches(; log=devnull)
+isdir(R) || exit(ok ? 0 : 1)
+if ok
     write(joinpath(R, ".precompiled"), ENV["ENDEAVOR_PRECOMPILED"])
     rm(joinpath(R, ".precompile-failed"); force=true)
-catch
+else
     touch(joinpath(R, ".precompile-failed"))
     exit(1)
 end

@@ -136,7 +136,12 @@ sometimes rounded to `4.979`. The check was wrong.
 ## What a run leaves
 
 In `target/smoke/<time>-<commit>/` (each attempt runs in the temporary
-folder, and is copied here without the runtime's own `state/` and `home/`):
+folder, and is copied here without the runtime's own `state/` and `home/`).
+An attempt's folder is removed only once no process names it: the background
+precompile `endeavor mcp` starts runs from the runtime unpacked there and
+outlives the runtime, and removing the folder under it left an unreadable
+cache file in the shared depot (#383). The runner waits up to 10 minutes for
+it, then ends it.
 
 - `summary.md` and `summary.json`: one line per task, with its status, the
   checks that failed, and the first attempt's tool calls, tool errors, time,
