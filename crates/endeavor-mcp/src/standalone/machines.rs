@@ -374,7 +374,7 @@ fn not_ready_message(name: &str, reached: &Reached) -> String {
 const ASK_IN_CHAT: &str = "Ask the user whether Endeavor may do that. Only if they agree, call ";
 const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what it installs, as soon as a call needs it: tell the user it needs their OK, then call ";
 const CALL_END_IN_CHAT: &str = " and `install: true`.";
-const CALL_END_IN_DIALOG: &str = " and `install: true` now; don't ask in the chat first.";
+const CALL_END_IN_DIALOG: &str = " and `install: true` now, after one line telling the user that Endeavor is asking for their OK, and for what, in the same reply; don't ask in the chat.";
 
 /// A machine tool's `message` where Endeavor asks the user itself: its asking step, if it has one,
 /// says so.
@@ -1234,7 +1234,7 @@ impl Relay {
             Clicked::Install => return Ok(true),
             Clicked::Dropped => return Ok(false),
             Clicked::Declined if again_after_no => format!("install_declined::{}{again} with `install: true` gets this same answer until those 10 minutes pass. {}", super::consent::HELD_NO, super::consent::CHANGED_MIND),
-            Clicked::Declined => format!("install_declined::The user clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, so nothing was installed. Their no stands for 10 minutes: until then, {again} with `install: true` gets this same answer. In your reply, say plainly that nothing was installed, and stop there. Don't mention the page, the browser or a button, don't ask them to reconsider, and don't call again unless they ask for it themselves. After the 10 minutes, a new {again} call asks them again."),
+            Clicked::Declined => format!("install_declined::The user clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, so nothing was installed. Their no stands for 10 minutes: until then, {again} with `install: true` gets this same answer. Your reply is one plain sentence that nothing was installed, as they chose, and nothing more: don't say how to get it later (no tool names, no prompt, no page, no browser, no button), don't ask them to reconsider, and don't call again unless they ask for it themselves. After the 10 minutes, a new {again} call asks them again."),
             Clicked::NotYet => format!("install_not_answered::Endeavor opened a web page (not a dialog) in the user's browser that names what it would install, and it installs it only once they click Install there. They haven't answered yet, so nothing was installed. Tell the user that a web page is open in their browser and to answer it there (don't call it a dialog), and end your reply. Once they say they clicked Install, call {again} with `install: true`, and it installs without asking again: their click holds for 10 minutes."),
             Clicked::NoBrowser => CANT_ASK_ERROR.to_owned(),
         })

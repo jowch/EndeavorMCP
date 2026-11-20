@@ -2189,7 +2189,7 @@ fn where_the_client_can_show_a_dialog_the_user_says_yes_to_an_install_there() {
     for tool in listed["result"]["tools"].as_array().unwrap().iter().filter(|t| t["inputSchema"]["properties"]["install"].is_object()) {
         let (description, install) = (tool["description"].as_str().unwrap(), tool["inputSchema"]["properties"]["install"]["description"].as_str().unwrap());
         assert!(install.contains("Endeavor asks the user in a dialog") && !install.contains("never on a first call"), "{}: {install}", tool["name"]);
-        assert!(description.contains("don't ask in the chat first") && !description.contains("ask the user, and"), "{}: {description}", tool["name"]);
+        assert!(description.contains("before the call, write one line telling the user that Endeavor may ask for their OK in a dialog") && !description.contains("ask the user, and"), "{}: {description}", tool["name"]);
     }
     // A call that needs an install asks the user at once, whether or not the agent set `install`:
     // agents told to call again often didn't (#380's smoke runs). A no installs nothing and saves nothing.
@@ -2246,7 +2246,7 @@ fn where_the_client_cant_show_a_dialog_the_user_says_yes_on_a_page_in_their_brow
     for tool in listed["result"]["tools"].as_array().unwrap().iter().filter(|t| t["inputSchema"]["properties"]["install"].is_object()) {
         let (description, install) = (tool["description"].as_str().unwrap(), tool["inputSchema"]["properties"]["install"]["description"].as_str().unwrap());
         assert!(install.contains("on a page in their browser") && !install.contains("never on a first call"), "{}: {install}", tool["name"]);
-        assert!(description.contains("click Install there; don't ask in the chat first") && !description.contains("ask the user, and"), "{}: {description}", tool["name"]);
+        assert!(description.contains("click Install there; first write one line telling the user that Endeavor is asking for their OK on a page") && !description.contains("ask the user, and"), "{}: {description}", tool["name"]);
     }
     // A look opens no page.
     let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
@@ -2280,7 +2280,7 @@ fn where_the_client_cant_show_a_dialog_the_user_says_yes_on_a_page_in_their_brow
     front.click_pages(Some("decline"));
     let declined = front.ok("use_machine", json!({ "machine": "lab", "install": true }));
     assert_eq!((declined["state"].as_str(), declined["install_declined"].clone()), (Some("ready"), json!(true)), "{declined}");
-    assert!(text(&declined).contains("clicked Don't install") && text(&declined).contains("10 minutes") && text(&declined).contains("(not a dialog)") && text(&declined).contains("Don't mention the page") && !text(&declined).contains("Changed your mind"), "{declined}");
+    assert!(text(&declined).contains("clicked Don't install") && text(&declined).contains("10 minutes") && text(&declined).contains("(not a dialog)") && text(&declined).contains("don't say how to get it later") && !text(&declined).contains("Changed your mind"), "{declined}");
     assert_eq!(front.pages.lock().unwrap().len(), 2);
     // An agent that asks again at once gets the same no, and the user gets no new page.
     front.click_pages(Some("install"));

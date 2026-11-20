@@ -544,6 +544,10 @@ impl Engine {
                     json!({ "png": "iVBORw==", "mime": "text/html", "interactive": true })
                 } else if code.contains("html") {
                     json!({ "png": Value::Null, "mime": "text/html" })
+                } else if code.contains("wrapped plot") {
+                    json!({ "png": "iVBORw==", "mime": "text/html" })
+                } else if code.contains("gr plot") {
+                    json!({ "png": "iVBORw==", "mime": "image/png" })
                 } else {
                     json!({ "png": if code.contains("plot") { json!("iVBORw==") } else { Value::Null }, "mime": "text/plain" })
                 }
@@ -2221,12 +2225,24 @@ fn view_cell_output_sends_the_png_the_engine_renders() {
     let view = |cell: &str| s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": NB, "cell_id": cell }), &Folder::Process, Instant::now());
     match view(X).unwrap() {
         Reply::Image { meta, png_base64 } => {
-            assert_eq!(meta, json!({ "cell_id": X, "shown_as": "text/plain", "png_bytes": 4 }));
+            assert_eq!(meta, json!({ "cell_id": X, "shown_as": "text/plain", "png_bytes": 4, "interactive": false, "message": super::tools::STATIC_PICTURE }));
             assert_eq!(png_base64, "iVBORw==");
         }
         Reply::Json(_) => panic!("no image"),
     }
     assert_eq!(view(Y).err(), Some(format!("ArgumentError: no_image::Cell {Y}: its output (text/plain) has no PNG rendering; read_cell shows it as text")));
+    // A plain image, such as Plots.jl's default backend draws, is said to be still (#407).
+    s.engine.open("44444444-0000-4000-8000-000000000004", "/n/g.jl", &[(X, "gr plot(x)")]);
+    match s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": "44444444-0000-4000-8000-000000000004", "cell_id": X }), &Folder::Process, Instant::now()).unwrap() {
+        Reply::Image { meta, .. } => assert_eq!((&meta["interactive"], &meta["message"]), (&json!(false), &json!(super::tools::STATIC_PICTURE))),
+        Reply::Json(_) => panic!("no image"),
+    }
+    // One that comes back as HTML wrapping its PNG, with no scripts or controls, is too.
+    s.engine.open("55555555-0000-4000-8000-000000000005", "/n/w.jl", &[(X, "wrapped plot(x)")]);
+    match s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": "55555555-0000-4000-8000-000000000005", "cell_id": X }), &Folder::Process, Instant::now()).unwrap() {
+        Reply::Image { meta, .. } => assert_eq!((&meta["shown_as"], &meta["interactive"], &meta["message"]), (&json!("text/html"), &json!(false), &json!(super::tools::STATIC_PICTURE))),
+        Reply::Json(_) => panic!("no image"),
+    }
     s.engine.with(NB, |nb| nb.cells[0].errored = true);
     assert_eq!(view(X).err(), Some(format!("ArgumentError: no_image::Cell {X} errored; read_cell shows the error")));
     // A cell that hasn't run yet has no output, which isn't a text output (trial 18).
@@ -2301,7 +2317,7 @@ fn view_cell_output_says_when_the_picture_came_from_the_html() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "widget(fig)")]);
     match s.notebooks.tool("", "view_cell_output", &json!({ "notebook_id": NB, "cell_id": X }), &Folder::Process, Instant::now()).unwrap() {
-        Reply::Image { meta, .. } => assert_eq!(meta, json!({ "cell_id": X, "shown_as": "text/html", "png_bytes": 4, "source": "embedded image" })),
+        Reply::Image { meta, .. } => assert_eq!(meta, json!({ "cell_id": X, "shown_as": "text/html", "png_bytes": 4, "source": "embedded image", "interactive": false, "message": super::tools::STATIC_PICTURE })),
         Reply::Json(_) => panic!("no image"),
     }
 }

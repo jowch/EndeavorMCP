@@ -625,7 +625,7 @@ fn where_a_dialog_asks_the_asking_step_says_so_and_the_rest_stays() {
     let chat = needs_install_result("lab", &info, "use_machine")["message"].as_str().unwrap().to_owned();
     assert!(chat.contains("Ask the user whether Endeavor may do that"), "{chat}");
     let dialog = asked_in_dialog(&chat);
-    assert!(!dialog.contains("Ask the user") && dialog.contains("in a dialog") && dialog.contains("`use_machine` again with machine \"lab\"") && dialog.contains("`install: true` now; don't ask in the chat first. Nothing was installed on lab."), "{dialog}");
+    assert!(!dialog.contains("Ask the user") && dialog.contains("in a dialog") && dialog.contains("`use_machine` again with machine \"lab\"") && dialog.contains("`install: true` now, after one line telling the user that Endeavor is asking for their OK, and for what, in the same reply; don't ask in the chat. Nothing was installed on lab."), "{dialog}");
     assert_eq!(asked_in_dialog("Connected to lab."), "Connected to lab.");
     let question = install_question("lab", &info.items, "use_machine");
     assert_eq!(question, "Endeavor needs to install Endeavor's helper (about 20 MB, into /srv/e) on lab. The same yes lets Endeavor download its own Julia there if a notebook needs Julia and none is found. Install it now?");
