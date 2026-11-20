@@ -1,7 +1,8 @@
 {
-  "about": "A long analysis in one session: twelve messages from loading a 96-well growth plate to a written summary, with plots along the way. Measures what a real-sized session costs: requests, context at the end, and the largest replies. The soft checks say the analysis was done, so that a cheaper run after a change isn't only a lazier one: the failed well (C07), the contaminated one (E10) and the saturated reading (B03) were found, and the redo used the new window. Tags: new_notebook, plots, size, long.",
+  "about": "A long analysis in one session: twelve messages from loading a 96-well growth plate to a written summary, with plots along the way. Measures what a real-sized session costs: requests, context at the end, and the largest replies. The soft checks say the analysis was done, so that a cheaper run after a change isn't only a lazier one: the failed well (C07), the contaminated one (E10) and the saturated reading (B03) were found, and the redo used the new window. In Julia, each new package asks first (#397), and the harness says yes in Endeavor's dialog to whichever ones the agent picks (and to no other question), so the follow-ups that add one still run. The asked_user check applies only when a Julia run was held (the agent may pick Python). Tags: new_notebook, plots, size, long.",
   "checks": [
     { "check": "notebooks", "count": 1 },
+    { "check": "asked_user", "texts": ["Julia needs to install", "new to the notebook"], "when_reply": ["Julia has to install packages this notebook doesn't have yet"] },
     { "check": "no_errored_cells" },
     { "check": "code_contains", "texts": ["growth.csv"] },
     { "check": "called", "tool": "view_cell_output" },

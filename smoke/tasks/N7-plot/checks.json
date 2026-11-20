@@ -1,7 +1,8 @@
 {
-  "about": "A plot. The agent looks at the picture after drawing it and before it reports. Tags: plots, view_cell_output.",
+  "about": "A plot. The agent looks at the picture after drawing it and before it reports. Plots (or whichever plotting package the agent picks) is new to the notebook, so a Julia run asks first (#397); the harness says yes in Endeavor's dialog, as the user would, only to new plotting packages. The agent may pick Python instead, where nothing asks, so the asked_user check applies only when a Julia run was held for new packages. Tags: plots, view_cell_output, package install.",
   "checks": [
     { "check": "notebooks", "count": 1 },
+    { "check": "asked_user", "texts": ["Julia needs to install", "new to the notebook"], "when_reply": ["Julia has to install packages this notebook doesn't have yet"] },
     { "check": "no_errored_cells" },
     { "check": "called_after_last_run", "tool": "view_cell_output" },
     { "check": "called", "tool": "view_cell_output", "ok": true },

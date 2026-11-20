@@ -1,1 +1,1 @@
-{ "depot": "empty" }
+{ "depot": "empty", "dialog": { "new_packages": ["DataFrames", "PrettyTables"] } }

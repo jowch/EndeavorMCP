@@ -1,1 +1,1 @@
-{ "long": true, "minutes": 75 }
+{ "long": true, "minutes": 75, "dialog": { "new_packages": "any" } }

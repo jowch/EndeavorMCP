@@ -135,6 +135,10 @@ pub fn runtime_args(work: &Path) -> Vec<String> {
 pub fn runtime_env(work: &Path) -> Vec<(String, PathBuf)> {
     let mut env: Vec<(String, PathBuf)> = ["XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME"].iter().map(|k| (k.to_string(), work.join("home").join(k.to_lowercase()))).collect();
     let settings: Value = std::fs::read_to_string(work.join("settings.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    if settings["browser"] == true {
+        // Read only by a debug `endeavor`, which the runner builds: it adds each link it would open to the file.
+        env.push(("ENDEAVOR_TEST_BROWSER".to_owned(), work.join("browser.txt")));
+    }
     if settings["ssh"] == true {
         let f = crate::ssh::Folders::of(work);
         env.extend([("HOME".to_owned(), f.home), ("ENDEAVOR_TEST_ROOT".to_owned(), f.root), ("ENDEAVOR_TEST_STATE".to_owned(), f.state)]);
@@ -333,14 +337,18 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     let ssh = setup["ssh"] == true;
     let limit = setup["minutes"].as_u64().map_or(AGENT_LIMIT, |m| Duration::from_secs(m * 60));
     let mut problems_before: Vec<String> = Vec::new();
-    std::fs::write(work.join("settings.json"), json!({ "julia": julia, "r": r, "depot": depot, "ssh": ssh }).to_string()).unwrap();
+    // A stand-in browser that nobody clicks in (`"browser": true`): Endeavor's pages open, as links
+    // added to `browser.txt`, and go unanswered.
+    let browser = setup["browser"] == true;
+    std::fs::write(work.join("settings.json"), json!({ "julia": julia, "r": r, "depot": depot, "ssh": ssh, "browser": browser }).to_string()).unwrap();
     if task.join("inject.json").is_file() {
         std::fs::copy(task.join("inject.json"), work.join("inject.json")).unwrap();
     }
-    // The user's answer to Endeavor's own dialogs (`"dialog": "accept"` or `"decline"`). In `claude -p`
-    // no one sees a dialog, and Claude Code closes it at once unless a hook answers it.
-    if let Some(answer) = setup["dialog"].as_str()
-        && let Err(e) = answer_dialogs(work, &project, answer)
+    // The user's answer to Endeavor's own dialogs (`"dialog"`: `"accept"`, `"decline"`, or yes only to
+    // some new Julia packages). In `claude -p` no one sees a dialog, and Claude Code closes it at once
+    // unless a hook answers it.
+    if !setup["dialog"].is_null()
+        && let Err(e) = answer_dialogs(work, &project, exe, &setup["dialog"])
     {
         problems_before.push(format!("setting up the dialog's answer: {e}"));
     }
@@ -391,6 +399,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     }
     let turns_at = crate::log::turns(&work.join("mcp.jsonl"));
     let questions = crate::log::questions(&work.join("mcp.jsonl"));
+    let pages: Vec<String> = std::fs::read_to_string(work.join("browser.txt")).unwrap_or_default().lines().map(str::to_owned).collect();
 
     let (notebooks, read_error) = match read {
         Ok(n) => (n, None),
@@ -398,7 +407,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     };
     let wants_rerun = specs["checks"].as_array().into_iter().flatten().any(|c| c["check"] == "reproducible");
     let rerun = (wants_rerun && read_error.is_none()).then(|| rerun(&notebooks, task, work, &project, endeavor));
-    let ev = Evidence { calls: &calls, notebooks: &notebooks, agent_tools: &agent.tools, final_message: &agent.final_message, injections: &injections, rerun: rerun.as_ref(), turns: &turns_at, server_files: &server_files, questions: &questions };
+    let ev = Evidence { calls: &calls, notebooks: &notebooks, agent_tools: &agent.tools, final_message: &agent.final_message, injections: &injections, rerun: rerun.as_ref(), turns: &turns_at, server_files: &server_files, questions: &questions, pages: &pages };
     let outcomes: Vec<checks::Outcome> = specs["checks"].as_array().into_iter().flatten().map(|spec| checks::run(spec, &ev)).collect();
     if let Some(e) = &agent.problem {
         problems.push(e.clone());
@@ -428,6 +437,8 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
         "model": agent.model,
         "models_used": agent.models_used,
         "final_message": agent.final_message,
+        // What the harness answered for the user in Endeavor's dialogs, and why.
+        "dialogs": std::fs::read_to_string(work.join("dialogs.jsonl")).unwrap_or_default().lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).map(|d| json!({ "message": d["asked"]["message"], "answer": d["answer"], "why": d["why"] })).collect::<Vec<_>>(),
         "notebooks": notebooks_json(&notebooks),
         "rerun": rerun.as_ref().map(|r| r.as_ref().map_or_else(|e| json!(e), |n| notebooks_json(n))),
     })
@@ -764,21 +775,66 @@ fn naming(ps: &str, folders: &[String], own: u32) -> Vec<u32> {
         .collect()
 }
 
-/// A hook in the project's Claude settings that answers every MCP dialog with `answer`, and logs
-/// what it was asked to `dialogs.jsonl`.
-fn answer_dialogs(work: &Path, project: &Path, answer: &str) -> Result<(), String> {
-    if !matches!(answer, "accept" | "decline") {
-        return Err(format!("setup.json: dialog must be \"accept\" or \"decline\", not {answer:?}"));
+/// A hook in the project's Claude settings that answers Endeavor's dialogs (MCP elicitation) as the
+/// user, by running this binary's `dialog` (`dialog_hook`), which logs each question and its answer
+/// to `dialogs.jsonl`. `dialog` is `"accept"` or `"decline"` for every dialog, or
+/// `{ "new_packages": [...] }`: yes only to Julia's question about packages new to a notebook, when
+/// every package it names is one of those (or whatever it names, with `"any"`), and no to any other
+/// question.
+fn answer_dialogs(work: &Path, project: &Path, exe: &Path, dialog: &Value) -> Result<(), String> {
+    let valid = match dialog {
+        Value::String(answer) => matches!(answer.as_str(), "accept" | "decline"),
+        Value::Object(o) => o.len() == 1 && (o["new_packages"] == "any" || o["new_packages"].as_array().is_some_and(|p| !p.is_empty() && p.iter().all(Value::is_string))),
+        _ => false,
+    };
+    if !valid {
+        return Err(format!("setup.json: dialog must be \"accept\", \"decline\" or {{ \"new_packages\": [names] or \"any\" }}, not {dialog}"));
     }
-    let script = work.join("answer-dialog.sh");
-    let reply = json!({ "hookSpecificOutput": { "hookEventName": "Elicitation", "action": answer, "content": {} } });
-    let log = work.join("dialogs.jsonl");
-    std::fs::write(&script, format!("#!/bin/sh\ncat >> '{}'\necho >> '{}'\necho '{reply}'\n", log.display(), log.display())).map_err(|e| e.to_string())?;
+    std::fs::write(work.join("dialog.json"), dialog.to_string()).map_err(|e| e.to_string())?;
     let settings = project.join(".claude/settings.json");
     let mut current: Value = std::fs::read_to_string(&settings).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
-    current["hooks"]["Elicitation"] = json!([{ "hooks": [{ "type": "command", "command": format!("sh '{}'", script.display()) }] }]);
+    current["hooks"]["Elicitation"] = json!([{ "hooks": [{ "type": "command", "command": format!("'{}' dialog '{}'", exe.display(), work.display()) }] }]);
     std::fs::create_dir_all(project.join(".claude")).map_err(|e| e.to_string())?;
     std::fs::write(&settings, current.to_string()).map_err(|e| e.to_string())
+}
+
+/// `endeavor-smoke dialog WORK`, the hook `answer_dialogs` sets up: Claude Code's Elicitation hook
+/// input on stdin, the answer on stdout.
+pub fn dialog_hook(args: &[String]) -> i32 {
+    let Some(work) = args.first().map(PathBuf::from) else {
+        eprintln!("usage: endeavor-smoke dialog WORK");
+        return 2;
+    };
+    let mut input = String::new();
+    let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+    let asked: Value = serde_json::from_str(&input).unwrap_or_else(|_| json!(input));
+    let policy: Value = std::fs::read_to_string(work.join("dialog.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let (answer, why) = dialog_answer(&policy, asked["message"].as_str().unwrap_or_default());
+    use std::io::Write;
+    if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(work.join("dialogs.jsonl")) {
+        let _ = writeln!(log, "{}", json!({ "asked": asked, "answer": answer, "why": why }));
+    }
+    println!("{}", json!({ "hookSpecificOutput": { "hookEventName": "Elicitation", "action": answer, "content": {} } }));
+    0
+}
+
+/// How the user answers the dialog that asks `message`, and why. With `new_packages`, the user says
+/// yes only to the question the front asks before Julia installs packages new to a notebook
+/// (`Consent::download_question`: "Julia needs to install A, B, new to the notebook ..."), and only
+/// when it names nothing else; everything else, an R download or a server's helper included, gets a no.
+fn dialog_answer(policy: &Value, message: &str) -> (&'static str, String) {
+    if let Some(answer) = policy.as_str() {
+        return (if answer == "accept" { "accept" } else { "decline" }, format!("the task answers every dialog with {answer}"));
+    }
+    let allowed: Vec<&str> = policy["new_packages"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let Some((names, _)) = message.strip_prefix("Julia needs to install ").and_then(|rest| rest.split_once(", new to the notebook ")) else {
+        return ("decline", "not a question about new Julia packages".to_owned());
+    };
+    if policy["new_packages"] == "any" {
+        return ("accept", format!("new Julia packages, any the agent picks: {names}"));
+    }
+    let others: Vec<&str> = names.split(", ").filter(|n| !allowed.contains(n)).collect();
+    if others.is_empty() { ("accept", format!("new Julia packages the task allows: {names}")) } else { ("decline", format!("packages the task doesn't allow: {}", others.join(", "))) }
 }
 
 fn stop_runtime(endeavor: &Path, work: &Path) {
@@ -992,5 +1048,40 @@ mod tests {
         let md = summary_md(&json!({ "commit": "c", "agent": "a", "models": [], "tasks": [failing] }));
         assert!(md.contains("| R1 | failing | 0/0 |") && md.contains("no R here"), "{md}");
         assert!(!have_r("/no/such/Rscript"));
+    }
+
+    #[test]
+    fn the_user_says_yes_only_to_the_new_julia_packages_the_task_allows() {
+        let policy = json!({ "new_packages": ["Plots", "PlotlyJS"] });
+        let ask = |names: &str| format!("Julia needs to install {names}, new to the notebook /p/plot.jl, before its cells can run. Install it now?");
+        assert_eq!(super::dialog_answer(&policy, &ask("Plots")).0, "accept");
+        assert_eq!(super::dialog_answer(&policy, &ask("PlotlyJS, Plots")).0, "accept");
+        let (answer, why) = super::dialog_answer(&policy, &ask("Plots, Makie"));
+        assert!(answer == "decline" && why.contains("Makie") && !why.contains("Plots"), "{why}");
+        assert_eq!(super::dialog_answer(&policy, "R needs to download pkg (2 GB) before the cells of the notebook /p/a.R can run. Download it now?").0, "decline", "not an R download");
+        assert_eq!(super::dialog_answer(&policy, "Endeavor needs to install Endeavor's helper (about 20 MB) on lab. Install it now?").0, "decline", "nor a server's helper");
+        let any = json!({ "new_packages": "any" });
+        assert_eq!(super::dialog_answer(&any, &ask("Optim, DataInterpolations")).0, "accept");
+        assert_eq!(super::dialog_answer(&any, "R needs to download pkg (2 GB) before the cells of the notebook /p/a.R can run. Download it now?").0, "decline", "any package, but still only Julia's new-package question");
+        assert_eq!(super::dialog_answer(&any, "Endeavor needs to install Endeavor's helper (about 20 MB) on lab. Install it now?").0, "decline");
+        assert_eq!(super::dialog_answer(&json!("accept"), "Endeavor needs to install Endeavor's helper on lab. Install it now?").0, "accept");
+        assert_eq!(super::dialog_answer(&json!("decline"), &ask("Plots")).0, "decline");
+    }
+
+    #[test]
+    fn a_dialog_answer_must_be_one_the_runner_knows() {
+        let work = std::env::temp_dir().join(format!("smoke-dialog-test-{}", std::process::id()));
+        let project = work.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let exe = Path::new("/bin/endeavor-smoke");
+        for bad in [json!("maybe"), json!({ "new_packages": [] }), json!({ "new_packages": "Plots" }), json!({ "new_packages": "all" }), json!({ "new_packages": ["Plots"], "also": 1 }), json!(true)] {
+            assert!(super::answer_dialogs(&work, &project, exe, &bad).is_err(), "{bad}");
+        }
+        super::answer_dialogs(&work, &project, exe, &json!({ "new_packages": ["Plots"] })).unwrap();
+        let settings: Value = serde_json::from_str(&std::fs::read_to_string(project.join(".claude/settings.json")).unwrap()).unwrap();
+        let command = settings["hooks"]["Elicitation"][0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(command.starts_with("'/bin/endeavor-smoke' dialog '"), "{command}");
+        assert_eq!(std::fs::read_to_string(work.join("dialog.json")).unwrap(), r#"{"new_packages":["Plots"]}"#);
+        let _ = std::fs::remove_dir_all(&work);
     }
 }
