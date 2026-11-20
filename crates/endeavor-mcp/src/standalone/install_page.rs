@@ -256,9 +256,13 @@ fn serve(stream: TcpStream, port: u16, shared: &Shared) -> std::io::Result<()> {
                 drop(state);
                 return page("400 Bad Request", "<h1>No answer</h1><p>Go back and click Install or Don't install.</p>".to_owned(), &mut out);
             };
-            // The first answer stands.
-            let first = entry.answer.is_none();
-            let answer = *entry.answer.get_or_insert(answer);
+            // The first answer stands, except that a no may become a yes: the user changed their mind,
+            // on the page, with its own button.
+            let first = entry.answer.is_none() || (entry.answer == Some(false) && answer);
+            if first {
+                entry.answer = Some(answer);
+            }
+            let answer = entry.answer.unwrap_or(answer);
             if first {
                 let question = entry.question.clone();
                 state.said.insert(question, (answer, Instant::now()));
@@ -280,7 +284,8 @@ fn said(install: bool) -> String {
     if install {
         "<h1>You said yes</h1><p>Endeavor installs it now. If your chat has stopped waiting, tell the agent you said yes, and it installs it on its next try. You can close this page.</p>".to_owned()
     } else {
-        "<h1>You said no</h1><p>Nothing is installed, and Endeavor won't ask about this again for 10 minutes. You can close this page.</p>".to_owned()
+        "<h1>You said no</h1><p>Nothing is installed, and Endeavor won't ask about this again for 10 minutes. You can close this page.</p>\
+<form method=\"post\"><p>Changed your mind? <button name=\"answer\" value=\"install\">Install</button></p></form>".to_owned()
     }
 }
 
@@ -408,9 +413,19 @@ mod tests {
             assert_eq!(ask(SETTLED), Clicked::Declined);
         }
         assert_eq!(opens(), 2);
+        // The user changes their mind with the page's own button: that is a yes.
+        assert!(post(&url, "install", None, Some(&origin), None).1.contains("You said yes"));
+        assert_eq!(ask(SETTLED), Clicked::Install);
+        assert!(post(&url, "decline", None, Some(&origin), None).1.contains("You said yes"), "a yes stands");
+        pages.shared.state.lock().unwrap().said.clear();
+        pages.shared.state.lock().unwrap().pages.clear();
+        assert_eq!(ask(SETTLED), Clicked::NotYet);
+        let url = opened.lock().unwrap()[2].clone();
+        assert!(post(&url, "decline", None, Some(&origin), None).0 == 200);
+        assert_eq!(opens(), 3);
         // Once that has run out, the question gets a new page.
         assert_eq!(ask(Duration::ZERO), Clicked::NotYet);
-        assert_eq!(opens(), 3);
+        assert_eq!(opens(), 4);
     }
 
     #[test]

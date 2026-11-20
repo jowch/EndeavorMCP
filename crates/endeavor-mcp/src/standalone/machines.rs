@@ -406,9 +406,9 @@ fn open_page(url: &str) -> bool {
 }
 
 /// Where no one can be asked: neither a dialog nor a page in the browser.
-const CANT_ASK: &str = "Endeavor can't install it from this app: it asks the user itself before it installs anything, and here it can neither show its dialog nor open a page in their browser. Setting `install` installs nothing here. Tell the user what it needs and where; to install it, they can ask for it from Claude Code in a terminal (not `claude -p`), which shows Endeavor's dialog, or from an app whose Endeavor runs on a computer that can open their browser.";
+const CANT_ASK: &str = "Endeavor can't install it from this app: it asks the user itself before it installs anything, and here it can neither show its dialog nor open a page in their browser. Setting `install` installs nothing here. Tell the user what it needs and where; to install it, they can ask for it from Claude Code in a terminal (not `claude -p`), which shows Endeavor's dialog, or from an app whose Endeavor runs on a computer that can open their browser. Don't work around it: don't make the notebook on this computer instead, and don't suggest commands or settings that these messages don't name; there are none that install it from here.";
 
-const CANT_ASK_ERROR: &str = "install_cant_ask::Endeavor can't install it from this app: it asks the user itself before it installs anything, and here it can neither show its dialog nor open a page in their browser. Nothing was installed, and calling again won't install it. Tell the user what it needs and where; to install it, they can ask for it from Claude Code in a terminal (not `claude -p`), which shows Endeavor's dialog, or from an app whose Endeavor runs on a computer that can open their browser.";
+const CANT_ASK_ERROR: &str = "install_cant_ask::Endeavor can't install it from this app: it asks the user itself before it installs anything, and here it can neither show its dialog nor open a page in their browser. Nothing was installed, and calling again won't install it. Tell the user what it needs and where; to install it, they can ask for it from Claude Code in a terminal (not `claude -p`), which shows Endeavor's dialog, or from an app whose Endeavor runs on a computer that can open their browser. Don't work around it: don't make the notebook on this computer instead, and don't suggest commands or settings that these messages don't name; there are none that install it from here.";
 
 /// A machine tool's `message` where no one can be asked: its asking step says so instead.
 fn cant_ask(text: &str) -> String {
@@ -1195,8 +1195,8 @@ impl Relay {
         Err(match clicked {
             Clicked::Install => return Ok(true),
             Clicked::Dropped => return Ok(false),
-            Clicked::Declined => format!("install_declined::The user clicked Don't install on Endeavor's page in their browser, so nothing was installed. Endeavor won't ask them about it again for 10 minutes: until then, {again} with `install: true` gets this same answer. Tell the user, and don't call again unless they ask for it."),
-            Clicked::NotYet => format!("install_not_answered::Endeavor opened a page in the user's browser that names what it would install, and it installs it only once they click Install there. They haven't answered yet, so nothing was installed. Tell the user to answer that page, and end your reply. Once they say they clicked Install, call {again} with `install: true`, and it installs without asking again."),
+            Clicked::Declined => format!("install_declined::The user clicked Don't install on Endeavor's page in their browser, so nothing was installed. Endeavor won't ask them about it again for 10 minutes: until then, {again} with `install: true` gets this same answer. Tell the user, and don't call again unless they ask for it. If they change their mind, the page they answered has an Install button: once they say they clicked it, call {again} with `install: true`."),
+            Clicked::NotYet => format!("install_not_answered::Endeavor opened a page in the user's browser that names what it would install, and it installs it only once they click Install there. They haven't answered yet, so nothing was installed. Tell the user to answer that page, and end your reply. Once they say they clicked Install, call {again} with `install: true`, and it installs without asking again: their click holds for 10 minutes."),
             Clicked::NoBrowser => CANT_ASK_ERROR.to_owned(),
         })
     }

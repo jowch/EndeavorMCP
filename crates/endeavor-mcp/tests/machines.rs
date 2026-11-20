@@ -2308,7 +2308,7 @@ fn without_a_dialog_or_a_browser_nothing_is_installed() {
     let message = text(&first);
     assert!(first["state"] == "needs_install" && message.contains("can't install it from this app") && message.contains("MB") && !message.contains("Ask the user"), "{first}");
     let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
-    assert!(failed && said["error"] == "install_cant_ask" && text(&said).contains("calling again won't install it"), "{said}");
+    assert!(failed && said["error"] == "install_cant_ask" && text(&said).contains("calling again won't install it") && text(&said).contains("don't make the notebook on this computer instead"), "{said}");
     assert!(!place.dir.join("root").exists(), "nothing was installed");
 }
 

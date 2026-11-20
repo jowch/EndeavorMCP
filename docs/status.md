@@ -36,8 +36,9 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   in the user's browser (`standalone/install_page.rs`, on 127.0.0.1 behind a
   one-time secret that never reaches the agent) that names what it would
   install, and installs only once they click Install. Click and install fit
-  in 55 s (Codex gives a tool call 60 s); a later call finds the click, and a
-  yes holds for the same question for 10 minutes. A no holds as long, without
+  in 55 s (Codex gives a tool call 60 s), so the call waits 35 s for the
+  click; a later call finds it, and a yes holds for the same question for 10
+  minutes. A no can become a yes with the answered page's own button. A no holds as long, without
   a new page, and an unanswered page opens again at most once, so an agent
   that keeps calling can't wear the user down. A look without `install` opens
   no page. Without a browser to open (a front over ssh or with no display),
