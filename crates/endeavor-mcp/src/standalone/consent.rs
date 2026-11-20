@@ -201,8 +201,10 @@ impl Consent {
     /// and on `Err` installs nothing, with the `kind::message` it fails with.
     pub(super) fn ask_install(&self, call: &Value, question: &str, again: &str, write: &dyn Fn(&str)) -> Result<bool, String> {
         Err(match self.question(call, Some(question), write) {
-            Answer::Yes | Answer::Unasked => return Ok(true),
+            Answer::Yes => return Ok(true),
             Answer::Dropped => return Ok(false),
+            // Never a yes for the user: the client stopped saying it can show a form since the caller looked.
+            Answer::Unasked => "install_not_answered::Endeavor couldn't ask the user in a dialog, so nothing was installed. Ask the user in the chat; if they want it, call again with `install: true`.".to_owned(),
             Answer::Declined => format!("install_declined::The user said no in Endeavor's install dialog, which the app they talk to you in showed, so nothing was installed. Tell the user; call {again} with `install: true` only if they ask for it."),
             Answer::Closed => format!("install_not_answered::The user closed Endeavor's install dialog without answering. That dialog was in the app they talk to you in, and it is gone now. Nothing was installed. Ask the user in the chat whether Endeavor may install it; if they say yes, call {again} with `install: true`, and the same dialog asks them once more."),
             Answer::TimedOut => format!("install_not_answered::Endeavor asked the user in a dialog in the app they talk to you in and got no answer, so nothing was installed. Ask the user in the chat; if they want it, call {again} with `install: true`, and it asks them once more."),
@@ -404,6 +406,10 @@ mod tests {
         assert!(no.as_ref().is_err_and(|e| e.starts_with("install_declined::") && e.contains("`add_machine` again with `install: true` only if they ask")), "{no:?}");
         let (closed, _) = ask(json!({ "action": "cancel" }));
         assert!(closed.as_ref().is_err_and(|e| e.starts_with("install_not_answered::")), "{closed:?}");
+        // A client that no longer says it can show a form is never taken as a yes.
+        consent.learn_client(&initialize(Value::Null));
+        let unasked = consent.ask_install(&call(), "Install it now?", "`add_machine` again", &|_| panic!("nothing is sent"));
+        assert!(unasked.as_ref().is_err_and(|e| e.starts_with("install_not_answered::")), "{unasked:?}");
     }
 
     #[test]
