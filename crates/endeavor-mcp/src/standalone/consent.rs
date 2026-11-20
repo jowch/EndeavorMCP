@@ -69,6 +69,11 @@ const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that t
 /// page in their browser instead (#388).
 const ASKED_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what downloads and its size, and nothing downloads unless they click Install there. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or haven't answered yet, the call fails with `download_declined` or `download_not_answered`.";
 
+/// The start of the answer when the user asks again after a no on the page.
+pub(super) const HELD_NO: &str = "The user already clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, less than 10 minutes ago, so nothing was installed, and ";
+/// What a user who changed their mind after a no on the page can do.
+pub(super) const CHANGED_MIND: &str = "If they want it now, the only way is the Install button under \"Changed your mind?\" on that same page, if it is still open in their browser: tell them that once, plainly, and call again once they say they clicked it. Don't invent another way.";
+
 /// The same where no one can be asked: no dialog, and no browser to open.
 const CANT_ASK: &str = "Endeavor can't ask the user from this app (no dialog, and no browser it can open), so calling it downloads nothing: tell the user what would download and its size, and that they can approve it with the button on the notebook's page. Its link is the notebook's browser_url from open_notebook or list_notebooks; where that page is on another computer, the note that came with it says how to reach it.";
 
@@ -280,6 +285,8 @@ impl Consent {
         };
         // A yes to a question that can't say what downloads is for this call only.
         let hold = matches!(waiting, Waiting::Asking { .. });
+        // A no the user gave on an earlier call: the agent is asking again, so the user wants it now.
+        let again_after_no = page && pages.held(&question);
         let clicked = if page { pages.ask(&question, hold, wait, &|| self.cancelled(call) || self.dialog_answered(call), open) } else { Clicked::NoBrowser };
         if let Some(asked) = self.download_answer_after_page(call, matches!(clicked, Clicked::Install | Clicked::Declined), write) {
             pages.retire(&question);
@@ -292,7 +299,8 @@ impl Consent {
         let why = match clicked {
             Clicked::Install => return Asked::Yes,
             Clicked::Dropped => return Asked::Dropped,
-            Clicked::Declined => "download_declined::The user clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, so nothing downloads and the cells that need it stay queued. That page is answered: their no stands, and Endeavor won't ask them again for 10 minutes, so calling approve_install again until then gets this same answer. Tell the user plainly that nothing was downloaded, and stop. Don't ask them to reconsider, don't send them back to the page, and don't call approve_install again unless they ask for the download themselves. Endeavor asks again only after those 10 minutes, and only if the user then asks for the download.",
+            Clicked::Declined if again_after_no => return Asked::No(tool_error(&format!("download_declined::The user already clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, less than 10 minutes ago, so nothing downloads, the cells that need it stay queued, and calling approve_install gets this same answer until those 10 minutes pass. {}", CHANGED_MIND), false)),
+            Clicked::Declined => "download_declined::The user clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, so nothing downloads and the cells that need it stay queued. Their no stands for 10 minutes: until then, calling approve_install gets this same answer. In your reply, say plainly that nothing was downloaded, and stop there. Don't mention the page, the browser or a button, don't ask them to reconsider, and don't call approve_install again unless they ask for the download themselves. After the 10 minutes, a new approve_install call asks them again.",
             Clicked::NotYet => "download_not_answered::Endeavor opened a web page (not a dialog) in the user's browser that names what downloads and its size, and nothing downloads until they click Install there. They haven't answered yet, so nothing downloads and the cells that need it stay queued. Tell the user that a web page is open in their browser and to answer it there (don't call it a dialog), and end your reply. Once they say they clicked Install, call approve_install again: their click holds for 10 minutes.",
             Clicked::NoBrowser => DOWNLOAD_CANT_ASK,
         };
