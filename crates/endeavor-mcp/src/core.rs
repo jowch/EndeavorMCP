@@ -2813,9 +2813,9 @@ mod tests {
         for straight in ["", "X-Endeavor-Client: plugin\r\n", "X-Endeavor-Client: plugin\r\nX-Endeavor-Consent: yes\r\n"] {
             let refused = mcp_post(port, straight, &approve);
             assert_eq!(refused["result"]["isError"], true, "{refused}");
-            assert!(text(&refused).contains("\"download_cant_ask\"") && text(&refused).contains("browser_url"), "{refused}");
+            assert!(text(&refused).contains("\"download_cant_ask\"") && text(&refused).contains("`endeavor mcp`") && !text(&refused).contains("browser_url"), "{refused}");
             let tools = mcp_post(port, straight, &list);
-            assert!(description(&tools).contains("downloads nothing") && !description(&tools).contains(crate::mcp::ASK_IN_CHAT), "{tools}");
+            assert!(description(&tools).contains("can't be approved here") && !description(&tools).contains(crate::mcp::ASK_IN_CHAT), "{tools}");
             // No machine tools there, so no `install: true` either (#387 is the front's).
             assert!(!tools["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "add_machine"), "{tools}");
         }
