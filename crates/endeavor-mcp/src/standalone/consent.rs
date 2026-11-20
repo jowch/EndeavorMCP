@@ -27,7 +27,7 @@ const CANCELLED: &str = "cancelled";
 
 /// What `approve_install`'s description says of the user's yes where no dialog follows: the agent
 /// asks in the chat.
-const ASK_IN_CHAT: &str = "It doesn't ask the user: calling it is the user's yes. Ask them first, end your reply, and call it only once they have said yes in a later message; never on your own.";
+use crate::mcp::ASK_IN_CHAT;
 
 /// The same where the front asks the user itself: asking in the chat too would have them say yes twice.
 const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what downloads and its size, and nothing downloads unless they say yes there or with the button on the notebook's page. Tell the user it needs their OK, then call it; don't ask in the chat first. If they say no or close the dialog, the call fails with `download_declined` or `download_not_answered`.";

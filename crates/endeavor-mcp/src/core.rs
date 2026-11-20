@@ -2786,6 +2786,45 @@ mod tests {
         }
     }
 
+    /// POST `body` to the runtime's `/mcp` with `headers`, and the JSON-RPC reply.
+    fn mcp_post(port: u16, headers: &str, body: &Value) -> Value {
+        use std::io::Read;
+        let body = crate::mcp::to_json(body);
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(stream, "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nConnection: close\r\nX-Endeavor-Session: s1\r\n{headers}Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        let start = reply.find("{\"").unwrap_or_else(|| panic!("{reply}"));
+        let end = reply.rfind('}').unwrap();
+        serde_json::from_str(&reply[start..=end]).unwrap_or_else(|_| panic!("{reply}"))
+    }
+
+    #[test]
+    fn a_client_straight_on_the_port_cant_approve_a_download_itself() {
+        // `serve` gives agents the runtime's own /mcp: no front asks the user there, so the agent's
+        // call would be the user's yes (#391). The front says it asks; the app asks with its card.
+        let port = serving(None);
+        let approve = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "approve_install", "arguments": { "notebook_id": "1b2c3d4e-0000-4000-8000-000000000001" } } });
+        let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+        let text = |reply: &Value| reply["result"]["content"][0]["text"].as_str().unwrap_or_default().to_owned();
+        let description = |reply: &Value| reply["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "approve_install").unwrap()["description"].as_str().unwrap().to_owned();
+        for straight in ["X-Endeavor-Client: plugin\r\n", "X-Endeavor-Client: plugin\r\nX-Endeavor-Consent: yes\r\n"] {
+            let refused = mcp_post(port, straight, &approve);
+            assert_eq!(refused["result"]["isError"], true, "{refused}");
+            assert!(text(&refused).contains("\"download_cant_ask\"") && text(&refused).contains("browser_url"), "{refused}");
+            let tools = mcp_post(port, straight, &list);
+            assert!(description(&tools).contains("downloads nothing") && !description(&tools).contains(crate::mcp::ASK_IN_CHAT), "{tools}");
+            // No machine tools there, so no `install: true` either (#387 is the front's).
+            assert!(!tools["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "add_machine"), "{tools}");
+        }
+        // The front, which asks the user itself, and the app, which holds it on its card, reach the notebook.
+        for asked in ["X-Endeavor-Client: plugin\r\nX-Endeavor-Consent: front\r\n", "X-Endeavor-Client: app\r\n"] {
+            let reply = mcp_post(port, asked, &approve);
+            assert!(!text(&reply).contains("download_cant_ask"), "{asked}: {reply}");
+            assert!(description(&mcp_post(port, asked, &list)).contains(crate::mcp::ASK_IN_CHAT), "{asked}");
+        }
+    }
+
     #[test]
     fn bare_ember_redirects_and_ember_not_running_is_unavailable() {
         let port = serving(None);

@@ -256,7 +256,25 @@ pub struct Caller {
     /// says which (`app` or `plugin`); a caller that doesn't say is taken as the runtime's starter was, so
     /// the app and the plugin can share one runtime and each still gets its own answers (#110).
     pub app: bool,
+    /// The caller is a front that asks the user itself before it passes `approve_install` on
+    /// (`X-Endeavor-Consent: front`): in a dialog, or on a page in their browser (#285, #389).
+    pub consent: bool,
 }
+
+/// `approve_install`'s description, where the agent's call is the user's yes: the agent asks in the
+/// chat. The front swaps it for its own words (`standalone::consent`); a caller that reaches the
+/// runtime with no one to ask gets `NO_ONE_ASKS` (#391). A test checks notebook_tools.json says it.
+pub(crate) const ASK_IN_CHAT: &str = "It doesn't ask the user: calling it is the user's yes. Ask them first, end your reply, and call it only once they have said yes in a later message; never on your own.";
+
+/// `approve_install`'s description for a caller that no one asks for: a client connected to `serve`
+/// over HTTP, with no front between them (#391).
+const NO_ONE_ASKS: &str = "Endeavor can't ask the user over this connection (a client connected straight to `endeavor serve`), so calling it downloads nothing: tell the user what would download and its size, and that they can approve it with the button on the notebook's page. Its link is the notebook's browser_url from open_notebook or list_notebooks.";
+
+/// The runtime's asking step (`notebooks::ASK_STEP`) for such a caller.
+const ASK_STEP_NO_ONE: &str = "Endeavor can't ask the user over this connection, so approve_install downloads nothing here: tell the user what would download and its size, and that they can approve it with the button on the notebook's page, then end your reply. Its link is the notebook's browser_url from open_notebook or list_notebooks.";
+
+/// What `approve_install` answers such a caller: nothing downloads.
+const NO_ONE_ASKS_ERROR: &str = "download_cant_ask::Endeavor can't ask the user over this connection: this client is connected straight to `endeavor serve`, which can neither show Endeavor's dialog nor open a page in their browser. So nothing downloads, and calling approve_install again won't download it. Tell the user what would download and its size, and that they can approve it with the button on the notebook's page: its link is the notebook's browser_url from open_notebook or list_notebooks. Don't work around it.";
 
 /// A name that goes in a header or a message: printable characters only,
 /// trimmed, at most `LABEL_MAX` of them. None if nothing is left.
@@ -280,8 +298,24 @@ impl Caller {
             "plugin" => false,
             _ => app_runtime,
         };
-        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false, several, app }
+        let consent = header("X-Endeavor-Consent") == "front";
+        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false, several, app, consent }
     }
+
+    /// No one asks the user before this caller's `approve_install`: not the app (its card), not a
+    /// front (its dialog or page). Its call alone would be the yes, so it is refused (#391).
+    fn no_one_asks(&self) -> bool {
+        !self.app && !self.front && !self.consent
+    }
+}
+
+/// `reply`, a reply to a caller that no one asks for (`Caller::no_one_asks`), with the words that
+/// would have the agent ask in the chat and then approve saying that it can't approve here.
+fn no_one_asks_said(reply: String) -> String {
+    if !reply.contains(ASK_IN_CHAT) && !reply.contains(crate::notebooks::ASK_STEP) {
+        return reply;
+    }
+    reply.replace(ASK_IN_CHAT, NO_ONE_ASKS).replace(crate::notebooks::ASK_STEP, ASK_STEP_NO_ONE)
 }
 
 impl Bridge {
@@ -479,7 +513,11 @@ impl Bridge {
         {
             caller.host = host;
         }
-        post(request, reader, client, request.keeps_alive(), caller.owner.is_empty(), |message, gone| self.dispatch(message, &caller, gone))
+        let no_one_asks = caller.no_one_asks();
+        post(request, reader, client, request.keeps_alive(), caller.owner.is_empty(), |message, gone| {
+            let reply = self.dispatch(message, &caller, gone);
+            if no_one_asks { reply.map(no_one_asks_said) } else { reply }
+        })
     }
 
     /// The reply to one JSON-RPC message, if it gets one. `gone`, called
@@ -730,6 +768,9 @@ impl Bridge {
 
     /// Why a session may not call `tool`, as the error Julia raised for it.
     fn refusal(&self, caller: &Caller, tool: &str, arguments: &Value) -> Option<String> {
+        if tool == "approve_install" && caller.no_one_asks() {
+            return Some(NO_ONE_ASKS_ERROR.to_owned());
+        }
         if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
             return Some(host_tool_refusal(tool));
         }
@@ -1422,7 +1463,16 @@ mod tests {
             assert!(Caller::of(&head("X-Endeavor-Client: app\r\n"), app_runtime).app);
             assert!(!Caller::of(&head("X-Endeavor-Client: plugin\r\n"), app_runtime).app);
             assert_eq!(Caller::of(&head(""), app_runtime).app, app_runtime, "a caller that doesn't say is the starter's");
+            // No one asks before a plugin caller's approve_install unless it is a front that says it asks (#391).
+            assert!(Caller::of(&head("X-Endeavor-Client: plugin\r\n"), app_runtime).no_one_asks());
+            assert!(!Caller::of(&head("X-Endeavor-Client: plugin\r\nX-Endeavor-Consent: front\r\n"), app_runtime).no_one_asks());
+            assert!(!Caller::of(&head("X-Endeavor-Client: app\r\n"), app_runtime).no_one_asks());
         }
+        // Its replies say the notebook page's button is the way, not the chat.
+        let asking = to_json(&json!({ "text": format!("R has to download ALL. {} Don't call read_cell to wait.", notebooks::ASK_STEP) }));
+        let said = no_one_asks_said(asking);
+        assert!(said.contains(ASK_STEP_NO_ONE) && !said.contains(notebooks::ASK_STEP), "{said}");
+        assert_eq!(no_one_asks_said("ran".into()), "ran");
         let instructions = |app: bool| {
             let caller = Caller { app, ..Caller::default() };
             let reply = answer(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }), &caller, |_| json!(null)).unwrap();

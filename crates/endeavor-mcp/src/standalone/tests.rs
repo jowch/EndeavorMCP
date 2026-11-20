@@ -450,8 +450,8 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
     assert_eq!(body, r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"session_status","arguments":{}}}"#);
     let header = |name| head.header(name).unwrap_or("(none)");
     assert_eq!(
-        [header("Authorization"), header("X-Endeavor-Session"), header("X-Endeavor-Skills"), header("MCP-Protocol-Version"), header("Accept")],
-        ["Bearer t0k", "stdio-7", "plugin", "2025-03-26", "application/json, text/event-stream"]
+        [header("Authorization"), header("X-Endeavor-Session"), header("X-Endeavor-Skills"), header("MCP-Protocol-Version"), header("Accept"), header("X-Endeavor-Consent")],
+        ["Bearer t0k", "stdio-7", "plugin", "2025-03-26", "application/json, text/event-stream", "front"]
     );
     assert_eq!(head.target(), "/mcp");
 }
