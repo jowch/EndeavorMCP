@@ -1432,7 +1432,7 @@ impl Call<'_> {
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
         let key = format!("open {}", canonical_path(path).unwrap_or_else(|_| path.clone()));
         // A call made again while an open is under way gets that open, run as that one asked.
-        let (opened, run) = match self.nbs.open_waited("open", json!({ "path": path, "run": run }), key, self.run_wait(), &format!("Opening '{path}'")) {
+        let (opened, run) = match self.nbs.open_waited("open", json!({ "path": path, "run": run, "ask_new": self.nbs.asks_new_packages(self.owner), "timeout": TIMEOUT_SECONDS }), key, self.run_wait(), &format!("Opening '{path}'")) {
             Ok((opened, params)) => (opened, params["run"] == true),
             Err(error) if already_open(&error) => return self.join(path).unwrap_or(Err(error)),
             Err(error) => return Err(error),
@@ -1458,6 +1458,14 @@ impl Call<'_> {
         }
         let id = opened["notebook_id"].as_str().unwrap_or_default();
         self.nbs.opened_by(self.owner, opened["path"].as_str().unwrap_or_default(), id);
+        // The open's run waits for the user's OK to a package the file doesn't have (#397).
+        if run && opened["asking"].is_array()
+            && let Ok(nb) = self.nbs.snapshot(id)
+        {
+            result["packages"] = nb.packages.clone().unwrap_or_default();
+            result["message"] = json!(installing_message(&nb));
+            return Ok(result);
+        }
         // The open's run of the whole notebook is the session's, as allow_execution's is (#170): a
         // read or a waited submit waits for it (#331). Pluto marks every cell queued as it opens
         // and names no run, so the run goes on while one of its cells hasn't finished.
@@ -1610,7 +1618,7 @@ impl Call<'_> {
                 }));
             }
         }
-        let params = json!({ "notebook_id": id, "run": run, "timeout": TIMEOUT_SECONDS });
+        let params = json!({ "notebook_id": id, "run": run, "timeout": TIMEOUT_SECONDS, "ask_new": self.nbs.asks_new_packages(self.owner) });
         let why = "a new Julia process starts for it, and its packages may need installing";
         let (allowed, _) = self.nbs.waited("allow_execution", params, key, self.run_wait(), &format!("Starting the notebook is taking longer than one call waits: {why}"))?;
         let ran = allowed["ran"] == true;
@@ -1618,6 +1626,13 @@ impl Call<'_> {
             "notebook_id": id, "execution_allowed": true, "already_allowed": allowed["already_allowed"], "ran": ran,
             "process_status": allowed["process_status"],
         });
+        // Its run waits for the user's OK to a package the notebook doesn't have (#397).
+        if ran && allowed["asking"].is_array() {
+            let nb = self.notebook()?;
+            result["packages"] = nb.packages.clone().unwrap_or_default();
+            result["message"] = json!(installing_message(&nb));
+            return Ok(result);
+        }
         if ran {
             let nb = self.notebook()?;
             self.nbs.with_state(&nb.id, |state| state.prune(&nb));
@@ -2015,7 +2030,7 @@ fn asking_message(nb: &Snapshot) -> String {
         return format!(
             "Before these cells can run, Julia has to install packages this notebook doesn't have yet: {which}, with what they need. \
              A new package waits for the user's OK, so nothing is installing and the cells stay queued. {ASK_STEP} \
-             Don't call read_cell to wait: nothing changes until then. The user can also run the cell themselves on the notebook's page, which installs it. If they would rather not install them, use packages the notebook already has, and run again."
+             Don't call read_cell to wait: nothing changes until then. If they would rather not install them, use packages the notebook already has, and run again."
         );
     }
     let sized = |bytes: &Value| bytes.as_f64().map(|b| if b >= 1e9 { format!("{:.1} GB", b / 1e9) } else { format!("{:.0} MB", b / 1e6) });

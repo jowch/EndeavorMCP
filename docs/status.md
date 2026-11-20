@@ -63,7 +63,10 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   Pluto adds it (#397): its cells stay queued, `packages.step` is `asking`
   with `new`, and `approve_install` is the user's yes, asked about in the
   same dialog or page; its yes holds for those packages while the notebook
-  is open. Packages the notebook already has install as before. Runs in the
+  is open. Packages the notebook already has install as before. The same
+  gate holds when the notebook leaves safe preview (`allow_execution`) and
+  when `open_notebook` runs it, so a file with no environment of its own adds
+  nothing unasked. Runs in the
   app's Auto mode don't ask. A plugin client's own auto mode can't be seen
   from Endeavor (Claude Code doesn't tell an MCP server its permission
   mode), so those runs ask. The app's card for a Julia `approve_install`

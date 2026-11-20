@@ -264,7 +264,9 @@ impl Consent {
         Some(match waiting {
             Waiting::Nothing => return None,
             // A Julia notebook's run that would add packages it doesn't have yet (#397).
-            Waiting::Asking { download, name } if name.ends_with(".jl") => {
+            // A Julia notebook's new packages (#397), as the runtime marks them: the path may be
+            // only the id.
+            Waiting::Asking { download, name } if download["new"] == true => {
                 let names: Vec<&str> = download["packages"].as_array().into_iter().flatten().filter_map(|p| p["package"].as_str()).collect();
                 format!("Julia needs to install {}, new to the notebook {name}, before its cells can run. Install {} now?", names.join(", "), if names.len() == 1 { "it" } else { "them" })
             }
@@ -596,7 +598,11 @@ pub(super) fn waiting_in(listed: &str, notebook: &Value) -> Waiting {
     // The whole path: a yes is held by the question's words, so two notebooks with the same file
     // name in different folders must not read the same.
     let name = nb["path"].as_str().filter(|path| !path.is_empty()).map(str::to_owned);
-    Waiting::Asking { download: nb["packages"]["download"].clone(), name: name.unwrap_or(notebook) }
+    let mut download = nb["packages"]["download"].clone();
+    if nb["packages"]["new"] == true && download.is_object() {
+        download["new"] = true.into();
+    }
+    Waiting::Asking { download, name: name.unwrap_or(notebook) }
 }
 
 /// What a download lists, as the runtime's asking message says it: "ALL 1.44.0 (11 MB)", and the
@@ -1065,8 +1071,14 @@ mod tests {
     #[test]
     fn a_julia_notebooks_new_packages_are_asked_about_by_name() {
         // #397: no size, nothing to download in R's sense; the packages and the notebook.
-        let waiting = Waiting::Asking { download: json!({ "bytes": null, "packages": [{ "package": "Makie" }, { "package": "WGLMakie" }] }), name: "/data/plots.jl".to_owned() };
+        let packages = json!({ "step": "asking", "new": true, "download": { "bytes": null, "packages": [{ "package": "Makie" }, { "package": "WGLMakie" }] } });
+        let listed = |path: &str| json!({ "result": { "content": [{ "type": "text", "text": json!([{ "notebook_id": "00000000-0000-0000-0000-000000000397", "path": path, "execution_allowed": true, "packages": packages }]).to_string() }] } }).to_string();
+        let id = json!("00000000-0000-0000-0000-000000000397");
+        let waiting = waiting_in(&listed("/data/plots.jl"), &id);
         assert_eq!(Consent::download_question(&waiting).unwrap(), "Julia needs to install Makie, WGLMakie, new to the notebook /data/plots.jl, before its cells can run. Install them now?");
+        // Without its path, it is still Julia's question, naming the notebook by its id.
+        let question = Consent::download_question(&waiting_in(&listed(""), &id)).unwrap();
+        assert!(question.starts_with("Julia needs to install Makie, WGLMakie, new to the notebook 00000000-0000-0000-0000-000000000397,"), "{question}");
     }
 
     #[test]

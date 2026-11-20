@@ -882,6 +882,29 @@ end
             @test result("allow_execution", Dict("notebook_id" => previewed, "run" => false, "timeout" => 60)) ==
                   Dict("already_allowed" => true, "ran" => false, "process_status" => "ready")
 
+            # A file with no environment of its own: every package it uses is new, and neither leaving
+            # safe preview nor an open that runs it adds one unasked (#397).
+            function envless()
+                path = joinpath(mktempdir(), "envless.jl")
+                write(path, "### A Pluto.jl notebook ###\n# v0.20.0\n\nusing Markdown\nusing InteractiveUtils\n\n" *
+                    "# ╔═╡ 00000000-0000-0000-0000-000000000397\nusing Example\n\n" *
+                    "# ╔═╡ Cell order:\n# ╠═00000000-0000-0000-0000-000000000397\n")
+                return path
+            end
+            held = "00000000-0000-0000-0000-000000000397"
+            gated = result("open", Dict("path" => envless(), "run" => false))["notebook_id"]
+            allowed = result("allow_execution", Dict("notebook_id" => gated, "run" => true, "timeout" => 60, "ask_new" => true))
+            @test (allowed["ran"], allowed["asking"]) == (true, ["Example"])
+            gated_nb = EndeavorRuntime.standalone_session().notebooks[UUID(gated)]
+            @test gated_nb.cells_dict[UUID(held)].queued && result("snapshot", Dict("notebook_id" => gated))["packages"]["step"] == "asking"
+            @test adapter("shutdown", Dict("notebook_id" => gated)) == Dict("result" => Dict("safe_preview" => false))
+            opened = result("open", Dict("path" => envless(), "run" => true, "timeout" => 60, "ask_new" => true))
+            @test opened["asking"] == ["Example"]
+            opened_nb = EndeavorRuntime.standalone_session().notebooks[UUID(opened["notebook_id"])]
+            @test opened_nb.cells_dict[UUID(held)].queued && Pluto.will_run_code(opened_nb)
+            @test opened_nb.nbpkg_ctx === nothing || !haskey(Pluto.PkgCompat.project(opened_nb.nbpkg_ctx).dependencies, "Example")
+            adapter("shutdown", Dict("notebook_id" => opened["notebook_id"]))
+
             # Julia's own folder gone, as juliaup leaves the version it updated past: what would start a
             # process says why and what to do, before anything stops. The running process lives on.
             session = EndeavorRuntime.standalone_session()

@@ -511,6 +511,12 @@ impl Engine {
                     return Ok(json!({ "already_allowed": true, "ran": false, "process_status": "ready" }));
                 }
                 nb.safe_preview = false;
+                // Its run of every cell waits for the user's OK to a new package where the caller asks (#397).
+                if params["run"] == true && params["ask_new"] == true && nb.cells.iter().any(|c| c.code.contains("using Example")) {
+                    nb.cells.iter_mut().for_each(|c| c.queued = true);
+                    nb.packages = Some(json!({ "step": "asking", "new": true, "packages": ["Example"], "seconds": 0, "last_line": null, "download": { "bytes": null, "packages": [{ "package": "Example" }] } }));
+                    return Ok(json!({ "already_allowed": false, "ran": true, "asking": ["Example"], "process_status": "ready" }));
+                }
                 nb.starting = params["run"] == true;
                 let mut reply = json!({ "already_allowed": false, "ran": params["run"], "process_status": if params["run"] == true { "starting" } else { "ready" } });
                 // The run of every cell goes on while a cell in `linger()` runs, and is named, as the runtime's are.
@@ -3441,6 +3447,15 @@ fn a_julia_run_that_adds_a_package_asks_first_except_in_auto_mode() {
     assert!(ran.get("packages").is_none() && !ran.to_string().contains("asking"), "{ran}");
     s.notebooks.set_auto("8", false);
     assert!(s.notebooks.asks_new_packages("8"));
+
+    // Leaving safe preview runs every cell through the same gate: a file without its own
+    // environment, or one edited in the preview, adds nothing unasked.
+    s.engine.open("33333333-0000-4000-8000-000000000003", "/n/c.jl", &[(X, "using Example")]);
+    s.engine.with("33333333-0000-4000-8000-000000000003", |nb| nb.safe_preview = true);
+    let allowed = s.call("7", "allow_execution", json!({ "notebook_id": "33333333-0000-4000-8000-000000000003" })).unwrap();
+    assert!(allowed["message"].as_str().unwrap().contains("Julia has to install packages this notebook doesn't have yet: Example"), "{allowed}");
+    assert_eq!((&allowed["ran"], &allowed["packages"]["step"]), (&json!(true), &json!("asking")), "{allowed}");
+    assert!(allowed.get("run_warnings").is_none(), "nothing runs until the user says yes: {allowed}");
 }
 
 #[test]

@@ -234,12 +234,19 @@ it skips the cells queued after one Stop interrupts (#179: before, nothing was
 interrupted, and every cell ran).
 """
 function interrupt!(session, nb)
-    # Cells that wait for the user's OK to a new package stop waiting.
-    if _asking(nb) !== nothing
+    # Cells that wait for the user's OK to a new package stop waiting, and a cell that
+    # runs meanwhile is stopped as well (below).
+    asked = _asking(nb) !== nothing
+    if asked
         _forget_asking!(nb)
         _notify_browser(session, nb)
-        return Dict{String,Any}("interrupted" => true)
     end
+    stopped = _interrupt_run!(session, nb)
+    asked && (stopped["interrupted"] = true; delete!(stopped, "pending"))
+    return stopped
+end
+
+function _interrupt_run!(session, nb)
     task = get(Pluto.WorkspaceManager.active_workspaces, nb.notebook_id, nothing)
     if (task === nothing || !istaskdone(task)) && Pluto.will_run_code(nb) && any(_unfinished, nb.cells)
         # Pluto's run clears this when it ends.

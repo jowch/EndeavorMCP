@@ -288,8 +288,9 @@ end
 function _asking_step(nb)
     a = _asking(nb)
     a === nothing && return nothing
-    # The user ran a cell on the notebook's page, which added them, or the code changed so that
-    # nothing new is used: nothing waits for an OK any more.
+    # The packages were added another way, or the code changed so that nothing new is used:
+    # nothing waits for an OK any more. A snapshot releases the held cells then, on purpose, so an
+    # edit unblocks without another call; it costs a topology pass per snapshot while one asks.
     if isempty(new_packages(nb))
         _forget_asking!(nb)
         return nothing
@@ -486,7 +487,7 @@ end
 
 # Pluto's "Run notebook code" for a notebook in safe preview: restart its
 # process, then run every cell (`run`) or leave it to start on the next run.
-function allow_execution!(session, nb, run::Bool, timeout::Real)
+function allow_execution!(session, nb, run::Bool, timeout::Real; ask_new::Bool=false)
     ps = nb.process_status
     ps === Pluto.ProcessStatus.ready &&
         return Dict{String,Any}("already_allowed" => true, "ran" => false, "process_status" => string(ps))
@@ -496,6 +497,12 @@ function allow_execution!(session, nb, run::Bool, timeout::Real)
         "risky_source::Cannot allow execution for risky remote sources via MCP; ask the user to run it from the notebook itself",
     ))
     _require_julia()
+    return _leave_preview!(session, nb, run, timeout; ask_new)
+end
+
+# Out of safe preview: a new process, then every cell runs (`run`), through the
+# new-package gate when `ask_new` (#397), or it starts on the next run.
+function _leave_preview!(session, nb, run::Bool, timeout::Real; ask_new::Bool=false)
     nb.process_status = Pluto.ProcessStatus.waiting_to_restart
     session.options.evaluation.run_notebook_on_load && Pluto._report_business_cells_planned!(nb)
     _notify_browser(session, nb)
@@ -503,7 +510,7 @@ function allow_execution!(session, nb, run::Bool, timeout::Real)
     if run
         nb.process_status = Pluto.ProcessStatus.starting
         _notify_browser(session, nb)
-        ran = run_cells!(session, nb, collect(nb.cells); wait=false, timeout)
+        ran = run_cells!(session, nb, collect(nb.cells); wait=false, timeout, ask_new)
     else
         nb.process_status = Pluto.ProcessStatus.ready
         _notify_browser(session, nb)
@@ -511,6 +518,7 @@ function allow_execution!(session, nb, run::Bool, timeout::Real)
     result = Dict{String,Any}("already_allowed" => false, "ran" => run, "process_status" => string(nb.process_status))
     # The run it started, named as `run` names one, so the core can tell when it ends.
     run && haskey(ran, "run") && (result["run"] = ran["run"])
+    run && haskey(ran, "asking") && (result["asking"] = ran["asking"])
     return result
 end
 
@@ -630,7 +638,7 @@ function update_user_registries(; cooldown::Real = 3600, depots = DEPOT_PATH)
     return updated
 end
 
-function open_notebook(session, path::AbstractString, run::Bool)
+function open_notebook(session, path::AbstractString, run::Bool; ask_new::Bool=false, timeout::Real=60)
     # One already open says so (below), as it would with its Julia there.
     run && !_open_already(session, path) && _require_julia()
     try
@@ -638,14 +646,25 @@ function open_notebook(session, path::AbstractString, run::Bool)
     catch e
         @warn "Couldn't update the user's registries" exception = (e, catch_backtrace())
     end
+    gate = run && ask_new
     nb = try
-        Pluto.SessionActions.open(session, path; run_async = true, execution_allowed = run)
+        # Pluto's own run on open adds every package the file uses: where new ones ask (#397),
+        # it opens as a safe preview and leaves it through the gate. That open's load must be
+        # over first, or it finds the notebook allowed to run and adds them after all.
+        Pluto.SessionActions.open(session, path; run_async = !gate, execution_allowed = run && !gate)
     catch e
         # Printing this exception walks the whole Notebook and never finishes.
         e isa Pluto.SessionActions.NotebookIsRunningException || rethrow()
         throw(ArgumentError("notebook_already_open::'$path' is already open as notebook_id $(e.notebook.notebook_id); use that id"))
     end
-    return Dict{String,Any}("notebook_id" => string(nb.notebook_id), "path" => nb.path, "process_status" => string(nb.process_status))
+    opened = Dict{String,Any}("notebook_id" => string(nb.notebook_id), "path" => nb.path)
+    if gate
+        ran = _leave_preview!(session, nb, true, timeout; ask_new)
+        haskey(ran, "run") && (opened["run"] = ran["run"])
+        haskey(ran, "asking") && (opened["asking"] = ran["asking"])
+    end
+    opened["process_status"] = string(nb.process_status)
+    return opened
 end
 
 # A new notebook at `path`, else named as Pluto names them in `folder`, else in
@@ -679,7 +698,7 @@ render_text(session, nb, cell) = Dict{String,Any}("text" => _cell_text(session, 
 function adapter_call(session, method::AbstractString, params)
     session === nothing && throw(ArgumentError("pluto_not_running::Pluto is not running yet."))
     method == "status" && return session_status_dict()
-    method == "open" && return open_notebook(session, params["path"], params["run"])
+    method == "open" && return open_notebook(session, params["path"], params["run"]; ask_new=get(params, "ask_new", false), timeout=get(params, "timeout", 60))
     method == "new" && return new_notebook(session, get(params, "path", nothing), get(params, "folder", nothing))
     id = get(params, "notebook_id", nothing)
     if method == "snapshot" && id === nothing
@@ -696,7 +715,7 @@ function adapter_call(session, method::AbstractString, params)
     method == "approve_install" && return approve_install!(session, nb, get(params, "timeout", 30))
     method == "interrupt" && return interrupt!(session, nb)
     method == "restart" && return restart!(session, nb, params["timeout"]; ask_new=get(params, "ask_new", false))
-    method == "allow_execution" && return allow_execution!(session, nb, params["run"], params["timeout"])
+    method == "allow_execution" && return allow_execution!(session, nb, params["run"], params["timeout"]; ask_new=get(params, "ask_new", false))
     method == "move" && return move!(session, nb, params["path"])
     method == "render_text" && return render_text(session, nb, _adapter_cell(nb, params["cell_id"]))
     method == "render_png" && return render_png(session, nb, _adapter_cell(nb, params["cell_id"]))
