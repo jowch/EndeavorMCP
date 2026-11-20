@@ -75,13 +75,13 @@ pub(super) const HELD_NO: &str = "The user already clicked Don't install on a we
 pub(super) const CHANGED_MIND: &str = "If they want it now, the only way is the Install button under \"Changed your mind?\" on that same page, if it is still open in their browser: tell them that once, plainly, and call again once they say they clicked it. Don't invent another way.";
 
 /// The same where no one can be asked: no dialog, and no browser to open.
-const CANT_ASK: &str = "Endeavor can't ask the user from this app (no dialog, and no browser it can open), so it can't be approved here: calling it installs nothing, however often it is called. Tell the user what it would install and its size where known, that it needs their OK, and that this app can't ask them for it: they can approve it from the Endeavor app, by opening this notebook there, or from an app that can show Endeavor's dialog or open a page in their browser. Don't work around it.";
+const CANT_ASK: &str = "Endeavor can't ask the user from this app (no dialog, and no browser it can open), so it can't be approved here: calling it installs nothing, however often it is called. Tell the user what it would install and its size where known, that it needs their OK, and that this app can't ask them for it: they can approve it from the Endeavor app, by closing this notebook here and opening it there, or from an app that can show Endeavor's dialog or open a page in their browser. Don't work around it.";
 
 /// The runtime's asking step where Endeavor asks the user on a page in their browser.
 const ASK_STEP_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what it would install: tell the user it needs their OK, then call approve_install now; don't ask in the chat first.";
 
 /// The same where no one can be asked.
-const ASK_STEP_CANT: &str = "Endeavor can't ask the user from this app, so this can't be approved here: approve_install installs nothing. Tell the user what it would install and its size where known, that it needs their OK, and that this app can't ask them for it: they can approve it from the Endeavor app, by opening this notebook there, or from an app that can show Endeavor's dialog or open a page in their browser. Then end your reply.";
+const ASK_STEP_CANT: &str = "Endeavor can't ask the user from this app, so this can't be approved here: approve_install installs nothing. Tell the user what it would install and its size where known, that it needs their OK, and that this app can't ask them for it: they can approve it from the Endeavor app, by closing this notebook here and opening it there, or from an app that can show Endeavor's dialog or open a page in their browser. Then end your reply.";
 
 /// The runtime's asking step (`notebooks::ASK_STEP`) where the front asks the user itself.
 const ASK_STEP_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what it would install: tell the user it needs their OK, then call approve_install now; don't ask in the chat first.";
@@ -174,7 +174,7 @@ pub(super) enum Waiting {
 }
 
 /// Where the user can be asked about a download neither in a dialog nor on a page.
-const DOWNLOAD_CANT_ASK: &str = "download_cant_ask::Endeavor can't ask the user from this app: it can neither show its dialog nor open a page in their browser. So this can't be approved here: nothing is installed, and calling approve_install again won't change that. Tell the user what it would install and its size where known, that it needs their OK, and that this app can't ask them for it: they can approve it from the Endeavor app, by opening this notebook there, or from an app that can show Endeavor's dialog or open a page in their browser. Don't work around it, and don't send them to the notebook's page: it has no button for this.";
+const DOWNLOAD_CANT_ASK: &str = "download_cant_ask::Endeavor can't ask the user from this app: it can neither show its dialog nor open a page in their browser. So this can't be approved here: nothing is installed, and calling approve_install again won't change that. Tell the user what it would install and its size where known, that it needs their OK, and that this app can't ask them for it: they can approve it from the Endeavor app, by closing this notebook here and opening it there, or from an app that can show Endeavor's dialog or open a page in their browser. Don't work around it, and don't send them to the notebook's page: it has no button for this.";
 
 /// `approve_install`'s refusal where no one was asked: what passes on to the runtime is only ever
 /// the user's yes.
@@ -1011,7 +1011,7 @@ mod tests {
         assert!(matches!(ask(Waiting::Nothing, true), Asked::Unasked));
         // No browser: nothing downloads, and the agent hears where the user can approve it.
         let cant = error(ask(all(), false));
-        assert!(cant.contains("download_cant_ask") && cant.contains("opening this notebook there") && cant.contains("it has no button for this"), "{cant}");
+        assert!(cant.contains("download_cant_ask") && cant.contains("closing this notebook here and opening it there") && cant.contains("it has no button for this"), "{cant}");
         assert!(opened.lock().unwrap().is_empty());
         // A page names the download; unanswered, nothing downloads.
         let waiting = error(ask(all(), true));
