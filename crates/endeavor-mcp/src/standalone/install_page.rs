@@ -111,17 +111,22 @@ struct Page {
 impl Pages {
     /// Ask the user `question` on a page in their browser, or find their answer to it. Wait up to
     /// `wait` for the answer, and stop waiting once `cancelled` says so. `open` opens a link in the
-    /// user's browser, and says whether it could (`browser::open`).
-    pub(super) fn ask(&self, question: &str, wait: Duration, cancelled: &dyn Fn() -> bool, open: &dyn Fn(&str) -> bool) -> Clicked {
-        self.ask_settled(question, wait, settled(), cancelled, open)
+    /// user's browser, and says whether it could (`browser::open`). Without `hold`, a yes is for
+    /// this call only: a question too vague to stand for later calls (#389).
+    pub(super) fn ask(&self, question: &str, hold: bool, wait: Duration, cancelled: &dyn Fn() -> bool, open: &dyn Fn(&str) -> bool) -> Clicked {
+        self.ask_settled(question, hold, wait, settled(), cancelled, open)
     }
 
-    fn ask_settled(&self, question: &str, wait: Duration, settled: Duration, cancelled: &dyn Fn() -> bool, open: &dyn Fn(&str) -> bool) -> Clicked {
+    fn ask_settled(&self, question: &str, hold: bool, wait: Duration, settled: Duration, cancelled: &dyn Fn() -> bool, open: &dyn Fn(&str) -> bool) -> Clicked {
         let Some(port) = self.port() else { return Clicked::NoBrowser };
         let now = Instant::now();
         let mut state = self.shared.state.lock().unwrap();
         state.prune(settled);
         if let Some(answer) = state.answer(question) {
+            // Without `hold`, the next call uses up a yes.
+            if !hold && answer == Clicked::Install {
+                state.said.remove(question);
+            }
             return answer;
         }
         let found = state.pages.iter().find(|(_, page)| page.question == question && page.answer.is_none()).map(|(secret, _)| secret.clone());
@@ -150,6 +155,9 @@ impl Pages {
         let mut state = self.shared.state.lock().unwrap();
         loop {
             if let Some(answer) = state.answer(question) {
+                if !hold && answer == Clicked::Install {
+                    state.said.remove(question);
+                }
                 return answer;
             }
             if cancelled() {
@@ -349,14 +357,14 @@ mod tests {
         let opens = || opened.lock().unwrap().len();
         let question = "Endeavor needs to install <its helper> on lab. Install it now?";
         // Unanswered, the call says so, and nothing is a yes.
-        assert_eq!(pages.ask(question, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
+        assert_eq!(pages.ask(question, true, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
         let url = opened.lock().unwrap()[0].clone();
         let origin = &url[..url.find("/install/").unwrap()];
         let (status, shown) = get(&url);
         assert_eq!(status, 200);
         assert!(shown.contains("&lt;its helper&gt;") && shown.contains("value=\"install\""), "{shown}");
         // Asked again at once, the open page is used: no second tab.
-        assert_eq!(pages.ask(question, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
+        assert_eq!(pages.ask(question, true, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
         assert_eq!(opens(), 1);
         // A fetch alone, another host's name, another page's form, no origin at all, a cross-site
         // fetch, another secret or a bad answer answers nothing.
@@ -367,11 +375,11 @@ mod tests {
         assert_eq!(post(&url, "install", None, Some(origin), Some("cross-site")).0, 403);
         assert_eq!(post(&format!("{url}0"), "install", None, Some(origin), None).0, 404);
         assert_eq!(post(&url, "maybe", None, Some(origin), None).0, 400);
-        assert_eq!(pages.ask(question, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
+        assert_eq!(pages.ask(question, true, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
         // The button answers a call that waits, and one that waits on the same page with it.
         std::thread::scope(|s| {
-            let waiting = s.spawn(|| pages.ask(question, Duration::from_secs(20), &|| false, &open));
-            let also = s.spawn(|| pages.ask(question, Duration::from_secs(20), &|| false, &open));
+            let waiting = s.spawn(|| pages.ask(question, true, Duration::from_secs(20), &|| false, &open));
+            let also = s.spawn(|| pages.ask(question, true, Duration::from_secs(20), &|| false, &open));
             std::thread::sleep(Duration::from_millis(100));
             let (status, body) = post(&url, "install", None, Some(origin), Some("same-origin"));
             assert!(status == 200 && body.contains("You said yes"), "{body}");
@@ -379,11 +387,11 @@ mod tests {
         });
         // The yes holds for that question, so a call that stopped waiting before its install was
         // done isn't asked about again; and the first answer stands.
-        assert_eq!(pages.ask(question, Duration::from_millis(50), &|| false, &open), Clicked::Install);
+        assert_eq!(pages.ask(question, true, Duration::from_millis(50), &|| false, &open), Clicked::Install);
         assert!(post(&url, "decline", None, Some(origin), None).1.contains("You said yes"));
         assert_eq!(opens(), 1);
         // Another question is another page.
-        assert_eq!(pages.ask("Install R?", Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
+        assert_eq!(pages.ask("Install R?", true, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
         assert_eq!(opens(), 2);
     }
 
@@ -396,7 +404,7 @@ mod tests {
             true
         };
         let opens = || opened.lock().unwrap().len();
-        let ask = |settled: Duration| pages.ask_settled("Install it now?", Duration::from_millis(50), settled, &|| false, &open);
+        let ask = |settled: Duration| pages.ask_settled("Install it now?", true, Duration::from_millis(50), settled, &|| false, &open);
         // An unanswered page opens again once, a minute or more later, and not after that.
         assert_eq!(ask(SETTLED), Clicked::NotYet);
         age(&pages, "Install it now?");
@@ -431,8 +439,8 @@ mod tests {
     #[test]
     fn without_a_browser_no_one_is_asked_and_a_cancel_stops_the_wait() {
         let pages = Pages::default();
-        assert_eq!(pages.ask("Install it now?", Duration::from_secs(20), &|| false, &|_| false), Clicked::NoBrowser);
+        assert_eq!(pages.ask("Install it now?", true, Duration::from_secs(20), &|| false, &|_| false), Clicked::NoBrowser);
         assert!(pages.shared.state.lock().unwrap().pages.is_empty(), "no page is left to answer");
-        assert_eq!(pages.ask("Install it now?", Duration::from_secs(20), &|| true, &|_| true), Clicked::Dropped);
+        assert_eq!(pages.ask("Install it now?", true, Duration::from_secs(20), &|| true, &|_| true), Clicked::Dropped);
     }
 }

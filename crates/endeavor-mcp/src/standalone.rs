@@ -1245,15 +1245,27 @@ impl Relay {
                 self.write(&self.decorate(&message, tool.as_deref(), tool_failure(id, &message, &why)));
             }
         };
-        // Nothing downloads unless the user says yes to it themselves, where the client can ask them.
-        // Only a download that waits for an OK is asked about, with what the runtime says it is.
-        if tool.as_deref() == Some("approve_install") && id.is_some() && self.consent.can_ask() {
+        // Nothing downloads unless the user says yes to it themselves: in a dialog where the client
+        // can show one, else on a page in their browser (#388), else not at all. Only a download that
+        // waits for an OK is asked about, with what the runtime says it is.
+        if tool.as_deref() == Some("approve_install") && id.is_some() {
+            let began = Instant::now();
             self.consent.looking(&message);
             let waiting = self.waiting_download(&message["params"]["arguments"]["notebook_id"], deadline);
-            match self.consent.ask(&message, waiting, &|line| self.write(line)) {
+            let dialog = self.consent.can_ask();
+            let asked = if dialog {
+                self.consent.ask(&message, waiting, &|line| self.write(line))
+            } else {
+                // The click and the call after it within what a client gives a call (`machines::PAGE_CALL`).
+                let wait = machines::page_wait().min(machines::PAGE_CALL.saturating_sub(began.elapsed() + Duration::from_secs(10)));
+                self.consent.ask_on_page(&message, waiting, self.page_shows(), wait, &self.pages, &machines::open_page)
+            };
+            match asked {
                 consent::Asked::No(result) => return self.answer_call(&message, tool.as_deref(), result),
                 consent::Asked::Dropped => return,
-                consent::Asked::Yes => deadline = machines::Deadline::after(start_wait()),
+                // After a click, the call gets what's left of the client's budget for it.
+                consent::Asked::Yes if dialog => deadline = machines::Deadline::after(start_wait()),
+                consent::Asked::Yes => deadline = machines::Deadline::after(machines::PAGE_CALL.saturating_sub(began.elapsed()).max(machines::MIN_INSTALL)),
                 consent::Asked::Unasked => {}
             }
         }
@@ -1269,7 +1281,7 @@ impl Relay {
                 Err(unready) => return self.unready(&message, tool.as_deref(), unready),
             };
             let sink = |reply: String| {
-                let reply = if tool.as_deref().is_some_and(crate::views::is_view_tool) { reply } else { self.consent.reply_said(reply) };
+                let reply = if tool.as_deref().is_some_and(crate::views::is_view_tool) { reply } else { self.consent.reply_said(reply, self.page_shows()) };
                 self.write(&self.decorate(&message, tool.as_deref(), self.in_browser(&message, tool.as_deref(), &route, in_browser, reply)))
             };
             match self.post(&route, line, &sink) {
@@ -1291,7 +1303,7 @@ impl Relay {
         let route = match self.route(Need::Look, deadline) {
             Ok(route) => route,
             Err(unready) if unready.nothing_runs() => return consent::Waiting::Nothing,
-            Err(_) => return consent::Waiting::Unknown,
+            Err(_) => return consent::unknown(notebook),
         };
         let id = "endeavor-look";
         let look = to_json(&json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": "list_notebooks", "arguments": {} } }));
@@ -1302,9 +1314,9 @@ impl Relay {
             }
         };
         if self.post(&route, &look, &sink).is_err() {
-            return consent::Waiting::Unknown;
+            return consent::unknown(notebook);
         }
-        listed.into_inner().unwrap().map_or(consent::Waiting::Unknown, |listed| consent::waiting_in(&listed, notebook))
+        listed.into_inner().unwrap().map_or_else(|| consent::unknown(notebook), |listed| consent::waiting_in(&listed, notebook))
     }
 
     /// A runtime's reply to the agent's call, with no token in its `browser_url` (a runtime from
