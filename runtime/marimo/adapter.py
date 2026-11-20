@@ -359,34 +359,43 @@ class Notebook:
 
         marimo numbers a file's cells by position when it loads it, so after a preview edit that added,
         deleted or moved a cell, its ids differ from the ones the agent holds (and the core's staged
-        runs name). Each cell whose id differs is made again under the preview's id, in one transaction:
-        nothing runs, since nothing has. If the file changed since the preview wrote it, marimo's ids stay.
+        runs name). One transaction puts them back: a cell id only marimo has is deleted, one only the
+        preview has is created, one both have takes the preview's code, name and config, and the order
+        becomes the preview's. No id is deleted and created again, because marimo drops a create whose
+        id the same transaction deleted. Nothing runs, since nothing has. If the file changed since the
+        preview wrote it, or marimo refuses, marimo's ids stay and the tools hear the topology changed.
         """
         ids = list(self.order)
         if [c for c, _ in preview] == ids:
             return
-        if [cell["code"] for _, cell in preview] != [self.cells[c]["code"] for c in ids]:
+        try:
+            if [cell["code"] for _, cell in preview] != [self.cells[c]["code"] for c in ids]:
+                raise RuntimeError("the file changed on disk since safe preview wrote it")
+            ours = {c for c, _ in preview}
+            changes = [{"type": "delete-cell", "cellId": c} for c in ids if c not in ours]
+            for cid, cell in preview:
+                config = {**(cell.get("config") or {}), "hide_code": bool(cell["hide_code"])}
+                camel = {"column": config.get("column"), "disabled": bool(config.get("disabled")),
+                         "hideCode": config["hide_code"], "expandOutput": bool(config.get("expand_output"))}
+                if cid not in self.cells:
+                    changes.append({"type": "create-cell", "cellId": cid, "code": cell["code"], "name": cell["name"] or "_",
+                                    "config": {"column": camel["column"], "disabled": camel["disabled"], "hide_code": camel["hideCode"], "expand_output": camel["expandOutput"]}})
+                    continue
+                if self.cells[cid]["code"] != cell["code"]:
+                    changes.append({"type": "set-code", "cellId": cid, "code": cell["code"]})
+                if (self.cells[cid]["name"] or "_") != (cell["name"] or "_"):
+                    changes.append({"type": "set-name", "cellId": cid, "name": cell["name"] or "_"})
+                changes.append({"type": "set-config", "cellId": cid, **camel})
+            changes.append({"type": "reorder-cells", "cellIds": [c for c, _ in preview]})
+            await self.m.post("/api/document/transaction", self.watcher, {"changes": changes})
+            for ch in changes:
+                self.document_change(ch)
+            for cid, cell in preview:
+                self.cells[cid]["config"] = cell.get("config")
+            await self.adapter.save(self, self.watcher)
+        except Exception as e:  # noqa: BLE001 - the notebook is live either way; only the ids differ
+            print(f"endeavor marimo: kept marimo's cell ids for {self.path}: {e}", file=sys.stderr)
             self.adapter.notify("topology_changed", notebook_id=self.id)
-            return
-        keep = {c for i, c in enumerate(ids) if preview[i][0] == c}
-        changes = [{"type": "delete-cell", "cellId": c} for c in ids if c not in keep]
-        prev = None
-        for i, (cid, cell) in enumerate(preview):
-            if cid not in keep:
-                change = {"type": "create-cell", "cellId": cid, "code": cell["code"], "name": cell["name"] or "_",
-                          "config": {"column": None, "disabled": False, "hide_code": bool(cell["hide_code"]), "expand_output": False}}
-                if prev is not None:
-                    change["after"] = prev
-                else:
-                    nxt = next((c for c, _ in preview[i + 1:] if c in keep), None)
-                    if nxt is not None:
-                        change["before"] = nxt
-                changes.append(change)
-            prev = cid
-        await self.m.post("/api/document/transaction", self.watcher, {"changes": changes})
-        for ch in changes:
-            self.document_change(ch)
-        await self.adapter.save(self, self.watcher)
 
     def kernel_ready(self, d):
         old = self.cells
@@ -1116,7 +1125,9 @@ class Adapter:
         cells = [nb.cells[c] for c in nb.order]
         await self.marimo.post("/api/kernel/save", sid, {
             "cellIds": list(nb.order), "codes": [c["code"] for c in cells], "names": [c["name"] or "_" for c in cells],
-            "configs": [{"column": None, "disabled": False, "hide_code": c["hide_code"], "expand_output": False} for c in cells],
+            # A cell's config as the file had it (disabled, column), where known.
+            "configs": [{"column": (c.get("config") or {}).get("column"), "disabled": bool((c.get("config") or {}).get("disabled")),
+                         "hide_code": c["hide_code"], "expand_output": bool((c.get("config") or {}).get("expand_output"))} for c in cells],
             "filename": nb.path, "persist": True})
 
     async def start_run(self, nb, cells, watch=True, ask_new=False):

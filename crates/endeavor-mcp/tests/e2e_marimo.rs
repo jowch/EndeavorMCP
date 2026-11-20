@@ -279,8 +279,14 @@ fn a_python_notebook_through_the_runtime() {
         let preview: Value = agent.ok("get_cell_order", json!({ "notebook_id": notebook }))["cell_ids"].clone();
         assert_eq!(preview.as_array().unwrap().len(), 3, "{preview}");
         agent.ok("allow_execution", json!({ "notebook_id": notebook, "run_notebook": false }));
-        // marimo numbers a file's cells by position when it loads it; the ids the preview gave out still hold.
+        // marimo numbers a file's cells by position when it loads it; the ids the preview gave out still hold,
+        // in marimo's session too: every cell runs straight away, with no edit in between to save it again.
         assert_eq!(agent.ok("get_cell_order", json!({ "notebook_id": notebook }))["cell_ids"], preview, "the ids survive going live");
+        agent.ok("run_all_cells", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+        for (cell, out) in [(&order[1], "42"), (&added, "")] {
+            let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": cell }));
+            assert!(read["errored"] == false && read["not_run"] != true && read["output"].as_str().unwrap_or_default().contains(out), "{read}");
+        }
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order[0], "include_code": true }));
         assert_eq!(read["code"], "x = 41", "{read}");
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": added, "include_code": true }));
