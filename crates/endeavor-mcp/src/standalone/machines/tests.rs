@@ -618,3 +618,16 @@ fn a_session_is_marked_told_its_folder_only_when_the_runtime_took_it() {
     assert_eq!(relay.current().told, Some(7));
     assert!(heard.join().unwrap().contains(r#""folder":"/home/ada/project""#));
 }
+
+#[test]
+fn where_a_dialog_asks_the_asking_step_says_so_and_the_rest_stays() {
+    let info = needing(vec![wire::Item { kind: "helper".into(), name: "Endeavor's helper".into(), size_mb: Some(20), place: Some("/srv/e".into()) }], None);
+    let chat = needs_install_result("lab", &info, "use_machine")["message"].as_str().unwrap().to_owned();
+    assert!(chat.contains("Ask the user whether Endeavor may do that"), "{chat}");
+    let dialog = asked_in_dialog(&chat);
+    assert!(!dialog.contains("Ask the user") && dialog.contains("in a dialog") && dialog.contains("`use_machine` again with machine \"lab\"") && dialog.contains("`install: true` now; don't ask in the chat first. Nothing was installed on lab."), "{dialog}");
+    assert_eq!(asked_in_dialog("Connected to lab."), "Connected to lab.");
+    let question = install_question("lab", &info.items, "use_machine");
+    assert_eq!(question, "Endeavor needs to install Endeavor's helper (about 20 MB, into /srv/e) on lab. The same yes lets Endeavor download its own Julia there if a notebook needs Julia and none is found. Install it now?");
+    assert!(!install_question("lab", &info.items, "add_machine").contains("Julia"));
+}

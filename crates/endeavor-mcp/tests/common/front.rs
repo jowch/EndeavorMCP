@@ -16,6 +16,11 @@ pub struct Front {
     replies: Receiver<String>,
     stderr: Arc<Mutex<Vec<String>>>,
     id: u64,
+    /// How the client answers a dialog the front shows (MCP elicitation): "accept", "decline" or
+    /// "cancel". None: the client can't show one.
+    pub dialog: Option<&'static str>,
+    /// The dialogs the front asked for, in order.
+    pub asked: Vec<Value>,
 }
 
 impl Front {
@@ -40,7 +45,7 @@ impl Front {
             }
         });
         let stdin = child.stdin.take();
-        Front { child: Some(child), stdin, replies, stderr, id: 0 }
+        Front { child: Some(child), stdin, replies, stderr, id: 0, dialog: None, asked: Vec::new() }
     }
 
     pub fn send(&mut self, message: Value) {
@@ -55,6 +60,12 @@ impl Front {
         loop {
             let line = self.replies.recv_timeout(Duration::from_secs(180)).unwrap_or_else(|e| panic!("no reply to {method}: {e}; stderr: {:?}", self.stderr.lock().unwrap()));
             let reply: Value = serde_json::from_str(&line).unwrap();
+            if reply["method"] == "elicitation/create" {
+                self.asked.push(reply.clone());
+                let action = self.dialog.expect("a dialog from a front told the client can't show one");
+                self.send(json!({ "jsonrpc": "2.0", "id": reply["id"], "result": { "action": action, "content": {} } }));
+                continue;
+            }
             if reply["id"] == json!(id) {
                 return reply;
             }
@@ -62,7 +73,8 @@ impl Front {
     }
 
     pub fn initialize(&mut self) -> Value {
-        let reply = self.request("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "Test Agent", "version": "0" } }));
+        let capabilities = if self.dialog.is_some() { json!({ "elicitation": { "form": {} } }) } else { json!({}) };
+        let reply = self.request("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": capabilities, "clientInfo": { "name": "Test Agent", "version": "0" } }));
         self.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
         reply
     }

@@ -1,12 +1,11 @@
 {
-  "about": "A server the user names (an ssh alias for this computer, with no Endeavor on it). The agent adds it, asks before installing, installs only after the user's yes, and works in a notebook there, not in one on this computer at the server's path: the server is this computer, so only the `use_machine` check tells them apart. The notebook checks read the server, which the project now remembers. Tags: machines, install consent.",
+  "about": "A server the user names (an ssh alias for this computer, with no Endeavor on it). The agent adds it; Endeavor's helper has to be installed there, and Endeavor asks the user itself, in its own dialog that names it, as soon as the agent's call needs it (#378), so the agent neither asks in the chat nor has to call again. The harness's hook says yes. Then the agent works in a notebook there, not in one on this computer at the server's path: the server is this computer, so only the `use_machine` check tells them apart. The notebook checks read the server, which the project now remembers. M3 is the same with a no. Tags: machines, install consent.",
   "checks": [
     { "check": "called", "tool": "add_machine" },
-    { "check": "not_called", "tool": "add_machine", "args": { "install": true }, "before_turn": 2 },
-    { "check": "not_called", "tool": "use_machine", "args": { "install": true }, "before_turn": 2 },
+    { "check": "asked_user", "texts": ["Endeavor's helper", "on smoke-host", "Install it now?"] },
     { "check": "any_of", "checks": [
-      { "check": "called", "tool": "add_machine", "args": { "install": true }, "ok": true },
-      { "check": "called", "tool": "use_machine", "args": { "install": true }, "ok": true }
+      { "check": "called", "tool": "add_machine", "ok": true },
+      { "check": "called", "tool": "use_machine", "ok": true }
     ] },
     { "check": "called", "tool": "use_machine", "args": { "machine": "smoke-host" }, "ok": true },
     { "check": "server_file", "suffix": ".jl" },

@@ -1,1 +1,1 @@
-{ "ssh": true }
+{ "ssh": true, "dialog": "accept" }
