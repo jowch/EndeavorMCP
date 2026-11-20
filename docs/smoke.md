@@ -82,7 +82,9 @@ Each task is a folder in `smoke/tasks/`:
   hook in the project's Claude settings; without it, `claude -p` closes them
   at once, unshown. `{ "dialog": { "new_packages": ["Plots", ...] } }` is the
   user saying yes only to Julia's question about packages new to a notebook
-  (#397), and only when every package it names is in the list; any other
+  (#397), and only when every package it names is in the list
+  (`"new_packages": "any"`: whatever packages it names, for a long task like
+  L1 whose packages can't be listed ahead); any other
   question, an R download or a server's helper included, gets a no. The
   harness never calls `approve_install` itself: the agent does, and the hook
   answers the question Endeavor then asks, as the user would. The hook is
@@ -250,7 +252,7 @@ makes it reported only: a failed soft check doesn't fail the task.
 | `ran_after_reply` `texts` | after a tool reply containing every one of `texts` (an error to deal with), a later call ran cells and worked |
 | `reproducible` | run again from its file in a fresh runtime and a fresh copy of the project folder, every notebook gives the same output and errors, cell by cell. Cells still running when the agent ended, and pictures, aren't compared, and a notebook with nothing left to compare fails |
 | `asked_user` `texts`, `min` (1), `max` | Endeavor asked the user in its own dialog between `min` and `max` times, counting only questions that contain every one of `texts` |
-| `never_ran` `texts` | some cell's code contains every one of `texts`, and none of those cells ran: each is still queued or has no output, and none has an error |
+| `never_ran` `texts` | some code cell (not `md"..."`) contains every one of `texts`, and none of those cells ran: each is still queued or has no output, and none has an error |
 | `code_lacks` `texts` | no cell's code contains any of `texts` |
 | `agent_tools_not_used` `tools` | the agent didn't use these tools of its own (read from Claude's transcript) |
 
@@ -271,12 +273,12 @@ something subtle, make it soft.
 | `N7-plot` | a plot | the agent looks at the picture (`view_cell_output`) before it reports. The plotting package is new to the notebook, so the run asks first (#397), and the harness says yes in the dialog |
 | `N8-one-notebook` | N1, then "make a separate notebook" in the same session | `one_notebook`: no second notebook; a section in this one, or a new session |
 | `N9-cold-install` | a DataFrame in a new notebook, on an empty depot | a first install: Endeavor asks about DataFrames, the harness says yes, and the agent waits through the install and reports the table (#58) |
-| `N14-asks-first` | N7's plot with Plots, with no one to say yes | the ask with no answer: Endeavor's page opens in the stand-in browser and nobody clicks, so the agent asks through Endeavor, nothing installs or runs, it installs no other way, and it names the package that waits for the user's OK |
+| `N14-asks-first` | N7's plot with Plots, with no one to say yes | the ask with no answer: Endeavor's page opens in the stand-in browser and nobody clicks (the reply must say a web page was opened, so a dialog that went unanswered doesn't pass), so the agent asks through Endeavor, nothing installs or runs, it installs no other way, and it names the package that waits for the user's OK |
 | `N10-big-notebook` | change one value in an open notebook of 42 cells and report a count | what a larger notebook costs: reads, and each change's reply |
 | `N11-logged-warning` | change a cutoff in an open notebook whose parsing cell logs a `@warn` that 2 of 8 CSV rows were left out, and report the mean; the count is only in the warning | that what a cell logs reaches the agent, and it passes a warning on (#257) |
 | `N12-moved-widget` | report a mean from an open notebook whose cutoff slider the user moved on the page from its default just before the agent looks | that the agent hears a result used a moved widget (`uses_moved_input`), and says which value it used and what the file's default is |
 | `N13-open-and-run` | open a notebook from disk, run it, and report a value; its two cells take 10 s each | that a read right after the first run waits for it, whether the agent started it with `open_notebook` and `run_notebook` (#331) or with `allow_execution` (#170), so the agent reports the value without polling or running the cells again. A soft check says which way the agent went: Claude Code's default model opens in safe preview, then calls `allow_execution` |
-| `L1-long-analysis` (long) | a 96-well growth plate, from loading the data to a written summary, in twelve messages with plots; the plate has a failed well, a contaminated one, a saturated reading and gaps | what a real-sized session costs: requests, context at the end, and which replies fill it. Each new package asks first, and the harness says yes to the analysis packages its setup lists. About 100 requests and 18 minutes with Claude Code's default model, so it runs only with `--long` |
+| `L1-long-analysis` (long) | a 96-well growth plate, from loading the data to a written summary, in twelve messages with plots; the plate has a failed well, a contaminated one, a saturated reading and gaps | what a real-sized session costs: requests, context at the end, and which replies fill it. Each new package asks first, and the harness says yes to whichever ones the agent picks (`"new_packages": "any"`), but to no other question. About 100 requests and 18 minutes with Claude Code's default model, so it runs only with `--long` |
 | `Q1-ask-questions` (long) | eleven questions about L1's finished 38-cell notebook, already open and run: what it does, which wells it dropped, what the results mean, three sentences for a PI. Nothing asks for a change | what a questions-only session costs on a large notebook, and how much of it is the notebook's code read up front. The first runs (2026-11-04) used about 1M input tokens and ended at 60k context, with Sonnet 5.5 and Opus 5.5 alike. Compare `input_tokens` and `context_tokens` before and after a change to the tools or skills that affects reading |
 | `R1-new-r` | N1, in a new R notebook | the same for R (Ember): a `.R` path, R's rules for cells. It mirrors N1, so a failure points at R, not at the task |
 | `R2-first-package` | a dplyr table and its mean in a new R notebook | R's first package install: the agent waits through it and doesn't run the cells again; when the install outlasts a waited run, the tools say R is getting dplyr ready (#78) |

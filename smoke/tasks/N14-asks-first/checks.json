@@ -3,7 +3,7 @@
   "checks": [
     { "check": "notebooks", "count": 1 },
     { "check": "called", "tool": "approve_install" },
-    { "check": "reply_contains", "texts": ["download_not_answered"] },
+    { "check": "reply_contains", "texts": ["download_not_answered", "opened a web page"] },
     { "check": "never_ran", "texts": ["Plots"] },
     { "check": "code_lacks", "texts": ["Pkg."] },
     { "check": "final_message_contains_any", "texts": ["Plots"] },

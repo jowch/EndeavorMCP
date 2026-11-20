@@ -778,15 +778,16 @@ fn naming(ps: &str, folders: &[String], own: u32) -> Vec<u32> {
 /// user, by running this binary's `dialog` (`dialog_hook`), which logs each question and its answer
 /// to `dialogs.jsonl`. `dialog` is `"accept"` or `"decline"` for every dialog, or
 /// `{ "new_packages": [...] }`: yes only to Julia's question about packages new to a notebook, when
-/// every package it names is one of those, and no to any other question.
+/// every package it names is one of those (or whatever it names, with `"any"`), and no to any other
+/// question.
 fn answer_dialogs(work: &Path, project: &Path, exe: &Path, dialog: &Value) -> Result<(), String> {
     let valid = match dialog {
         Value::String(answer) => matches!(answer.as_str(), "accept" | "decline"),
-        Value::Object(o) => o.len() == 1 && o["new_packages"].as_array().is_some_and(|p| !p.is_empty() && p.iter().all(Value::is_string)),
+        Value::Object(o) => o.len() == 1 && (o["new_packages"] == "any" || o["new_packages"].as_array().is_some_and(|p| !p.is_empty() && p.iter().all(Value::is_string))),
         _ => false,
     };
     if !valid {
-        return Err(format!("setup.json: dialog must be \"accept\", \"decline\" or {{ \"new_packages\": [names] }}, not {dialog}"));
+        return Err(format!("setup.json: dialog must be \"accept\", \"decline\" or {{ \"new_packages\": [names] or \"any\" }}, not {dialog}"));
     }
     std::fs::write(work.join("dialog.json"), dialog.to_string()).map_err(|e| e.to_string())?;
     let settings = project.join(".claude/settings.json");
@@ -828,6 +829,9 @@ fn dialog_answer(policy: &Value, message: &str) -> (&'static str, String) {
     let Some((names, _)) = message.strip_prefix("Julia needs to install ").and_then(|rest| rest.split_once(", new to the notebook ")) else {
         return ("decline", "not a question about new Julia packages".to_owned());
     };
+    if policy["new_packages"] == "any" {
+        return ("accept", format!("new Julia packages, any the agent picks: {names}"));
+    }
     let others: Vec<&str> = names.split(", ").filter(|n| !allowed.contains(n)).collect();
     if others.is_empty() { ("accept", format!("new Julia packages the task allows: {names}")) } else { ("decline", format!("packages the task doesn't allow: {}", others.join(", "))) }
 }
@@ -1055,6 +1059,10 @@ mod tests {
         assert!(answer == "decline" && why.contains("Makie") && !why.contains("Plots"), "{why}");
         assert_eq!(super::dialog_answer(&policy, "R needs to download pkg (2 GB) before the cells of the notebook /p/a.R can run. Download it now?").0, "decline", "not an R download");
         assert_eq!(super::dialog_answer(&policy, "Endeavor needs to install Endeavor's helper (about 20 MB) on lab. Install it now?").0, "decline", "nor a server's helper");
+        let any = json!({ "new_packages": "any" });
+        assert_eq!(super::dialog_answer(&any, &ask("Optim, DataInterpolations")).0, "accept");
+        assert_eq!(super::dialog_answer(&any, "R needs to download pkg (2 GB) before the cells of the notebook /p/a.R can run. Download it now?").0, "decline", "any package, but still only Julia's new-package question");
+        assert_eq!(super::dialog_answer(&any, "Endeavor needs to install Endeavor's helper (about 20 MB) on lab. Install it now?").0, "decline");
         assert_eq!(super::dialog_answer(&json!("accept"), "Endeavor needs to install Endeavor's helper on lab. Install it now?").0, "accept");
         assert_eq!(super::dialog_answer(&json!("decline"), &ask("Plots")).0, "decline");
     }
@@ -1065,7 +1073,7 @@ mod tests {
         let project = work.join("project");
         std::fs::create_dir_all(&project).unwrap();
         let exe = Path::new("/bin/endeavor-smoke");
-        for bad in [json!("maybe"), json!({ "new_packages": [] }), json!({ "new_packages": "Plots" }), json!({ "new_packages": ["Plots"], "also": 1 }), json!(true)] {
+        for bad in [json!("maybe"), json!({ "new_packages": [] }), json!({ "new_packages": "Plots" }), json!({ "new_packages": "all" }), json!({ "new_packages": ["Plots"], "also": 1 }), json!(true)] {
             assert!(super::answer_dialogs(&work, &project, exe, &bad).is_err(), "{bad}");
         }
         super::answer_dialogs(&work, &project, exe, &json!({ "new_packages": ["Plots"] })).unwrap();

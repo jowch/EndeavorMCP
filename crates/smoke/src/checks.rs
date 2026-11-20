@@ -205,11 +205,12 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
             let found: Vec<String> = ev.notebooks.iter().flat_map(|n| &n.cells).filter(|c| texts.iter().any(|t| c.code.contains(t.as_str()))).map(|c| first_line(&c.code).to_owned()).collect();
             if found.is_empty() { Ok(String::new()) } else { Err(format!("in: {}", found.join("; "))) }
         }
-        // Some cell's code contains every one of `texts`, and none of those cells ran: each is still
-        // queued or has no output, and none has an error (cells held for the user's OK).
+        // Some code cell contains every one of `texts`, and none of those cells ran: each is still
+        // queued or has no output, and none has an error (cells held for the user's OK). A Markdown
+        // cell (`md"..."`) that names them isn't counted: its text shows whether or not it ran.
         "never_ran" => {
             let texts = str_list("texts");
-            let cells: Vec<&crate::mcp::Cell> = ev.notebooks.iter().flat_map(|n| &n.cells).filter(|c| texts.iter().all(|t| c.code.contains(t.as_str()))).collect();
+            let cells: Vec<&crate::mcp::Cell> = ev.notebooks.iter().flat_map(|n| &n.cells).filter(|c| !c.code.trim_start().starts_with("md\"") && texts.iter().all(|t| c.code.contains(t.as_str()))).collect();
             let ran: Vec<String> = cells.iter().filter(|c| c.errored || !(c.busy || c.output.trim().is_empty())).map(|c| first_line(&c.code).to_owned()).collect();
             if cells.is_empty() {
                 Err("no cell's code has them".into())
@@ -564,7 +565,8 @@ mod tests {
         assert!(judge(never.clone(), &held(vec![cell("using Plots", "", false, false)])), "no output");
         assert!(!judge(never.clone(), &held(vec![cell("using Plots", "<img src=\"data:image/png;base64,A\">", false, false)])), "it ran");
         assert!(!judge(never.clone(), &held(vec![cell("using Plots", "", false, true)])), "it ran into an error");
-        assert!(!judge(never, &held(vec![cell("x = 1", "", true, false)])), "no such cell");
+        assert!(!judge(never.clone(), &held(vec![cell("x = 1", "", true, false)])), "no such cell");
+        assert!(!judge(never, &held(vec![cell("md\"\"\"\n# using Plots\n\"\"\"", "using Plots", false, false)])), "a Markdown cell isn't a code cell");
         let lacks = json!({ "check": "code_lacks", "texts": ["Pkg.", "Conda"] });
         assert!(judge(lacks.clone(), &held(vec![cell("using Plots", "", true, false)])));
         assert!(!judge(lacks, &held(vec![cell("import Pkg; Pkg.add(\"Plots\")", "", false, false)])));
