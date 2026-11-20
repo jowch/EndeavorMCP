@@ -470,7 +470,11 @@ Next:
   depot that the user can't read is removed, so Julia compiles it again. One left
   `--w-------`, once another runtime version had compiled there too, made every
   start fail with "Permission denied" (#372). Only our first depot is looked at,
-  and never `~/.julia`.
+  and never `~/.julia`. Such a file comes from a precompile whose runtime folder
+  was removed while it ran: Julia gives the new file its source's mode, and a
+  missing source's is 0 (#383). The smoke runner did that on every task; it now
+  waits for the precompile, and `endeavor mcp`'s precompile runs the check again
+  when it's done.
 - Julia starts only when it's needed (#76). With `--julia-when-needed` the
   core writes `runtime.json` and answers at once, finds Julia itself (and
   downloads it only with `--install-julia`) the first time a Julia notebook is

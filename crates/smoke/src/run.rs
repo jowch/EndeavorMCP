@@ -214,7 +214,7 @@ pub fn main(args: &[String]) -> i32 {
             let _ = std::fs::remove_dir_all(&kept);
             std::fs::create_dir_all(&kept).unwrap();
             copy_dir(&work, &kept, &["state", "home", "rerun", "depot", "ssh-home", "server", "ssh"]);
-            let _ = std::fs::remove_dir_all(&work);
+            remove_work(&work);
             let passed = result["passed"] == true;
             attempts.push(result);
             // A first run that passes is enough; one that fails runs `retries` more times.
@@ -227,7 +227,7 @@ pub fn main(args: &[String]) -> i32 {
         }
         rows.push(row(&id, &attempts, expected_failure(task).as_deref()));
     }
-    let _ = std::fs::remove_dir_all(&scratch);
+    remove_work(&scratch);
     let mut models: Vec<String> = rows.iter().flat_map(|r| r["models"].as_array().cloned().unwrap_or_default()).filter_map(|m| m.as_str().map(str::to_owned)).collect();
     models.sort();
     models.dedup();
@@ -270,7 +270,7 @@ fn warm(repo: &Path, work: &Path, endeavor: &Path, julia: &str, r: &str, depot: 
         if errored.is_empty() { Ok(()) } else { Err(errored.join("; ")) }
     });
     stop_runtime(endeavor, work);
-    let _ = std::fs::remove_dir_all(work);
+    remove_work(work);
     eprintln!("   done in {:.0}s", began.elapsed().as_secs_f64());
     result
 }
@@ -703,6 +703,67 @@ fn foreign_tools_used(transcript: &str) -> Vec<String> {
     used
 }
 
+/// How long `remove_work` waits for a task's background precompile.
+const PRECOMPILE_WAIT: Duration = Duration::from_secs(10 * 60);
+
+/// Remove a task's folder once no process uses it. Stopping the runtime doesn't stop the background
+/// precompile `endeavor mcp` starts (meant to outlive the server), and it runs from the runtime
+/// unpacked in the task's folder. Removing that folder under it made Julia write the new cache
+/// file, in the shared depot, as mode 200 (it gives the file its source's mode, and a missing
+/// source's is 0), which then failed every later start that read it (#383). After the wait, one
+/// still running is ended before the folder goes.
+fn remove_work(work: &Path) {
+    let mut started = None;
+    loop {
+        let users = processes_naming(work);
+        if users.is_empty() {
+            break;
+        }
+        let at = *started.get_or_insert_with(|| {
+            eprintln!("   waiting for {} process(es) still using {} (a background precompile, most likely)", users.len(), work.display());
+            Instant::now()
+        });
+        if at.elapsed() > PRECOMPILE_WAIT {
+            eprintln!("   still running after {} min, so ending them: {}", PRECOMPILE_WAIT.as_secs() / 60, users.iter().map(u32::to_string).collect::<Vec<_>>().join(", "));
+            for pid in &users {
+                let _ = Command::new("kill").arg(pid.to_string()).status();
+            }
+            std::thread::sleep(Duration::from_secs(5));
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    let _ = std::fs::remove_dir_all(work);
+}
+
+/// The processes, apart from this one, whose command line names a path in `folder` (Julia's
+/// `--project`). None on Windows, where there is no `ps`.
+fn processes_naming(folder: &Path) -> Vec<u32> {
+    if cfg!(windows) {
+        return Vec::new();
+    }
+    let Ok(out) = Command::new("ps").args(["axww", "-o", "pid=,args="]).stderr(Stdio::null()).output() else { return Vec::new() };
+    // macOS's temporary folder is a symlink (/var to /private/var), and a process may name either.
+    let mut names = vec![folder.display().to_string()];
+    if let Ok(real) = folder.canonicalize() {
+        names.push(real.display().to_string());
+    }
+    naming(&String::from_utf8_lossy(&out.stdout), &names, std::process::id())
+}
+
+/// `processes_naming`'s choice from `ps` output: the pids of lines whose command names a path
+/// under one of `folders`, other than `own`.
+fn naming(ps: &str, folders: &[String], own: u32) -> Vec<u32> {
+    ps.lines()
+        .filter_map(|line| {
+            let (pid, args) = line.trim_start().split_once(char::is_whitespace)?;
+            let pid: u32 = pid.parse().ok()?;
+            let under = folders.iter().any(|f| args.match_indices(f.as_str()).any(|(i, _)| matches!(args[i + f.len()..].chars().next(), None | Some('/') | Some(' ') | Some('"') | Some('\''))));
+            (pid != own && under).then_some(pid)
+        })
+        .collect()
+}
+
 /// A hook in the project's Claude settings that answers every MCP dialog with `answer`, and logs
 /// what it was asked to `dialogs.jsonl`.
 fn answer_dialogs(work: &Path, project: &Path, answer: &str) -> Result<(), String> {
@@ -870,6 +931,19 @@ fn utc_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_task_folder_waits_for_the_processes_that_name_a_path_in_it() {
+        let ps = "  101 /usr/bin/nice -n 10 julia --startup-file=no --project=/tmp/smoke/N1/attempt-1/home/xdg_cache_home/endeavor/serve/abc/runtime -e x\n\
+                    102 julia --project=/tmp/smoke/N1/attempt-10/runtime\n\
+                    103 julia --project=/private/tmp/smoke/N1/attempt-1\n\
+                    104 endeavor-smoke run --only N1\n\
+                    105 cat /tmp/smoke/N1/attempt-1/log.txt\n";
+        let folders = ["/tmp/smoke/N1/attempt-1".to_owned(), "/private/tmp/smoke/N1/attempt-1".to_owned()];
+        // Not attempt-10, which only starts with the same text, and not this process.
+        assert_eq!(naming(ps, &folders, 105), vec![101, 103]);
+        assert!(naming("", &folders, 1).is_empty());
+    }
 
     #[test]
     fn a_task_expected_to_fail_doesnt_fail_the_run_and_says_when_it_passes() {
