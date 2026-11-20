@@ -271,8 +271,10 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 for (at, cell) in nb.cells.iter().enumerate().filter(|(_, c)| !c.busy) {
                     compared += 1;
                     // A marimo notebook's cell ids aren't in its file, so a reload gives new
-                    // ones (#353): there, the same code in the same place is the same cell.
-                    match again.cell(&cell.id).or_else(|| again.cells.get(at).filter(|a| a.code == cell.code)) {
+                    // ones (#353): there, the same code in the same place is the same cell. The
+                    // same code, that is, but for the spaces on its blank lines, which marimo's
+                    // file doesn't keep (L1 on Haiku, 11-20).
+                    match again.cell(&cell.id).or_else(|| again.cells.get(at).filter(|a| same_code(&a.code, &cell.code))) {
                         None => differ.push(format!("{}: gone", first_line(&cell.code))),
                         Some(a) if a.errored != cell.errored => differ.push(format!("{}: errored {} then {}", first_line(&cell.code), cell.errored, a.errored)),
                         Some(a) if is_picture(&cell.output) && is_picture(&a.output) => {}
@@ -407,6 +409,12 @@ fn ran_cells(call: &Call) -> Vec<String> {
     cells
 }
 
+/// Two cells' code is the same but for spaces at the ends of lines: marimo writes a cell into its
+/// file indented, and a line of only spaces comes back with other spaces, or none.
+fn same_code(a: &str, b: &str) -> bool {
+    a.lines().map(str::trim_end).eq(b.lines().map(str::trim_end))
+}
+
 fn first_line(code: &str) -> &str {
     code.lines().next().unwrap_or_default()
 }
@@ -531,6 +539,12 @@ mod tests {
         };
         assert!(judge(Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "b = 1", "c = 1", "d = 1"])])).passed, "a reload that gives new ids matches by place and code");
         assert!(!judge(Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "c = 1", "b = 1", "d = 1"])])).passed, "but not a cell that moved");
+        let mut spaced = left.clone();
+        spaced[0].cells[1].code = "b = 1\n    \nb".into();
+        let ev = Evidence { calls: &[], notebooks: &spaced, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "b = 1\n\nb", "c = 1", "d = 1"])])), turns: &[], server_files: &[], questions: &[], pages: &[] };
+        assert!(run(&json!({ "check": "reproducible" }), &ev).passed, "marimo's file drops the spaces on a blank line: still the same cell");
+        let ev = Evidence { calls: &[], notebooks: &spaced, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "b = 1\nb", "c = 1", "d = 1"])])), turns: &[], server_files: &[], questions: &[], pages: &[] };
+        assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "but not a line that went missing");
         let busy = [notebook(&[("c", "", true)])];
         let ev = Evidence { calls: &[], notebooks: &busy, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![notebook(&[("c", "3", false)])])), turns: &[], server_files: &[], questions: &[], pages: &[] };
         assert!(!run(&json!({ "check": "reproducible" }), &ev).passed, "nothing compared fails");

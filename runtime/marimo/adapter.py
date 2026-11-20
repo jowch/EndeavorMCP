@@ -1104,7 +1104,11 @@ class Adapter:
                 changes.append(change)
                 order.insert(i, cid)
             elif kind == "fold":
-                changes.append({"type": "set-config", "cellId": nb.check_cell(op["cell_id"]), "hideCode": bool(op.get("folded"))})
+                # marimo replaces the whole config, and refuses one missing a field: the rest stays as the file had it.
+                cid = nb.check_cell(op["cell_id"])
+                config = nb.cells[cid].get("config") or {}
+                changes.append({"type": "set-config", "cellId": cid, "column": config.get("column"), "disabled": bool(config.get("disabled")),
+                                "hideCode": bool(op.get("folded")), "expandOutput": bool(config.get("expand_output"))})
             else:
                 raise argument_error("unknown_op", f"Unknown op: '{kind}'")
         if changes and not nb.live:

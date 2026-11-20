@@ -81,8 +81,8 @@ Each task is a folder in `smoke/tasks/`:
   (or `"decline"`) answers Endeavor's own dialogs (MCP elicitation) with a
   hook in the project's Claude settings; without it, `claude -p` closes them
   at once, unshown. `{ "dialog": { "new_packages": ["Plots", ...] } }` is the
-  user saying yes only to Julia's question about packages new to a notebook
-  (#397), and only when every package it names is in the list
+  user saying yes only to Julia's or Python's question about packages new to
+  a notebook (#397), and only when every package it names is in the list
   (`"new_packages": "any"`: whatever packages it names, for a long task like
   L1 whose packages can't be listed ahead); any other
   question, an R download or a server's helper included, gets a no. The

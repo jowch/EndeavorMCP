@@ -778,9 +778,9 @@ fn naming(ps: &str, folders: &[String], own: u32) -> Vec<u32> {
 /// A hook in the project's Claude settings that answers Endeavor's dialogs (MCP elicitation) as the
 /// user, by running this binary's `dialog` (`dialog_hook`), which logs each question and its answer
 /// to `dialogs.jsonl`. `dialog` is `"accept"` or `"decline"` for every dialog, or
-/// `{ "new_packages": [...] }`: yes only to Julia's question about packages new to a notebook, when
-/// every package it names is one of those (or whatever it names, with `"any"`), and no to any other
-/// question.
+/// `{ "new_packages": [...] }`: yes only to Julia's or Python's question about packages new to a
+/// notebook, when every package it names is one of those (or whatever it names, with `"any"`), and no
+/// to any other question.
 fn answer_dialogs(work: &Path, project: &Path, exe: &Path, dialog: &Value) -> Result<(), String> {
     let valid = match dialog {
         Value::String(answer) => matches!(answer.as_str(), "accept" | "decline"),
@@ -819,22 +819,26 @@ pub fn dialog_hook(args: &[String]) -> i32 {
 }
 
 /// How the user answers the dialog that asks `message`, and why. With `new_packages`, the user says
-/// yes only to the question the front asks before Julia installs packages new to a notebook
+/// yes only to the question the front asks before Julia or Python installs packages new to a notebook
 /// (`Consent::download_question`: "Julia needs to install A, B, new to the notebook ..."), and only
 /// when it names nothing else; everything else, an R download or a server's helper included, gets a no.
+/// A task where the agent picks the language (L1) needs both, or a Python run can't install anything.
 fn dialog_answer(policy: &Value, message: &str) -> (&'static str, String) {
     if let Some(answer) = policy.as_str() {
         return (if answer == "accept" { "accept" } else { "decline" }, format!("the task answers every dialog with {answer}"));
     }
     let allowed: Vec<&str> = policy["new_packages"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-    let Some((names, _)) = message.strip_prefix("Julia needs to install ").and_then(|rest| rest.split_once(", new to the notebook ")) else {
-        return ("decline", "not a question about new Julia packages".to_owned());
+    let Some((language, names)) = ["Julia", "Python"].into_iter().find_map(|language| {
+        let rest = message.strip_prefix(language)?.strip_prefix(" needs to install ")?;
+        Some((language, rest.split_once(", new to the notebook ")?.0))
+    }) else {
+        return ("decline", "not a question about new Julia or Python packages".to_owned());
     };
     if policy["new_packages"] == "any" {
-        return ("accept", format!("new Julia packages, any the agent picks: {names}"));
+        return ("accept", format!("new {language} packages, any the agent picks: {names}"));
     }
     let others: Vec<&str> = names.split(", ").filter(|n| !allowed.contains(n)).collect();
-    if others.is_empty() { ("accept", format!("new Julia packages the task allows: {names}")) } else { ("decline", format!("packages the task doesn't allow: {}", others.join(", "))) }
+    if others.is_empty() { ("accept", format!("new {language} packages the task allows: {names}")) } else { ("decline", format!("packages the task doesn't allow: {}", others.join(", "))) }
 }
 
 fn stop_runtime(endeavor: &Path, work: &Path) {
@@ -1062,8 +1066,12 @@ mod tests {
         assert_eq!(super::dialog_answer(&policy, "Endeavor needs to install Endeavor's helper (about 20 MB) on lab. Install it now?").0, "decline", "nor a server's helper");
         let any = json!({ "new_packages": "any" });
         assert_eq!(super::dialog_answer(&any, &ask("Optim, DataInterpolations")).0, "accept");
-        assert_eq!(super::dialog_answer(&any, "R needs to download pkg (2 GB) before the cells of the notebook /p/a.R can run. Download it now?").0, "decline", "any package, but still only Julia's new-package question");
+        assert_eq!(super::dialog_answer(&any, "R needs to download pkg (2 GB) before the cells of the notebook /p/a.R can run. Download it now?").0, "decline", "any package, but still only the new-package question");
         assert_eq!(super::dialog_answer(&any, "Endeavor needs to install Endeavor's helper (about 20 MB) on lab. Install it now?").0, "decline");
+        let python = |names: &str| format!("Python needs to install {names}, new to the notebook /p/growth.py, before its cells can run. Install it now?");
+        assert_eq!(super::dialog_answer(&any, &python("pandas, matplotlib")).0, "accept", "a Python notebook's new packages too");
+        assert_eq!(super::dialog_answer(&policy, &python("Plots")).0, "accept");
+        assert_eq!(super::dialog_answer(&policy, &python("pandas")).0, "decline", "but only the ones a list allows");
         assert_eq!(super::dialog_answer(&json!("accept"), "Endeavor needs to install Endeavor's helper on lab. Install it now?").0, "accept");
         assert_eq!(super::dialog_answer(&json!("decline"), &ask("Plots")).0, "decline");
     }
