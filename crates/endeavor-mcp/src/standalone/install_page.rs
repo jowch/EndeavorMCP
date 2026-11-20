@@ -13,6 +13,16 @@
 //!
 //! Without a browser to open (a front started over ssh, or with no display), the user can't be
 //! asked, and nothing is installed.
+//!
+//! The user is asked no more than they need to be, so that an agent that keeps calling can't wear
+//! them down into a yes: after Don't install, the same question is refused without a page for
+//! `SETTLED`; an unanswered page opens again at most once; and a yes holds for the same question for
+//! `SETTLED` too, so a call that stopped waiting before its install finished isn't asked about again.
+//!
+//! What it doesn't stop: an agent with a shell on this same computer can find the link, in the
+//! opener's command line while it runs (or the browser's, on Linux, if that call started it) or in
+//! the browser's history, and answer the page itself. Such an agent could install things without
+//! Endeavor anyway. The page stops an agent that says yes for the user, not one that works against them.
 
 use std::collections::HashMap;
 use std::io::{BufReader, Write};
@@ -25,8 +35,15 @@ use crate::http::{self, Head};
 /// How long a question and its answer are kept: a yes is for a call within this time.
 const KEEP: Duration = Duration::from_secs(30 * 60);
 
-/// A question asked again after this long opens its page again, in case the user closed it.
+/// A question asked again after this long opens its page again, once, in case the user closed it.
 const REOPEN_AFTER: Duration = Duration::from_secs(60);
+
+/// How many times one page is opened in all.
+const MOST_OPENS: u32 = 2;
+
+/// How long an answer holds for the same question (`settled`): a no is the answer without a page, and a yes
+/// lets a later call install what the user agreed to.
+const SETTLED: Duration = Duration::from_secs(10 * 60);
 
 /// Where the pages are, before each one's secret.
 const PATH: &str = "/install/";
@@ -58,65 +75,82 @@ pub(super) struct Pages {
 
 #[derive(Default)]
 struct Shared {
-    /// The questions asked, by their pages' secrets.
-    pages: Mutex<HashMap<String, Page>>,
+    state: Mutex<State>,
     answered: Condvar,
+}
+
+#[derive(Default)]
+struct State {
+    /// The questions asked, by their pages' secrets.
+    pages: HashMap<String, Page>,
+    /// The user's answers, by question: Install (true) or Don't install (false), and when.
+    said: HashMap<String, (bool, Instant)>,
+}
+
+impl State {
+    /// Forget what has run out.
+    fn prune(&mut self, settled: Duration) {
+        self.pages.retain(|_, page| page.asked.elapsed() < KEEP);
+        self.said.retain(|_, (_, when)| when.elapsed() < settled);
+    }
+
+    fn answer(&self, question: &str) -> Option<Clicked> {
+        self.said.get(question).map(|&(yes, _)| if yes { Clicked::Install } else { Clicked::Declined })
+    }
 }
 
 struct Page {
     question: String,
-    /// Install (true) or Don't install (false), once clicked.
+    /// Install (true) or Don't install (false), once clicked: the first click stands.
     answer: Option<bool>,
     asked: Instant,
     opened: Instant,
+    opens: u32,
 }
 
 impl Pages {
-    /// Ask the user `question` on a page in their browser, or find their answer on the page already
-    /// open for it. Wait up to `wait` for the answer, and stop waiting once `cancelled` says so. A
-    /// yes or a no is used up: the next call with the same question asks again. `open` opens a link
-    /// in the user's browser, and says whether it could (`browser::open`).
+    /// Ask the user `question` on a page in their browser, or find their answer to it. Wait up to
+    /// `wait` for the answer, and stop waiting once `cancelled` says so. `open` opens a link in the
+    /// user's browser, and says whether it could (`browser::open`).
     pub(super) fn ask(&self, question: &str, wait: Duration, cancelled: &dyn Fn() -> bool, open: &dyn Fn(&str) -> bool) -> Clicked {
+        self.ask_settled(question, wait, settled(), cancelled, open)
+    }
+
+    fn ask_settled(&self, question: &str, wait: Duration, settled: Duration, cancelled: &dyn Fn() -> bool, open: &dyn Fn(&str) -> bool) -> Clicked {
         let Some(port) = self.port() else { return Clicked::NoBrowser };
         let now = Instant::now();
-        let mut pages = self.shared.pages.lock().unwrap();
-        pages.retain(|_, page| page.asked.elapsed() < KEEP);
-        let found = pages.iter().find(|(_, page)| page.question == question).map(|(secret, _)| secret.clone());
-        let (secret, reopen) = match found {
+        let mut state = self.shared.state.lock().unwrap();
+        state.prune(settled);
+        if let Some(answer) = state.answer(question) {
+            return answer;
+        }
+        let found = state.pages.iter().find(|(_, page)| page.question == question && page.answer.is_none()).map(|(secret, _)| secret.clone());
+        let (secret, open_it) = match found {
             Some(secret) => {
-                let page = pages.get_mut(&secret).unwrap();
-                if let Some(yes) = page.answer {
-                    pages.remove(&secret);
-                    return if yes { Clicked::Install } else { Clicked::Declined };
+                let page = state.pages.get_mut(&secret).unwrap();
+                let again = page.opens < MOST_OPENS && page.opened.elapsed() >= REOPEN_AFTER;
+                if again {
+                    (page.opened, page.opens) = (now, page.opens + 1);
                 }
-                let reopen = page.opened.elapsed() >= REOPEN_AFTER;
-                if reopen {
-                    page.opened = now;
-                }
-                (secret, reopen)
+                (secret, again)
             }
             None => {
                 let Ok(secret) = crate::random_hex::<16>() else { return Clicked::NoBrowser };
-                pages.insert(secret.clone(), Page { question: question.to_owned(), answer: None, asked: now, opened: now });
+                state.pages.insert(secret.clone(), Page { question: question.to_owned(), answer: None, asked: now, opened: now, opens: 1 });
                 (secret, true)
             }
         };
-        drop(pages);
+        drop(state);
         // The link goes from here to the browser only: never into a tool result.
-        if reopen && !open(&format!("http://127.0.0.1:{port}{PATH}{secret}")) {
-            self.shared.pages.lock().unwrap().remove(&secret);
+        if open_it && !open(&format!("http://127.0.0.1:{port}{PATH}{secret}")) {
+            self.shared.state.lock().unwrap().pages.remove(&secret);
             return Clicked::NoBrowser;
         }
         let until = Instant::now() + wait;
-        let mut pages = self.shared.pages.lock().unwrap();
+        let mut state = self.shared.state.lock().unwrap();
         loop {
-            match pages.get(&secret).map(|page| page.answer) {
-                Some(Some(yes)) => {
-                    pages.remove(&secret);
-                    return if yes { Clicked::Install } else { Clicked::Declined };
-                }
-                Some(None) => {}
-                None => return Clicked::NotYet,
+            if let Some(answer) = state.answer(question) {
+                return answer;
             }
             if cancelled() {
                 return Clicked::Dropped;
@@ -125,7 +159,7 @@ impl Pages {
             if left.is_zero() {
                 return Clicked::NotYet;
             }
-            pages = self.shared.answered.wait_timeout(pages, left.min(Duration::from_millis(200))).unwrap().0;
+            state = self.shared.answered.wait_timeout(state, left.min(Duration::from_millis(200))).unwrap().0;
         }
     }
 
@@ -149,6 +183,12 @@ impl Pages {
     }
 }
 
+/// How long an answer holds (`SETTLED`). A debug build takes `ENDEAVOR_TEST_PAGE_SETTLED_MS`.
+fn settled() -> Duration {
+    let test = if cfg!(debug_assertions) { std::env::var("ENDEAVOR_TEST_PAGE_SETTLED_MS").ok().and_then(|ms| ms.parse().ok()) } else { None };
+    test.map_or(SETTLED, Duration::from_millis)
+}
+
 /// Answer one request on the page server.
 fn serve(stream: TcpStream, port: u16, shared: &Shared) -> std::io::Result<()> {
     let mut out = stream.try_clone()?;
@@ -168,9 +208,9 @@ fn serve(stream: TcpStream, port: u16, shared: &Shared) -> std::io::Result<()> {
         ];
         http::respond_with(out, status, Some("text/html; charset=utf-8"), &headers, html(&body).as_bytes(), false)
     };
-    let mut pages = shared.pages.lock().unwrap();
-    let Some(entry) = secret.and_then(|secret| pages.get_mut(secret)).filter(|page| page.asked.elapsed() < KEEP) else {
-        drop(pages);
+    let mut state = shared.state.lock().unwrap();
+    let Some(entry) = secret.and_then(|secret| state.pages.get_mut(secret)).filter(|page| page.asked.elapsed() < KEEP) else {
+        drop(state);
         return page("404 Not Found", "<h1>This question is gone</h1><p>Endeavor asks again if the agent tries the install again.</p>".to_owned(), &mut out);
     };
     match head.method() {
@@ -183,20 +223,22 @@ fn serve(stream: TcpStream, port: u16, shared: &Shared) -> std::io::Result<()> {
                     escape(&entry.question)
                 ),
             };
-            drop(pages);
+            drop(state);
             page("200 OK", body, &mut out)
         }
         "POST" => {
-            // A form sends its page's own origin; anything else isn't this page's button.
-            if head.header("Origin").is_some_and(|origin| !ours(Some(origin), "http://")) {
-                drop(pages);
+            // Every browser sends its page's own origin with a form, and says it came from the same
+            // site; a request without them isn't this page's button.
+            let same_site = head.header("Sec-Fetch-Site").is_none_or(|site| site == "same-origin");
+            if !ours(head.header("Origin"), "http://") || !same_site {
+                drop(state);
                 return page("403 Forbidden", "<h1>Not from this page</h1>".to_owned(), &mut out);
             }
             let body = match head.request_body() {
                 Ok(http::Framing::Length(length)) if length <= MAX_BODY => {
-                    drop(pages);
+                    drop(state);
                     let body = http::read_body(&mut reader, http::Framing::Length(length))?;
-                    pages = shared.pages.lock().unwrap();
+                    state = shared.state.lock().unwrap();
                     String::from_utf8_lossy(&body).into_owned()
                 }
                 _ => String::new(),
@@ -206,22 +248,27 @@ fn serve(stream: TcpStream, port: u16, shared: &Shared) -> std::io::Result<()> {
                 "answer=decline" => Some(false),
                 _ => None,
             };
-            let Some(entry) = secret.and_then(|secret| pages.get_mut(secret)) else {
-                drop(pages);
+            let Some(entry) = secret.and_then(|secret| state.pages.get_mut(secret)) else {
+                drop(state);
                 return page("404 Not Found", "<h1>This question is gone</h1><p>Endeavor asks again if the agent tries the install again.</p>".to_owned(), &mut out);
             };
             let Some(answer) = answer else {
-                drop(pages);
+                drop(state);
                 return page("400 Bad Request", "<h1>No answer</h1><p>Go back and click Install or Don't install.</p>".to_owned(), &mut out);
             };
             // The first answer stands.
+            let first = entry.answer.is_none();
             let answer = *entry.answer.get_or_insert(answer);
-            drop(pages);
+            if first {
+                let question = entry.question.clone();
+                state.said.insert(question, (answer, Instant::now()));
+            }
+            drop(state);
             shared.answered.notify_all();
             page("200 OK", said(answer), &mut out)
         }
         _ => {
-            drop(pages);
+            drop(state);
             http::respond(&mut out, "405 Method Not Allowed", None, b"", false)
         }
     }?;
@@ -233,7 +280,7 @@ fn said(install: bool) -> String {
     if install {
         "<h1>You said yes</h1><p>Endeavor installs it now. If your chat has stopped waiting, tell the agent you said yes, and it installs it on its next try. You can close this page.</p>".to_owned()
     } else {
-        "<h1>You said no</h1><p>Nothing is installed. You can close this page.</p>".to_owned()
+        "<h1>You said no</h1><p>Nothing is installed, and Endeavor won't ask about this again for 10 minutes. You can close this page.</p>".to_owned()
     }
 }
 
@@ -264,12 +311,12 @@ mod tests {
         (head.split_whitespace().nth(1).unwrap().parse().unwrap(), body.to_owned())
     }
 
-    fn post(url: &str, answer: &str, host: Option<&str>, origin: Option<&str>) -> (u16, String) {
+    fn post(url: &str, answer: &str, host: Option<&str>, origin: Option<&str>, fetch_site: Option<&str>) -> (u16, String) {
         let rest = url.strip_prefix("http://127.0.0.1:").unwrap();
         let (port, path) = rest.split_once('/').unwrap();
         let body = format!("answer={answer}");
         let host = host.map_or(format!("127.0.0.1:{port}"), str::to_owned);
-        let origin = origin.map(|o| format!("Origin: {o}\r\n")).unwrap_or_default();
+        let origin = origin.map(|o| format!("Origin: {o}\r\n")).unwrap_or_default() + &fetch_site.map(|f| format!("Sec-Fetch-Site: {f}\r\n")).unwrap_or_default();
         request(port.parse().unwrap(), &format!("POST /{path} HTTP/1.1\r\nHost: {host}\r\n{origin}Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}", body.len()))
     }
 
@@ -277,6 +324,13 @@ mod tests {
         let rest = url.strip_prefix("http://127.0.0.1:").unwrap();
         let (port, path) = rest.split_once('/').unwrap();
         request(port.parse().unwrap(), &format!("GET /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"))
+    }
+
+    /// Pretend the page for `question` was last opened over a minute ago.
+    fn age(pages: &Pages, question: &str) {
+        let mut state = pages.shared.state.lock().unwrap();
+        let page = state.pages.values_mut().find(|page| page.question == question).unwrap();
+        page.opened = Instant::now() - REOPEN_AFTER - Duration::from_secs(1);
     }
 
     #[test]
@@ -287,46 +341,83 @@ mod tests {
             opened.lock().unwrap().push(url.to_owned());
             true
         };
+        let opens = || opened.lock().unwrap().len();
         let question = "Endeavor needs to install <its helper> on lab. Install it now?";
         // Unanswered, the call says so, and nothing is a yes.
         assert_eq!(pages.ask(question, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
         let url = opened.lock().unwrap()[0].clone();
+        let origin = &url[..url.find("/install/").unwrap()];
         let (status, shown) = get(&url);
         assert_eq!(status, 200);
         assert!(shown.contains("&lt;its helper&gt;") && shown.contains("value=\"install\""), "{shown}");
         // Asked again at once, the open page is used: no second tab.
         assert_eq!(pages.ask(question, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
-        assert_eq!(opened.lock().unwrap().len(), 1);
-        // A fetch alone, another host's name, another page's form or another secret answers nothing.
-        assert_eq!(post(&url, "install", Some("evil.example:80"), None).0, 404);
-        assert_eq!(post(&url, "install", None, Some("https://evil.example")).0, 403);
-        assert_eq!(post(&format!("{}0", url), "install", None, None).0, 404);
-        assert_eq!(post(&url, "maybe", None, None).0, 400);
+        assert_eq!(opens(), 1);
+        // A fetch alone, another host's name, another page's form, no origin at all, a cross-site
+        // fetch, another secret or a bad answer answers nothing.
+        assert_eq!(post(&url, "install", Some("evil.example:80"), Some(origin), None).0, 404);
+        assert_eq!(post(&url, "install", None, Some("https://evil.example"), None).0, 403);
+        assert_eq!(post(&url, "install", None, Some("null"), None).0, 403);
+        assert_eq!(post(&url, "install", None, None, None).0, 403, "curl -d answer=install");
+        assert_eq!(post(&url, "install", None, Some(origin), Some("cross-site")).0, 403);
+        assert_eq!(post(&format!("{url}0"), "install", None, Some(origin), None).0, 404);
+        assert_eq!(post(&url, "maybe", None, Some(origin), None).0, 400);
         assert_eq!(pages.ask(question, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
-        // The button answers a call that waits.
+        // The button answers a call that waits, and one that waits on the same page with it.
         std::thread::scope(|s| {
             let waiting = s.spawn(|| pages.ask(question, Duration::from_secs(20), &|| false, &open));
+            let also = s.spawn(|| pages.ask(question, Duration::from_secs(20), &|| false, &open));
             std::thread::sleep(Duration::from_millis(100));
-            let (status, body) = post(&url, "install", None, Some(&url[..url.find("/install/").unwrap()]));
+            let (status, body) = post(&url, "install", None, Some(origin), Some("same-origin"));
             assert!(status == 200 && body.contains("You said yes"), "{body}");
-            assert_eq!(waiting.join().unwrap(), Clicked::Install);
+            assert_eq!((waiting.join().unwrap(), also.join().unwrap()), (Clicked::Install, Clicked::Install));
         });
-        // A yes is used up: the next call asks again, on a new page.
-        assert_eq!(pages.ask(question, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
-        let second = opened.lock().unwrap()[1].clone();
-        assert_ne!(second, url);
-        assert_eq!(get(&url).0, 404, "the old page is gone");
-        // A no, clicked before the next call, is that call's answer, and the first answer stands.
-        assert_eq!(post(&second, "decline", None, None).0, 200);
-        assert!(post(&second, "install", None, None).1.contains("You said no"));
-        assert_eq!(pages.ask(question, Duration::from_millis(50), &|| false, &open), Clicked::Declined);
+        // The yes holds for that question, so a call that stopped waiting before its install was
+        // done isn't asked about again; and the first answer stands.
+        assert_eq!(pages.ask(question, Duration::from_millis(50), &|| false, &open), Clicked::Install);
+        assert!(post(&url, "decline", None, Some(origin), None).1.contains("You said yes"));
+        assert_eq!(opens(), 1);
+        // Another question is another page.
+        assert_eq!(pages.ask("Install R?", Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
+        assert_eq!(opens(), 2);
+    }
+
+    #[test]
+    fn a_retrying_agent_cant_wear_the_user_down() {
+        let pages = Pages::default();
+        let opened = Mutex::new(Vec::<String>::new());
+        let open = |url: &str| {
+            opened.lock().unwrap().push(url.to_owned());
+            true
+        };
+        let opens = || opened.lock().unwrap().len();
+        let ask = |settled: Duration| pages.ask_settled("Install it now?", Duration::from_millis(50), settled, &|| false, &open);
+        // An unanswered page opens again once, a minute or more later, and not after that.
+        assert_eq!(ask(SETTLED), Clicked::NotYet);
+        age(&pages, "Install it now?");
+        assert_eq!(ask(SETTLED), Clicked::NotYet);
+        assert_eq!(opens(), 2);
+        age(&pages, "Install it now?");
+        assert_eq!(ask(SETTLED), Clicked::NotYet);
+        assert_eq!(opens(), 2, "no third tab");
+        // After Don't install, asking again at once opens no page: the answer is no.
+        let url = opened.lock().unwrap()[1].clone();
+        let origin = url[..url.find("/install/").unwrap()].to_owned();
+        assert!(post(&url, "decline", None, Some(&origin), None).1.contains("won't ask about this again for 10 minutes"));
+        for _ in 0..3 {
+            assert_eq!(ask(SETTLED), Clicked::Declined);
+        }
+        assert_eq!(opens(), 2);
+        // Once that has run out, the question gets a new page.
+        assert_eq!(ask(Duration::ZERO), Clicked::NotYet);
+        assert_eq!(opens(), 3);
     }
 
     #[test]
     fn without_a_browser_no_one_is_asked_and_a_cancel_stops_the_wait() {
         let pages = Pages::default();
         assert_eq!(pages.ask("Install it now?", Duration::from_secs(20), &|| false, &|_| false), Clicked::NoBrowser);
-        assert!(pages.shared.pages.lock().unwrap().is_empty(), "no page is left to answer");
+        assert!(pages.shared.state.lock().unwrap().pages.is_empty(), "no page is left to answer");
         assert_eq!(pages.ask("Install it now?", Duration::from_secs(20), &|| true, &|_| true), Clicked::Dropped);
     }
 }
