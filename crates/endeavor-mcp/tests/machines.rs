@@ -2318,6 +2318,28 @@ fn a_client_that_says_it_shows_dialogs_and_doesnt_gets_the_page() {
 }
 
 #[test]
+fn a_dialog_that_goes_unanswered_gets_the_page_too() {
+    // Claude Code's `-p` takes the dialog and never answers it (#396's smoke runs). After a while
+    // the page asks as well, even for a look, since the user is being asked already; the click
+    // installs it, and the dialog is taken down.
+    let place = Place::bare("silent-dialog", &[("ENDEAVOR_TEST_DIALOG_SILENT_MS", "300")]);
+    let julia = place.julia.display().to_string();
+    let mut front = place.front();
+    front.dialog = Some("silent");
+    front.click_pages(Some("install"));
+    front.initialize();
+    let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
+    assert_eq!((done["state"].as_str(), done["saved"].clone()), (Some("connected"), json!(true)), "{done}");
+    assert_eq!(front.asked.len(), 1);
+    assert_eq!(front.pages.lock().unwrap().len(), 1);
+    assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
+    // Silence isn't the end of dialogs: the tools still say Endeavor asks in one.
+    let listed = front.request("tools/list", json!({}));
+    let add = listed["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "add_machine").unwrap().clone();
+    assert!(add["inputSchema"]["properties"]["install"]["description"].as_str().unwrap().contains("Endeavor asks the user in a dialog"), "{add}");
+}
+
+#[test]
 fn without_a_dialog_or_a_browser_nothing_is_installed() {
     let place = Place::bare("no-browser-install", &[]);
     let mut command = julia_when_needed_front(&place, &["--folder", &place.project.display().to_string()], &[]);

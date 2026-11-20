@@ -45,7 +45,7 @@ const CONNECT_WAIT: Duration = Duration::from_secs(10);
 const MIN_CALL: Duration = Duration::from_millis(300);
 
 /// An `ENDEAVOR_TEST_*` variable. A release build never reads them, so they cannot redirect a shipped binary's ssh.
-fn test_var(name: &str) -> Option<std::ffi::OsString> {
+pub(super) fn test_var(name: &str) -> Option<std::ffi::OsString> {
     if cfg!(debug_assertions) { std::env::var_os(name) } else { None }
 }
 
@@ -1159,7 +1159,15 @@ impl Relay {
         let mut install = arguments.clone();
         install["install"] = true.into();
         let mut dialog = self.consent.can_ask();
-        let mut asked = if dialog { self.consent.ask_install(message, &question, &again, &|line| self.write(line)) } else { Err(super::consent::NO_DIALOG.to_owned()) };
+        let page = self.page_shows();
+        let mut asked = if dialog { self.consent.ask_install(message, &question, &again, page, &|line| self.write(line)) } else { Err(super::consent::NO_DIALOG.to_owned()) };
+        // A dialog with no answer yet, which may not be up at all (`claude -p`): the page asks as
+        // well, for as long as the dialog would have waited, and the first answer counts. The user
+        // is being asked already, so this opens the page with or without `install`.
+        if asked.as_ref().is_err_and(|e| e == super::consent::SILENT) {
+            let wait = super::consent::ANSWER_WAIT.saturating_sub(began.elapsed());
+            asked = self.ask_on_page(message, &question, &again, wait);
+        }
         // No dialog, or one the client said it would show and didn't (#381): the page.
         if asked.as_ref().is_err_and(|e| e == super::consent::NO_DIALOG) {
             dialog = false;
@@ -1167,8 +1175,8 @@ impl Relay {
             if !wants_install {
                 return (!self.consent.not_asking(message)).then_some(looked);
             }
-            asked = if self.page_shows() {
-                self.ask_on_page(message, &question, &again, began)
+            asked = if page {
+                self.ask_on_page(message, &question, &again, page_wait().min(PAGE_CALL.saturating_sub(began.elapsed() + INSTALL_SHARE)))
             } else {
                 self.consent.not_asking(message);
                 Err(CANT_ASK_ERROR.to_owned())
@@ -1193,11 +1201,17 @@ impl Relay {
     }
 
     /// `ask_install`'s answer where the client can't show a dialog: the user's click on a page that
-    /// the front opens in their browser (#381). The call waits for it while it leaves the install
-    /// time within `PAGE_CALL` from `began`; one that has stopped waiting finds the click on its next try.
-    fn ask_on_page(&self, message: &Value, question: &str, again: &str, began: Instant) -> Result<bool, String> {
-        let wait = page_wait().min(PAGE_CALL.saturating_sub(began.elapsed() + INSTALL_SHARE));
-        let clicked = self.pages.ask(question, true, wait, &|| self.consent.cancelled(message), &open_page);
+    /// the front opens in their browser (#381), waiting up to `wait` (where there is no dialog, what
+    /// leaves the install its time within `PAGE_CALL`); one that has stopped waiting finds the click
+    /// on its next try.
+    /// After a silent dialog (`consent::SILENT`), the dialog is still up, and whichever the user
+    /// answers first counts.
+    fn ask_on_page(&self, message: &Value, question: &str, again: &str, wait: Duration) -> Result<bool, String> {
+        let clicked = self.pages.ask(question, true, wait, &|| self.consent.cancelled(message) || self.consent.dialog_answered(message), &open_page);
+        if let Some(answer) = self.consent.install_answer_after_page(message, again, &|line| self.write(line)) {
+            self.consent.not_asking(message);
+            return answer;
+        }
         if self.consent.not_asking(message) || clicked == Clicked::Dropped {
             return Ok(false);
         }

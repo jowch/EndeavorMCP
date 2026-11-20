@@ -17,7 +17,20 @@ use serde_json::{Value, json};
 use crate::mcp::{to_json, tool_error};
 
 /// How long the front waits for the user's answer before it gives up and downloads nothing.
-const ANSWER_WAIT: Duration = Duration::from_secs(30 * 60);
+pub(super) const ANSWER_WAIT: Duration = Duration::from_secs(30 * 60);
+
+/// A dialog with no answer after this may not be up at all: Claude Code's `-p` takes the request
+/// and never answers it (#396's smoke runs). Where a browser can be opened, the front then asks on
+/// the page too, with the dialog still up, and whichever the user answers first is their answer.
+/// A person answers a two-line question well within this; one who doesn't just sees the page as well.
+/// A debug build takes `ENDEAVOR_TEST_DIALOG_SILENT_MS`.
+fn dialog_silent() -> Duration {
+    #[cfg(test)]
+    if let Some(silent) = SILENT_FOR_TEST.get() {
+        return silent;
+    }
+    super::machines::test_var("ENDEAVOR_TEST_DIALOG_SILENT_MS").and_then(|ms| ms.to_str()?.parse().ok()).map_or(Duration::from_secs(20), Duration::from_millis)
+}
 
 /// A dialog closed sooner than this after it was sent wasn't seen by anyone: the client said it can
 /// show forms but closed it unshown (Claude Code's `-p` does, without a hook to answer it). No one
@@ -27,6 +40,17 @@ const DIALOG_GONE: Duration = Duration::from_millis(700);
 /// What `ask_install` fails with when the client turned out not to show dialogs (`Answer::NoDialog`):
 /// the caller asks on the page instead. Never an agent's error.
 pub(super) const NO_DIALOG: &str = "no_dialog";
+
+#[cfg(test)]
+thread_local! {
+    /// `dialog_silent` for the unit tests on this thread.
+    static SILENT_FOR_TEST: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+/// What `ask_install` fails with when the dialog went unanswered for `dialog_silent` (`Answer::Silent`):
+/// the caller asks on the page as well, and takes the first answer (`install_answer_after_page`).
+/// Never an agent's error.
+pub(super) const SILENT: &str = "dialog_silent";
 
 /// The start of the ids of the front's own requests to the client, which its answers carry back.
 const ID_PREFIX: &str = "endeavor-consent-";
@@ -121,6 +145,16 @@ pub(super) struct Consent {
     /// The question each waiting call asked, by the call's id (as JSON), for a cancel of the call;
     /// none yet while the front looks at what it would download.
     calls: Mutex<HashMap<String, Option<String>>>,
+    /// The dialogs still up while the page asks too (`Answer::Silent`), by the call's id (as JSON).
+    silent: Mutex<HashMap<String, Silent>>,
+}
+
+/// A dialog that got no answer in `dialog_silent` and stays up while the page asks.
+struct Silent {
+    id: String,
+    answers: mpsc::Receiver<Value>,
+    /// Its answer, once one came.
+    answer: Option<Value>,
 }
 
 /// What a notebook's install waits for, as the runtime's `list_notebooks` says it.
@@ -134,7 +168,6 @@ pub(super) enum Waiting {
     Unknown(String),
 }
 
-/// What the user said.
 /// Where the user can be asked about a download neither in a dialog nor on a page.
 const DOWNLOAD_CANT_ASK: &str = "download_cant_ask::Endeavor can't ask the user from this app: it can neither show its dialog nor open a page in their browser. So nothing downloads, and calling approve_install again won't download it. Tell the user what would download and its size, and that they can approve it with the button on the notebook's page: its link is the notebook's browser_url from open_notebook or list_notebooks, and where that page is on another computer, the note that came with it says how to reach it. Don't work around it.";
 
@@ -144,6 +177,7 @@ pub(super) fn download_cant_ask() -> Value {
     tool_error(DOWNLOAD_CANT_ASK, false)
 }
 
+/// What the user said.
 pub(super) enum Asked {
     /// They said yes: pass the call on.
     Yes,
@@ -153,6 +187,8 @@ pub(super) enum Asked {
     No(Value),
     /// The client said it shows dialogs but didn't show this one (`Answer::NoDialog`): ask on the page.
     NoDialog,
+    /// The dialog is up with no answer yet (`Answer::Silent`): ask on the page as well.
+    Silent,
     /// The client cancelled the call: nothing downloads, and the call gets no reply.
     Dropped,
 }
@@ -230,14 +266,25 @@ impl Consent {
     /// Before `approve_install` reaches the runtime where the client can't show a dialog (#388): the
     /// user's click on a page in their browser, through `pages`, waiting up to `wait`. `page` says
     /// whether a browser can be opened. As `ask` answers.
-    pub(super) fn ask_on_page(&self, call: &Value, waiting: Waiting, page: bool, wait: std::time::Duration, pages: &super::install_page::Pages, open: &dyn Fn(&str) -> bool) -> Asked {
+    /// After `Asked::Silent`, the dialog is still up, and whichever the user answers first counts;
+    /// `write` takes the dialog down when the page's answer stands.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn ask_on_page(&self, call: &Value, waiting: Waiting, page: bool, wait: std::time::Duration, pages: &super::install_page::Pages, open: &dyn Fn(&str) -> bool, write: &dyn Fn(&str)) -> Asked {
         use super::install_page::Clicked;
         let Some(question) = Consent::download_question(&waiting) else {
+            if let Some(asked) = self.download_answer_after_page(call, write) {
+                self.not_asking(call);
+                return asked;
+            }
             return if self.not_asking(call) { Asked::Dropped } else { Asked::Unasked };
         };
         // A yes to a question that can't say what downloads is for this call only.
         let hold = matches!(waiting, Waiting::Asking { .. });
-        let clicked = if page { pages.ask(&question, hold, wait, &|| self.cancelled(call), open) } else { Clicked::NoBrowser };
+        let clicked = if page { pages.ask(&question, hold, wait, &|| self.cancelled(call) || self.dialog_answered(call), open) } else { Clicked::NoBrowser };
+        if let Some(asked) = self.download_answer_after_page(call, write) {
+            self.not_asking(call);
+            return asked;
+        }
         if self.not_asking(call) || clicked == Clicked::Dropped {
             return Asked::Dropped;
         }
@@ -282,6 +329,10 @@ impl Consent {
             Some(asked) => {
                 if let Some(waiting) = self.waiting.lock().unwrap().remove(asked) {
                     let _ = waiting.send(json!({ "cancelled": true }));
+                } else {
+                    // Its dialog was answered, and the call goes on to the page (`Answer::NoDialog`):
+                    // marked, so that it doesn't.
+                    *question = Some(CANCELLED.to_owned());
                 }
             }
             // Cancelled while the front looks: `ask` finds it marked and asks nothing.
@@ -292,37 +343,99 @@ impl Consent {
 
     /// Before `approve_install` reaches the runtime: ask the user, through `write`, whether to make
     /// the download `waiting`.
-    pub(super) fn ask(&self, call: &Value, waiting: Waiting, write: &dyn Fn(&str)) -> Asked {
+    /// `page` says whether the page can ask as well, if the dialog goes unanswered.
+    pub(super) fn ask(&self, call: &Value, waiting: Waiting, page: bool, write: &dyn Fn(&str)) -> Asked {
         let question = if self.can_ask() { Consent::download_question(&waiting) } else { None };
-        let why = match self.question(call, question.as_deref(), write) {
+        download_answer(self.question(call, question.as_deref(), page, write))
+    }
+
+    /// After the page asked about a download while the dialog was up (`Asked::Silent`): the dialog's
+    /// answer if it came first; none if the page's stands, and the dialog is taken down.
+    pub(super) fn download_answer_after_page(&self, call: &Value, write: &dyn Fn(&str)) -> Option<Asked> {
+        self.dialog_after_page(call, write).map(download_answer)
+    }
+
+    /// As `download_answer_after_page`, for a machine install: as `ask_install` answers.
+    pub(super) fn install_answer_after_page(&self, call: &Value, again: &str, write: &dyn Fn(&str)) -> Option<Result<bool, String>> {
+        self.dialog_after_page(call, write).map(|answer| install_answer(answer, again))
+    }
+
+    /// Whether the dialog that stays up for `call` while the page asks has been answered (or the
+    /// call cancelled), so that the page stops waiting.
+    pub(super) fn dialog_answered(&self, call: &Value) -> bool {
+        let mut silent = self.silent.lock().unwrap();
+        let Some(dialog) = silent.get_mut(&to_json(&call["id"])) else { return false };
+        if dialog.answer.is_none() {
+            dialog.answer = dialog.answers.try_recv().ok();
+        }
+        dialog.answer.is_some()
+    }
+
+    fn dialog_after_page(&self, call: &Value, write: &dyn Fn(&str)) -> Option<Answer> {
+        let Silent { id, answers, answer } = self.silent.lock().unwrap().remove(&to_json(&call["id"]))?;
+        self.waiting.lock().unwrap().remove(&id);
+        let answer = answer.or_else(|| answers.try_recv().ok());
+        let Some(answer) = answer else {
+            // The page answered first, or neither did: the dialog goes.
+            write(&to_json(&json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": id } })));
+            return None;
+        };
+        let action = answer["result"]["action"].as_str().unwrap_or_default();
+        Some(match action {
+            _ if answer["cancelled"] == true => {
+                write(&to_json(&json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": id } })));
+                Answer::Dropped
+            }
+            "accept" => Answer::Yes,
+            "decline" => Answer::Declined,
+            "cancel" => Answer::Closed,
+            _ => Answer::Failed(answer["error"]["message"].as_str().unwrap_or("the client gave no answer").to_owned()),
+        })
+    }
+}
+
+/// `ask`'s answer from the user's.
+fn download_answer(answer: Answer) -> Asked {
+    {
+        let why = match answer {
             Answer::Yes => return Asked::Yes,
             Answer::Unasked => return Asked::Unasked,
             Answer::Dropped => return Asked::Dropped,
             Answer::NoDialog => return Asked::NoDialog,
+            Answer::Silent => return Asked::Silent,
             Answer::Declined => "download_declined::The user said no in Endeavor's download dialog, which the app they talk to you in showed, so nothing downloads and the cells that need it stay queued. Tell the user; call approve_install again only if they ask for the download.".to_owned(),
             Answer::Closed => "download_not_answered::The user closed Endeavor's download dialog without answering. That dialog was in the app they talk to you in, and it is gone now. Nothing downloads and the cells that need it stay queued. Ask the user in the chat whether to download it; if they say yes, call approve_install again, and the same dialog asks them once more. The notebook's page also has its own button that approves it.".to_owned(),
-            Answer::TimedOut => "download_not_answered::Endeavor asked the user in a dialog in the app they talk to you in and got no answer, so nothing downloads. Ask the user in the chat; if they want it, call approve_install again, and it asks them once more.".to_owned(),
+            Answer::TimedOut => "download_not_answered::Endeavor asked the user in a dialog and got no answer in 30 minutes, so it took the dialog down and nothing downloads. No dialog is showing now: don't tell the user to answer one. Ask them in the chat whether to download it; if they want it, call approve_install again, and it asks them once more. The notebook's page also has its own button that approves it.".to_owned(),
             Answer::Failed(error) => format!("download_not_answered::Endeavor couldn't ask the user ({error}), so nothing downloads. Ask the user in the chat; if they want it, call approve_install again."),
         };
         Asked::No(tool_error(&why, false))
     }
+}
+
+/// `ask_install`'s answer from the user's.
+fn install_answer(answer: Answer, again: &str) -> Result<bool, String> {
+    Err(match answer {
+        Answer::Yes => return Ok(true),
+        Answer::Dropped => return Ok(false),
+        Answer::NoDialog => NO_DIALOG.to_owned(),
+        Answer::Silent => SILENT.to_owned(),
+        // Never a yes for the user: the client stopped saying it can show a form since the caller looked.
+        Answer::Unasked => "install_not_answered::Endeavor couldn't ask the user in a dialog, so nothing was installed. Ask the user in the chat; if they want it, call again with `install: true`.".to_owned(),
+        Answer::Declined => format!("install_declined::The user said no in Endeavor's install dialog, which the app they talk to you in showed, so nothing was installed. Tell the user; call {again} with `install: true` only if they ask for it."),
+        Answer::Closed => format!("install_not_answered::The user closed Endeavor's install dialog without answering. That dialog was in the app they talk to you in, and it is gone now. Nothing was installed. Ask the user in the chat whether Endeavor may install it; if they say yes, call {again} with `install: true`, and the same dialog asks them once more."),
+        Answer::TimedOut => format!("install_not_answered::Endeavor asked the user in a dialog and got no answer in 30 minutes, so it took the dialog down and nothing was installed. No dialog is showing now: don't tell the user to answer one. Ask them in the chat; if they want it, call {again} with `install: true`, and it asks them once more."),
+        Answer::Failed(error) => format!("install_not_answered::Endeavor couldn't ask the user ({error}), so nothing was installed. Ask the user in the chat; if they want it, call {again} with `install: true`."),
+    })
+}
+
+impl Consent {
 
     /// Before a machine tool's `install: true` goes ahead (#378): ask the user, through `write`,
     /// `question`, which names what it would install. `again` is how the agent calls it again.
     /// The call goes ahead on `Ok(true)`, gets no reply on `Ok(false)` (the client cancelled it),
     /// and on `Err` installs nothing, with the `kind::message` it fails with.
-    pub(super) fn ask_install(&self, call: &Value, question: &str, again: &str, write: &dyn Fn(&str)) -> Result<bool, String> {
-        Err(match self.question(call, Some(question), write) {
-            Answer::Yes => return Ok(true),
-            Answer::Dropped => return Ok(false),
-            Answer::NoDialog => NO_DIALOG.to_owned(),
-            // Never a yes for the user: the client stopped saying it can show a form since the caller looked.
-            Answer::Unasked => "install_not_answered::Endeavor couldn't ask the user in a dialog, so nothing was installed. Ask the user in the chat; if they want it, call again with `install: true`.".to_owned(),
-            Answer::Declined => format!("install_declined::The user said no in Endeavor's install dialog, which the app they talk to you in showed, so nothing was installed. Tell the user; call {again} with `install: true` only if they ask for it."),
-            Answer::Closed => format!("install_not_answered::The user closed Endeavor's install dialog without answering. That dialog was in the app they talk to you in, and it is gone now. Nothing was installed. Ask the user in the chat whether Endeavor may install it; if they say yes, call {again} with `install: true`, and the same dialog asks them once more."),
-            Answer::TimedOut => format!("install_not_answered::Endeavor asked the user in a dialog in the app they talk to you in and got no answer, so nothing was installed. Ask the user in the chat; if they want it, call {again} with `install: true`, and it asks them once more."),
-            Answer::Failed(error) => format!("install_not_answered::Endeavor couldn't ask the user ({error}), so nothing was installed. Ask the user in the chat; if they want it, call {again} with `install: true`."),
-        })
+    pub(super) fn ask_install(&self, call: &Value, question: &str, again: &str, page: bool, write: &dyn Fn(&str)) -> Result<bool, String> {
+        install_answer(self.question(call, Some(question), page, write), again)
     }
 
     /// Whether the client cancelled `call` since `looking`.
@@ -337,8 +450,9 @@ impl Consent {
     }
 
     /// Ask the user `question` through `write`, for `call`; none, or a client that can't show a
-    /// form, asks nothing.
-    fn question(&self, call: &Value, question: Option<&str>, write: &dyn Fn(&str)) -> Answer {
+    /// form, asks nothing. With `page`, a dialog unanswered in `dialog_silent` stays up and is
+    /// `Answer::Silent`: the caller asks on the page as well.
+    fn question(&self, call: &Value, question: Option<&str>, page: bool, write: &dyn Fn(&str)) -> Answer {
         let call_id = to_json(&call["id"]);
         // Under the calls' lock from the check to the question's entry, so that a cancel either marks
         // the call or finds its question.
@@ -362,7 +476,15 @@ impl Consent {
             "params": { "message": question, "requestedSchema": { "type": "object", "properties": {} } },
         })));
         let sent = std::time::Instant::now();
-        let answer = answer.recv_timeout(ANSWER_WAIT).ok();
+        let answer = match answer.recv_timeout(if page { dialog_silent().min(ANSWER_WAIT) } else { ANSWER_WAIT }) {
+            Ok(answer) => Some(answer),
+            Err(_) if page => {
+                eprintln!("[ Info: No answer to Endeavor's dialog yet; asking on a page as well");
+                self.silent.lock().unwrap().insert(call_id, Silent { id, answers: answer, answer: None });
+                return Answer::Silent;
+            }
+            Err(_) => None,
+        };
         self.waiting.lock().unwrap().remove(&id);
         let action = answer.as_ref().and_then(|a| a["result"]["action"].as_str()).unwrap_or_default().to_owned();
         // A client that says it shows forms may not (#381): one that answers with an error, or closes
@@ -377,6 +499,11 @@ impl Consent {
             _ => true,
         };
         let mut calls = self.calls.lock().unwrap();
+        if calls.get(&call_id).is_some_and(|question| question.as_deref() == Some(CANCELLED)) {
+            // Cancelled after its answer came.
+            calls.remove(&call_id);
+            return Answer::Dropped;
+        }
         if shown {
             calls.remove(&call_id);
         } else {
@@ -425,6 +552,8 @@ enum Answer {
     /// The client didn't show it: it answered with an error, or closed it before anyone could read it.
     /// It is taken for one that can't show dialogs from now on.
     NoDialog,
+    /// No answer yet in `dialog_silent`: the dialog stays up, and the page asks as well.
+    Silent,
 }
 
 /// When the front can't tell what `notebook`'s install waits for: an id that isn't one waits for
@@ -523,7 +652,7 @@ mod tests {
                 }
             })
         };
-        let result = consent.ask(&call(), waiting, &|line| to_client.send(line.to_owned()).unwrap());
+        let result = consent.ask(&call(), waiting, false, &|line| to_client.send(line.to_owned()).unwrap());
         drop(to_client);
         answering.join().unwrap();
         let sent = sent.lock().unwrap().clone();
@@ -558,7 +687,7 @@ mod tests {
                 }
                 asked
             });
-            let result = consent.ask_install(&call(), "Endeavor needs to install Endeavor's helper on lab. Install it now?", "`add_machine` again", &|line| to_client.send(line.to_owned()).unwrap());
+            let result = consent.ask_install(&call(), "Endeavor needs to install Endeavor's helper on lab. Install it now?", "`add_machine` again", false, &|line| to_client.send(line.to_owned()).unwrap());
             drop(to_client);
             (result, answering.join().unwrap())
         };
@@ -570,7 +699,7 @@ mod tests {
         assert!(closed.as_ref().is_err_and(|e| e.starts_with("install_not_answered::")), "{closed:?}");
         // A client that no longer says it can show a form is never taken as a yes.
         consent.learn_client(&initialize(Value::Null));
-        let unasked = consent.ask_install(&call(), "Install it now?", "`add_machine` again", &|_| panic!("nothing is sent"));
+        let unasked = consent.ask_install(&call(), "Install it now?", "`add_machine` again", false, &|_| panic!("nothing is sent"));
         assert!(unasked.as_ref().is_err_and(|e| e.starts_with("install_not_answered::")), "{unasked:?}");
     }
 
@@ -593,7 +722,7 @@ mod tests {
                 }
             });
             consent.looking(&call());
-            let asked = consent.ask(&call(), all(), &|line| to_client.send(line.to_owned()).unwrap());
+            let asked = consent.ask(&call(), all(), false, &|line| to_client.send(line.to_owned()).unwrap());
             drop(to_client);
             answering.join().unwrap();
             (asked, consent)
@@ -605,6 +734,9 @@ mod tests {
         // A yes at once is a yes: a client may answer for its user, as `-p` with a hook does.
         let (got, consent) = closed_at_once(json!({ "action": "accept" }));
         assert!(matches!(got, Asked::Yes) && consent.can_ask());
+        // So is a no at once: only a close is too fast to be a person's.
+        let (got, consent) = closed_at_once(json!({ "action": "decline" }));
+        assert!(matches!(got, Asked::No(_)) && consent.can_ask());
         // An error is no dialog, for a machine install too.
         let consent = Arc::new(Consent::default());
         consent.learn_client(&initialize(json!({})));
@@ -619,7 +751,7 @@ mod tests {
                 assert!(consent2.take_answer(&json!({ "jsonrpc": "2.0", "id": request["id"], "error": { "code": -32601, "message": "Method not found" } })));
             }
         });
-        let install = consent.ask_install(&call(), "Install it now?", "`add_machine` again", &|line| to_client.send(line.to_owned()).unwrap());
+        let install = consent.ask_install(&call(), "Install it now?", "`add_machine` again", false, &|line| to_client.send(line.to_owned()).unwrap());
         drop(to_client);
         answering.join().unwrap();
         assert_eq!(install, Err(NO_DIALOG.to_owned()));
@@ -641,7 +773,7 @@ mod tests {
                 }
             });
             consent.looking(&call());
-            let got = consent.ask(&call(), all(), &|line| to_client.send(line.to_owned()).unwrap());
+            let got = consent.ask(&call(), all(), false, &|line| to_client.send(line.to_owned()).unwrap());
             drop(to_client);
             answering.join().unwrap();
             (got, consent.can_ask())
@@ -681,7 +813,7 @@ mod tests {
         let (to_client, client) = mpsc::channel::<String>();
         let asking = {
             let consent = consent.clone();
-            std::thread::spawn(move || consent.ask(&call(), all(), &|line| to_client.send(line.to_owned()).unwrap()))
+            std::thread::spawn(move || consent.ask(&call(), all(), false, &|line| to_client.send(line.to_owned()).unwrap()))
         };
         let question: Value = serde_json::from_str(&client.recv().unwrap()).unwrap();
         assert!(!consent.take_cancel(&json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 8 } })), "another call's cancel is the runtime's");
@@ -700,7 +832,7 @@ mod tests {
         consent.looking(&call());
         let cancel = json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 9 } });
         assert!(consent.take_cancel(&cancel) && consent.take_cancel(&cancel));
-        assert!(matches!(consent.ask(&call(), all(), &|_| panic!("asked")), Asked::Dropped));
+        assert!(matches!(consent.ask(&call(), all(), false, &|_| panic!("asked")), Asked::Dropped));
         // Done with: a later cancel of the same id is the runtime's again.
         assert!(!consent.take_cancel(&cancel));
     }
@@ -710,7 +842,7 @@ mod tests {
         for elicitation in [Value::Null, json!({ "url": {} })] {
             let consent = Consent::default();
             consent.learn_client(&initialize(elicitation));
-            assert!(matches!(consent.ask(&call(), all(), &|_| panic!("asked")), Asked::Unasked));
+            assert!(matches!(consent.ask(&call(), all(), false, &|_| panic!("asked")), Asked::Unasked));
             // approve_install says where it asks instead (#388): on a page, or nowhere.
             let listed = to_json(&json!({ "result": { "tools": [{ "name": "approve_install", "description": ASK_IN_CHAT }] } }));
             let description = |page: bool| serde_json::from_str::<Value>(&consent.tools_listed(listed.clone(), page)).unwrap()["result"]["tools"][0]["description"].as_str().unwrap().to_owned();
@@ -753,6 +885,66 @@ mod tests {
     }
 
     #[test]
+    fn a_dialog_that_goes_unanswered_gets_the_page_too_and_its_late_answer_counts() {
+        // Claude Code's `-p` takes the dialog and never answers (#396's smoke runs): after a while
+        // the page asks as well, and the dialog stays up. A slow person who then answers the dialog
+        // gives the answer: here, a no, which the page's wait doesn't outlast.
+        SILENT_FOR_TEST.set(Some(Duration::from_millis(200)));
+        let consent = Arc::new(Consent::default());
+        consent.learn_client(&initialize(json!({ "form": {} })));
+        let consent2 = consent.clone();
+        let (to_client, client) = mpsc::channel::<String>();
+        let answering = std::thread::spawn(move || {
+            let mut sent = Vec::new();
+            for line in client {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                if request["method"] == "elicitation/create" {
+                    let (consent2, id) = (consent2.clone(), request["id"].clone());
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(600));
+                        consent2.take_answer(&json!({ "jsonrpc": "2.0", "id": id, "result": { "action": "decline" } }));
+                    });
+                }
+                sent.push(request);
+            }
+            sent
+        });
+        let write = |line: &str| to_client.send(line.to_owned()).unwrap();
+        let pages = super::super::install_page::Pages::default();
+        let opened = Mutex::new(Vec::<String>::new());
+        let open = |url: &str| {
+            opened.lock().unwrap().push(url.to_owned());
+            true
+        };
+        consent.looking(&call());
+        assert!(matches!(consent.ask(&call(), all(), true, &write), Asked::Silent));
+        assert!(consent.can_ask(), "silence isn't the end of dialogs");
+        let began = std::time::Instant::now();
+        let asked = consent.ask_on_page(&call(), all(), true, Duration::from_secs(10), &pages, &open, &write);
+        assert!(began.elapsed() < Duration::from_secs(5), "the dialog's answer ends the page's wait");
+        let Asked::No(result) = asked else { panic!("a no in the dialog is a no") };
+        assert!(result["content"][0]["text"].as_str().unwrap().contains("said no"), "{result}");
+        assert_eq!(opened.lock().unwrap().len(), 1, "the page asked too");
+        drop(to_client);
+        let sent = answering.join().unwrap();
+        assert_eq!(sent.len(), 1, "the answered dialog isn't withdrawn: {sent:?}");
+
+        // A silent client whose call is cancelled while both ask: nothing downloads, and no reply.
+        let (to_client, client) = mpsc::channel::<String>();
+        let answering = std::thread::spawn(move || client.into_iter().map(|line| serde_json::from_str::<Value>(&line).unwrap()).collect::<Vec<_>>());
+        let write = |line: &str| to_client.send(line.to_owned()).unwrap();
+        consent.looking(&call());
+        assert!(matches!(consent.ask(&call(), all(), true, &write), Asked::Silent));
+        let cancelling = { let consent = consent.clone(); std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(300)); consent.take_cancel(&json!({ "method": "notifications/cancelled", "params": { "requestId": 9 } })) }) };
+        assert!(matches!(consent.ask_on_page(&call(), all(), true, Duration::from_secs(10), &pages, &open, &write), Asked::Dropped));
+        assert!(cancelling.join().unwrap());
+        drop(to_client);
+        let sent = answering.join().unwrap();
+        assert!(sent.iter().any(|l| l["method"] == "notifications/cancelled" && l["params"]["requestId"] == sent[0]["id"]), "the dialog is withdrawn: {sent:?}");
+        SILENT_FOR_TEST.set(None);
+    }
+
+    #[test]
     fn without_a_dialog_a_download_waits_for_the_pages_button() {
         use std::io::{Read, Write};
         let consent = Consent::default();
@@ -765,7 +957,7 @@ mod tests {
         };
         let ask = |waiting: Waiting, page: bool| {
             consent.looking(&call());
-            consent.ask_on_page(&call(), waiting, page, Duration::from_millis(50), &pages, &open)
+            consent.ask_on_page(&call(), waiting, page, Duration::from_millis(50), &pages, &open, &|_| ())
         };
         let error = |asked: Asked| match asked {
             Asked::No(result) => result["content"][0]["text"].as_str().unwrap().to_owned(),
