@@ -590,6 +590,7 @@ function render_png(session, nb, cell)
     png, source = _cell_png(session, nb, cell)
     rendered = Dict{String,Any}("png" => png === nothing ? nothing : base64encode(png), "mime" => string(cell.output.mime))
     png !== nothing && source != "value" && (rendered["source"] = source)
+    _interactive_html(cell.output) && (rendered["interactive"] = true)
     return rendered
 end
 

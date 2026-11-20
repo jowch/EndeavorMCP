@@ -165,6 +165,17 @@ function _embedded_png(output)
     return length(png) >= 8 && png[1:8] == UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] ? png : nothing
 end
 
+# What makes HTML interactive: a script, a canvas, or a control (`<bond>` is Pluto's `@bind`).
+const _INTERACTIVE = r"<(script|canvas|input|select|button|textarea|iframe|bond)\b"i
+
+"""
+    _interactive_html(output) -> Bool
+
+Whether an HTML output has scripts or controls (an interactive plot, a widget), so that
+no picture of it shows that it works. Markdown and plain tables have neither.
+"""
+_interactive_html(output) = output.mime == MIME("text/html") && output.body isa AbstractString && occursin(_INTERACTIVE, output.body)
+
 """
     _cell_png(session, nb, cell) -> (Union{Vector{UInt8}, Nothing}, source)
 

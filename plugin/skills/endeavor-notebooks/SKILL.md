@@ -56,6 +56,9 @@ A session works in one notebook: the first it creates or opens. `list_notebooks`
 
 - For tables and other rich values, `output` only names the type and `output_text` has the value as text. Read that; don't edit the cell to print it. In a run's result, `output` is named `output_summary`, and `output_text` is cut at 2000 bytes for the cells you ran and at 200 for cells that only ran along with them (the cells that depend on them, or stale cells they needed), other than ones you edited; `read_cell` gives up to 16 KB.
 - For a plot, call `view_cell_output` and look at it before you say it is right. Code that runs can still draw the wrong thing.
+- An interactive plot or a widget is HTML. Outside the Endeavor app, or for an R or Python notebook, `view_cell_output` fails with `no_image` for most HTML: then you haven't seen it.
+  - Keep the plot as the user asked for it. Don't switch plotting packages or go to a static plot, and don't redraw it another way or install anything to get a picture. If the chosen package fails to load, tell the user and stop.
+  - In your answer, say that you couldn't see the plot, and ask the user to check that it shows and that its hover, zoom or other controls work. Don't describe how it looks or behaves beyond what the code sets. A picture, when there is one, shows how the plot looks, not that its controls work.
 - Fold cells that hold only prose (`add_cell`, `edit_cell` or `edit_cells` with `folded=true`, or `fold_cell`), so the reader sees the rendered text and not its source.
 
 ## Shape the notebook

@@ -935,8 +935,13 @@ impl Call<'_> {
         }
         let rendered = self.nbs.call("render_png", json!({ "notebook_id": nb.id, "cell_id": cell }))?;
         let mime = rendered["mime"].as_str().unwrap_or_default();
+        // An interactive plot or widget: what the agent may tell the user goes in the result it
+        // reads as it answers, since the skill's text alone didn't stop Haiku claiming hover and
+        // zoom worked, or switching packages to get a picture (#393's smoke runs).
+        let interactive = rendered["interactive"] == true;
         let Some(png) = rendered["png"].as_str() else {
-            return Err(argument_error(&format!("no_image::Cell {cell}: its output ({mime}) {NO_PNG}; read_cell shows it as text")));
+            let unseen = if interactive { format!(". {INTERACTIVE_UNSEEN}") } else { String::new() };
+            return Err(argument_error(&format!("no_image::Cell {cell}: its output ({mime}) {NO_PNG}; read_cell shows it as text{unseen}")));
         };
         let bytes = base64_len(png);
         if bytes > MAX_IMAGE_BYTES {
@@ -960,6 +965,9 @@ impl Call<'_> {
                 _ if edited => "This is the output of the cell's last run, before its code was edited; run it to see the new code's output.",
                 _ => "This is the output of the cell's last run; a cell it depends on has changed since, so it is stale. Run it to see the current output.",
             });
+        }
+        if interactive {
+            interactive_picture(&mut meta);
         }
         Ok(Reply::Image { meta, png_base64: png.to_owned() })
     }
@@ -2211,6 +2219,22 @@ pub(super) fn cut_middle(text: &str, max: usize, end: usize, rest: &str) -> Stri
 /// Where the rest of an output `read_cell` cut is: nowhere a tool reaches.
 const OUTPUT_REST: &str = "No tool shows them: to see a part, run a cell that picks it out, such as its first or last lines.";
 
+/// What `view_cell_output` tells the agent about an interactive output (an HTML one with scripts or
+/// controls, `_interactive_html` in `Output.jl`) that it has no picture of, and one it has a picture of.
+pub(crate) const INTERACTIVE_UNSEEN: &str = "It is interactive (it has scripts or controls), and you haven't seen it. In your answer, say that you couldn't see it, and ask the user to check that it shows and that its hover, zoom or other controls work. Don't describe how it looks or behaves beyond what its code sets. Keep it as it is: don't switch plotting packages, redraw it another way or install anything to get a picture. If the package it uses fails to load, tell the user and stop.";
+pub(crate) const INTERACTIVE_PICTURE: &str = "This output is interactive (it has scripts or controls). The picture shows how it looks, not that its controls work: you haven't seen them work. In your answer, ask the user to check that its hover, zoom or other controls work, and don't describe them as working. Keep it as it is, and don't switch plotting packages.";
+
+/// Marks a picture of an interactive output as one, with what the agent may say about it after
+/// any message the picture already has.
+fn interactive_picture(meta: &mut Value) {
+    meta["interactive"] = json!(true);
+    let message = match meta["message"].as_str() {
+        Some(said) => format!("{said} {INTERACTIVE_PICTURE}"),
+        None => INTERACTIVE_PICTURE.to_owned(),
+    };
+    meta["message"] = json!(message);
+}
+
 /// How `view_cell_output` says an output has no PNG form, and how the runtime says it couldn't ask
 /// the worker for one (`_cell_png` in `Output.jl`): the failures a picture of the notebook can stand in for.
 const NO_PNG: &str = "has no PNG rendering";
@@ -2248,6 +2272,10 @@ pub(crate) fn screenshot_result(cell: &str, png: String, result: &Value) -> Opti
     let mut meta = json!({ "cell_id": cell, "source": "screenshot", "png_bytes": bytes });
     if let Some(shown_as) = shown_as {
         meta["shown_as"] = json!(shown_as);
+    }
+    // A picture of the notebook shows how it looks, still not that its controls work.
+    if said["interactive"] == true || said["message"].as_str().is_some_and(|m| m.contains(INTERACTIVE_UNSEEN)) {
+        interactive_picture(&mut meta);
     }
     Some(crate::mcp::image_result(&meta, png))
 }
