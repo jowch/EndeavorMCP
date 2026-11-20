@@ -399,8 +399,10 @@ Next:
   holds Python to the minor version it was made with (interface 42). The app's
   sessions and a server's runtime refuse Python notebooks for now; the refusal
   goes by the caller, so a plugin session that shares the app's runtime on this
-  computer opens them, and an app session on the plugin's runtime doesn't (#358). Not on Windows. Known
-  gaps: an opened notebook can't be changed in safe preview (#351), no tool moves
+  computer opens them, and an app session on the plugin's runtime doesn't (#358). In safe preview an
+  edit is written with marimo's own save and no session, so nothing runs or installs, and when the
+  notebook goes live the cells marimo loads are given the ids the preview handed out (#351). Not on
+  Windows. Known gaps: no tool moves
   the package date (#352), ids shift after a reload (#353), `set_input` and
   `view_cell_output` of HTML aren't there, and uv isn't installed for the user
   (#354).

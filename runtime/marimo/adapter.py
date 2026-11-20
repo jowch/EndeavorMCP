@@ -13,7 +13,11 @@ header. Per notebook:
 
 - In safe preview (opened from disk, not yet allowed to run) marimo has no
   session for it: building the sandbox installs packages, which runs code.
-  The cells come from marimo's own parser, reading the file.
+  The cells come from marimo's own parser, reading the file, and an edit is
+  written back with marimo's own save (its file manager, with no session or
+  kernel), so nothing runs and nothing installs (#351). marimo keeps no cell
+  ids in the file, so when the notebook goes live the adapter gives marimo's
+  session the ids the preview handed out.
 - Once it may run, the adapter makes marimo's session as its editor, leaves,
   and watches it as a read-only (kiosk) connection. marimo allows one editor
   per notebook, so a page opened later takes the session over as the editor.
@@ -272,6 +276,9 @@ class Notebook:
         self.watcher = None
         self.closing = False
         self.watch = None
+        # Whether safe preview wrote an edit, so the ids it handed out may not be the ones marimo gives the
+        # cells when it loads the file (`rekey`).
+        self.edited_in_preview = False
 
     # -- reading the file (safe preview) --
 
@@ -287,9 +294,25 @@ class Notebook:
             cell = old.get(cid) or new_cell(data.code, data.name)
             cell["code"], cell["name"] = data.code, data.name
             cell["hide_code"] = bool(data.config.hide_code)
+            # The rest of the cell's config (disabled, column), for writing an edit back.
+            cell["config"] = data.config.asdict()
             self.order.append(cid)
             self.cells[cid] = cell
         self.mtime = os.stat(self.path).st_mtime
+
+    def write_file(self):
+        """Write the cells to the file in safe preview, through marimo's own save with no session."""
+        from marimo._ast.cell import CellConfig
+        from marimo._server.models.models import SaveNotebookRequest
+        from marimo._session.notebook.file_manager import AppFileManager
+
+        cells = [self.cells[c] for c in self.order]
+        configs = [CellConfig.from_dict({**(c.get("config") or {}), "hide_code": c["hide_code"]}) for c in cells]
+        AppFileManager(self.path).save(SaveNotebookRequest(
+            cell_ids=list(self.order), codes=[c["code"] for c in cells], names=[c["name"] or "_" for c in cells],
+            configs=configs, filename=self.path, persist=True))
+        self.mtime = os.stat(self.path).st_mtime
+        self.edited_in_preview = True
 
     def reload_if_changed(self):
         if not self.live and os.stat(self.path).st_mtime != self.mtime:
@@ -323,9 +346,56 @@ class Notebook:
         # then never sees it, and its next save puts back what it had.
         self.watcher = f"endeavor-watch-{secrets.token_hex(6)}"
         self.ws = await websockets.connect(f"{url}?session_id={self.watcher}&kiosk=true&{query}", max_size=None)
+        # Copies: kernel_ready reuses a cell's dict under the same id, and writes marimo's code into it.
+        preview = [(c, dict(self.cells[c])) for c in self.order] if self.edited_in_preview else None
         self.kernel_ready(msg["data"])
         self.live = True
         self.watch = asyncio.create_task(self.follow())
+        if preview:
+            await self.rekey(preview)
+
+    async def rekey(self, preview):
+        """Give marimo's session the cell ids safe preview handed out.
+
+        marimo numbers a file's cells by position when it loads it, so after a preview edit that added,
+        deleted or moved a cell, its ids differ from the ones the agent holds (and the core's staged
+        runs name). One transaction puts them back: a cell id only marimo has is deleted, one only the
+        preview has is created, one both have takes the preview's code, name and config, and the order
+        becomes the preview's. No id is deleted and created again, because marimo drops a create whose
+        id the same transaction deleted. Nothing runs, since nothing has. If the file changed since the
+        preview wrote it, or marimo refuses, marimo's ids stay and the tools hear the topology changed.
+        """
+        ids = list(self.order)
+        if [c for c, _ in preview] == ids:
+            return
+        try:
+            if [cell["code"] for _, cell in preview] != [self.cells[c]["code"] for c in ids]:
+                raise RuntimeError("the file changed on disk since safe preview wrote it")
+            ours = {c for c, _ in preview}
+            changes = [{"type": "delete-cell", "cellId": c} for c in ids if c not in ours]
+            for cid, cell in preview:
+                config = {**(cell.get("config") or {}), "hide_code": bool(cell["hide_code"])}
+                camel = {"column": config.get("column"), "disabled": bool(config.get("disabled")),
+                         "hideCode": config["hide_code"], "expandOutput": bool(config.get("expand_output"))}
+                if cid not in self.cells:
+                    changes.append({"type": "create-cell", "cellId": cid, "code": cell["code"], "name": cell["name"] or "_",
+                                    "config": {"column": camel["column"], "disabled": camel["disabled"], "hide_code": camel["hideCode"], "expand_output": camel["expandOutput"]}})
+                    continue
+                if self.cells[cid]["code"] != cell["code"]:
+                    changes.append({"type": "set-code", "cellId": cid, "code": cell["code"]})
+                if (self.cells[cid]["name"] or "_") != (cell["name"] or "_"):
+                    changes.append({"type": "set-name", "cellId": cid, "name": cell["name"] or "_"})
+                changes.append({"type": "set-config", "cellId": cid, **camel})
+            changes.append({"type": "reorder-cells", "cellIds": [c for c, _ in preview]})
+            await self.m.post("/api/document/transaction", self.watcher, {"changes": changes})
+            for ch in changes:
+                self.document_change(ch)
+            for cid, cell in preview:
+                self.cells[cid]["config"] = cell.get("config")
+            await self.adapter.save(self, self.watcher)
+        except Exception as e:  # noqa: BLE001 - the notebook is live either way; only the ids differ
+            print(f"endeavor marimo: kept marimo's cell ids for {self.path}: {e}", file=sys.stderr)
+            self.adapter.notify("topology_changed", notebook_id=self.id)
 
     def kernel_ready(self, d):
         old = self.cells
@@ -991,8 +1061,11 @@ class Adapter:
         return result
 
     async def apply(self, nb, ops):
+        if nb.allowed and not nb.live:
+            raise argument_error("execution_blocked", "marimo is still starting this notebook (building its environment); try again when it is ready")
         if not nb.live:
-            raise argument_error("execution_blocked", "The notebook is in safe preview: marimo hasn't loaded it yet, so it can't be changed. Ask the user to let it run (allow_execution) first")
+            # Safe preview: the edit goes to the file (`write_file`). A change made on disk since is read first.
+            nb.reload_if_changed()
         for op in ops:
             if op.get("op") == "set_code" and op.get("expected") is not None:
                 cid = nb.check_cell(op["cell_id"])
@@ -1034,7 +1107,11 @@ class Adapter:
                 changes.append({"type": "set-config", "cellId": nb.check_cell(op["cell_id"]), "hideCode": bool(op.get("folded"))})
             else:
                 raise argument_error("unknown_op", f"Unknown op: '{kind}'")
-        if changes:
+        if changes and not nb.live:
+            for ch in changes:
+                nb.document_change(ch)
+            nb.write_file()
+        elif changes:
             sid = nb.watcher
             await self.marimo.post("/api/document/transaction", sid, {"changes": changes})
             # Our copy follows at once, not when marimo's message comes back: the next read is ours.
@@ -1048,7 +1125,9 @@ class Adapter:
         cells = [nb.cells[c] for c in nb.order]
         await self.marimo.post("/api/kernel/save", sid, {
             "cellIds": list(nb.order), "codes": [c["code"] for c in cells], "names": [c["name"] or "_" for c in cells],
-            "configs": [{"column": None, "disabled": False, "hide_code": c["hide_code"], "expand_output": False} for c in cells],
+            # A cell's config as the file had it (disabled, column), where known.
+            "configs": [{"column": (c.get("config") or {}).get("column"), "disabled": bool((c.get("config") or {}).get("disabled")),
+                         "hide_code": c["hide_code"], "expand_output": bool((c.get("config") or {}).get("expand_output"))} for c in cells],
             "filename": nb.path, "persist": True})
 
     async def start_run(self, nb, cells, watch=True, ask_new=False):

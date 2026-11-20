@@ -21,7 +21,7 @@ Read this when the notebook is a marimo notebook (a `.py` file with `app = marim
 
 ## Safe preview
 
-A Python notebook in safe preview can't be changed at all: edits fail with `execution_blocked`, as runs do, because its packages install as soon as it is opened for editing. Tell the user, and call `allow_execution` only if they ask you to work in it.
+In safe preview you can read and edit a Python notebook, as in Julia: edits are saved to the file and nothing runs, so its packages don't install. Runs fail with `execution_blocked`. Cell ids stay the same when the user lets it run, unless the file changed on disk meanwhile; then read the order again.
 
 ## The user's page
 
