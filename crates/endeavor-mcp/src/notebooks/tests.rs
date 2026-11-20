@@ -3208,6 +3208,27 @@ fn a_notebook_made_during_a_summary_keeps_its_reads() {
     });
 }
 
+/// An open with its run while the app's summary is being put together: the summary's snapshots
+/// don't have the notebook, and the open's run stays the session's, so a read right after still
+/// waits for it (#376).
+#[test]
+fn an_open_during_a_summary_keeps_its_run() {
+    let s = setup();
+    let path = temp_notebooks("open-during-summary", 1).remove(0);
+    *s.engine.opens_with.lock().unwrap() = vec![(X.into(), "x = 1".into())];
+    let (read_tx, read) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    *s.engine.hold_snapshot.lock().unwrap() = Some((read_tx, release_rx));
+    std::thread::scope(|scope| {
+        let publishing = scope.spawn(|| s.notebooks.publish());
+        read.recv().unwrap();
+        let id = s.call("7", "open_notebook", json!({ "path": path, "run_notebook": true })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+        release.send(()).unwrap();
+        publishing.join().unwrap();
+        assert_eq!(s.notebooks.session_runs("7"), vec![id], "the open's run is still the session's");
+    });
+}
+
 #[test]
 fn what_the_engine_knows_of_a_cell_shows_in_read_cell() {
     const R: &str = "bbbbbbbb-0000-0000-0000-000000000002";

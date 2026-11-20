@@ -429,6 +429,72 @@ end
         @test precompiled()
     end
 
+    @testset "lifecycle: a compiled file of ours that can't be read is removed, then compiled again" begin
+        include(joinpath(@__DIR__, "..", "..", "cache_guard.jl"))
+        # A small package by the warm-up's name, in a project and a depot of its own. Loading it
+        # compiles it, with no registry needed.
+        project, depot = mktempdir(), mktempdir()
+        uuid = UUIDs.uuid4()
+        mkpath(joinpath(project, "EndeavorRuntimeWarm", "src"))
+        write(joinpath(project, "EndeavorRuntimeWarm", "Project.toml"), "name = \"EndeavorRuntimeWarm\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n")
+        write(joinpath(project, "EndeavorRuntimeWarm", "src", "EndeavorRuntimeWarm.jl"), "module EndeavorRuntimeWarm\nf() = 1\nend\n")
+        write(joinpath(project, "Project.toml"), "[deps]\nEndeavorRuntimeWarm = \"$uuid\"\n\n[sources]\nEndeavorRuntimeWarm = {path = \"EndeavorRuntimeWarm\"}\n")
+        write(joinpath(project, "Manifest.toml"), "julia_version = \"$VERSION\"\nmanifest_format = \"2.0\"\n\n[[deps.EndeavorRuntimeWarm]]\npath = \"EndeavorRuntimeWarm\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n")
+        sep = Sys.iswindows() ? ';' : ':'
+        julia(script; at=project) = addenv(`$(Base.julia_cmd()) --startup-file=no --project=$at -e $script`,
+            "JULIA_DEPOT_PATH" => depot * sep, "JULIA_LOAD_PATH" => join(["@", "@stdlib"], sep))
+        check = "exit(Base.isprecompiled(Base.identify_package(\"EndeavorRuntimeWarm\")) ? 0 : 1)"
+        @test success(julia("using EndeavorRuntimeWarm"))
+        @test success(julia(check))
+        dir = only(filter(isdir, [joinpath(v, "EndeavorRuntimeWarm") for v in readdir(joinpath(depot, "compiled"); join=true)]))
+        ji = only(filter(endswith(".ji"), readdir(dir; join=true)))
+        stem = splitext(ji)[1]
+        # A file of someone else's, and a precompile's temporary file, are left alone.
+        mkpath(joinpath(depot, "compiled", "v0.0", "Other"))
+        other = joinpath(depot, "compiled", "v0.0", "Other", "x.ji")
+        temp = joinpath(dir, "jl_abc.ji")
+        write(other, "x"); write(temp, "x")
+        # A native image's debug bundle (macOS makes one) goes with it; here one stands in everywhere.
+        mkpath(stem * ".dylib.dSYM")
+        unreadable = Set([ji, other, temp])
+        @test endeavor_drop_unreadable_caches(depot; log=devnull) == String[]
+        removed = endeavor_drop_unreadable_caches(depot; readable=p -> !(p in unreadable), log=devnull)
+        @test ji in removed && stem * ".dylib.dSYM" in removed && all(p -> startswith(p, stem * "."), removed)
+        @test !isfile(ji) && isfile(other) && isfile(temp)
+        @test !any(p -> startswith(p, stem * "."), readdir(dir; join=true))
+        @test !success(julia(check))
+        @test success(julia("using EndeavorRuntimeWarm"))
+        @test success(julia(check))
+        # Never in the user's own depot.
+        home = mktempdir()
+        mine = joinpath(home, ".julia", "compiled", "v1.12", "EndeavorRuntimeWarm", "x.ji")
+        mkpath(dirname(mine)); write(mine, "x")
+        withenv((Sys.iswindows() ? "USERPROFILE" : "HOME") => home) do
+            @test endeavor_drop_unreadable_caches(joinpath(home, ".julia"); readable=_ -> false, log=devnull) == String[]
+        end
+        @test isfile(mine)
+        # The failure itself (#372). Julia calls one unreadable cache file stale and compiles over
+        # it, but beside a second cache file of the package (another runtime folder compiled into
+        # the same depot, as each update makes) every load opens it to sort them, and throws,
+        # every time. Root reads any file, so not as root.
+        if !Sys.iswindows() && ccall(:geteuid, Cuint, ()) != 0
+            second = joinpath(mktempdir(), "second")
+            cp(project, second)
+            @test success(julia("using EndeavorRuntimeWarm"; at=second))
+            jis = filter(p -> endswith(p, ".ji") && p != temp, readdir(dir; join=true))
+            @test length(jis) == 2
+            ji = first(jis)
+            chmod(ji, 0o200)
+            for _ in 1:2
+                @test !success(pipeline(julia("using EndeavorRuntimeWarm"); stderr=devnull))
+            end
+            @test ji in endeavor_drop_unreadable_caches(depot; log=devnull)
+            @test success(julia("using EndeavorRuntimeWarm"))
+            @test success(julia("using EndeavorRuntimeWarm"; at=second))
+            @test success(julia(check))
+        end
+    end
+
     @testset "lifecycle: start serves both ports, stop frees them for a restart" begin
         EndeavorRuntime.stop_pluto_stack!()
         pluto_port = 1250 + rand(0:99)
