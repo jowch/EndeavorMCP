@@ -150,6 +150,9 @@ struct NotebookState {
     /// Runs whose `run_finished` came before the tool that started them recorded them (a quick
     /// run), so they aren't recorded after; the latest `ENDED_KEPT`.
     ended: VecDeque<String>,
+    /// The state's `seq` when a tool last wrote here through `with_state`: the app's summary
+    /// keeps a state written after its snapshots were taken (#376).
+    touched: u64,
 }
 
 /// A run a session started (`NotebookState::started`). `run` is the engine's id for it; an
@@ -166,9 +169,9 @@ struct Started {
 const ENDED_KEPT: usize = 64;
 
 impl NotebookState {
-    /// Whether a session read or changed one of its cells after the state's `seq` was `since`.
+    /// Whether a session read or changed one of its cells, or a tool wrote here, after the state's `seq` was `since`.
     fn touched_after(&self, since: u64) -> bool {
-        self.reads.values().map(|(_, seq, _)| *seq).chain(self.changes.values().map(|c| c.seq)).any(|seq| seq > since)
+        self.touched > since || self.reads.values().map(|(_, seq, _)| *seq).chain(self.changes.values().map(|c| c.seq)).any(|seq| seq > since)
     }
 
     /// Code that changed without the agent's tools writing it was changed by
@@ -944,9 +947,16 @@ impl Notebooks {
         Ok(Graph::parse(&self.call("graph", params)?))
     }
 
-    /// A notebook's state, made if the core hasn't seen it yet.
+    /// A notebook's state, made if the core hasn't seen it yet. Each use counts as touching it
+    /// (`touched_after`): a notebook opened while the app's summary is put together isn't in that
+    /// summary's snapshots, and what a tool recorded of it meanwhile (the open's run) stays (#376).
     fn with_state<T>(&self, id: &str, f: impl FnOnce(&mut NotebookState) -> T) -> T {
-        f(self.state.lock().unwrap().notebooks.entry(id.to_owned()).or_default())
+        let mut state = self.state.lock().unwrap();
+        state.seq += 1;
+        let seq = state.seq;
+        let notebook = state.notebooks.entry(id.to_owned()).or_default();
+        notebook.touched = seq;
+        f(notebook)
     }
 
     /// Every notebook's state as the app hears it, with what the core keeps
