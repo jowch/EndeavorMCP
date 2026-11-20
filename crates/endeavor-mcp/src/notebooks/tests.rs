@@ -32,11 +32,13 @@ struct FakeCell {
     inputs: Vec<String>,
     /// The prompt it waits on, as Ember's `readline()` and `menu()` do: `ask()` and `choose()` run until answered.
     prompt: Option<Value>,
+    /// Its error's kind, as Ember gives one (`missing_package`).
+    error_kind: Option<&'static str>,
 }
 
 impl FakeCell {
     fn new(id: &str, code: &str) -> FakeCell {
-        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false, off: false, notes: Vec::new(), prompt: None, inputs: Vec::new() }
+        FakeCell { id: id.into(), code: code.into(), folded: false, running: false, queued: false, errored: false, last_run: 0.0, output: String::new(), hidden: false, stale: false, not_run: false, off: false, notes: Vec::new(), prompt: None, inputs: Vec::new(), error_kind: None }
     }
 
     /// What `a, b = 1, 2` defines, and the names the rest of the code uses.
@@ -141,7 +143,7 @@ impl Engine {
             "cell_order": nb.cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
             "cells": nb.cells.iter().map(|c| json!({
                 "cell_id": c.id, "code": c.code, "folded": c.folded, "running": c.running, "queued": c.queued, "errored": c.errored,
-                "last_run": c.last_run, "runtime": 0, "output": c.output, "error": if c.errored { json!({ "msg": c.output }) } else { Value::Null }, "hidden": c.hidden, "markdown": c.code.starts_with("md\"") || c.code.starts_with("#'"),
+                "last_run": c.last_run, "runtime": 0, "output": c.output, "error": match (c.errored, c.error_kind) { (false, _) => Value::Null, (true, None) => json!({ "msg": c.output }), (true, Some(kind)) => json!({ "kind": kind, "msg": c.output }) }, "hidden": c.hidden, "markdown": c.code.starts_with("md\"") || c.code.starts_with("#'"),
                 "stale": c.stale, "not_run": c.not_run, "off": c.off, "notes": c.notes, "prompt": c.prompt, "inputs": c.inputs,
             })).collect::<Vec<_>>(),
         })
@@ -1074,6 +1076,33 @@ fn a_name_defined_in_two_cells_says_where_the_other_is() {
     s.notebooks.add_engine(Backend::Ember, ember.clone());
     s.call("", "list_notebooks", json!({})).unwrap();
     assert_eq!(s.call("", "read_cell", json!({ "notebook_id": R, "cell_id": Y })).unwrap().get("defined_elsewhere"), None);
+}
+
+#[test]
+fn an_r_package_that_failed_to_install_says_to_stop_and_tell_the_user() {
+    // After Posit's broken Rsamtools build failed an install (#390), Haiku 4.5 reran three times,
+    // installed BiocManager from a cell and answered from memory (#394).
+    const R: &str = "bbbbbbbb-0000-0000-0000-000000000003";
+    let s = setup();
+    let ember = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    ember.open(R, "/n/genome.R", &[(X, "library(BSgenome.Mmusculus.UCSC.mm10)"), (Y, "library(ggplot2)")]);
+    let failed = "there is no package called 'BSgenome.Mmusculus.UCSC.mm10': install failed:\nERROR: lazy loading failed for package 'BSgenome.Mmusculus.UCSC.mm10'";
+    ember.with(R, |nb| {
+        nb.cells[0].errored = true;
+        nb.cells[0].output = failed.into();
+        nb.cells[0].error_kind = Some("missing_package");
+        // A package the code doesn't name: its fix is a rerun, so no such advice.
+        nb.cells[1].errored = true;
+        nb.cells[1].output = "there is no package called 'svglite'".into();
+        nb.cells[1].error_kind = Some("missing_package");
+    });
+    s.notebooks.add_engine(Backend::Ember, ember.clone());
+    s.call("", "list_notebooks", json!({})).unwrap();
+    let read = s.call("", "read_cell", json!({ "notebook_id": R, "cell_id": X })).unwrap();
+    let said = read["install_failed"].as_str().unwrap_or_default();
+    assert_eq!(said, crate::notebooks::tools::INSTALL_FAILED, "{read}");
+    assert!(said.contains("don't rerun") && said.contains("install the package from a cell") && said.contains("didn't compute it"), "{said}");
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": R, "cell_id": Y })).unwrap().get("install_failed"), None);
 }
 
 #[test]
