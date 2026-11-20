@@ -292,7 +292,7 @@ impl Consent {
         let why = match clicked {
             Clicked::Install => return Asked::Yes,
             Clicked::Dropped => return Asked::Dropped,
-            Clicked::Declined => "download_declined::The user clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, so nothing downloads and the cells that need it stay queued. That page is answered: their no stands, and Endeavor won't ask them again for 10 minutes, so calling approve_install again until then gets this same answer. Tell the user plainly that nothing was downloaded, and stop. Don't ask them to reconsider, don't send them back to the page, and don't call approve_install again unless they ask for the download themselves. Only if they say they changed their mind: the page they answered, and the notebook's page, each have an Install button; once they say they clicked one, call approve_install again.",
+            Clicked::Declined => "download_declined::The user clicked Don't install on a web page (not a dialog) that Endeavor opened in their browser, so nothing downloads and the cells that need it stay queued. That page is answered: their no stands, and Endeavor won't ask them again for 10 minutes, so calling approve_install again until then gets this same answer. Tell the user plainly that nothing was downloaded, and stop. Don't ask them to reconsider, don't send them back to the page, and don't call approve_install again unless they ask for the download themselves. Endeavor asks again only after those 10 minutes, and only if the user then asks for the download.",
             Clicked::NotYet => "download_not_answered::Endeavor opened a web page (not a dialog) in the user's browser that names what downloads and its size, and nothing downloads until they click Install there. They haven't answered yet, so nothing downloads and the cells that need it stay queued. Tell the user that a web page is open in their browser and to answer it there (don't call it a dialog), and end your reply. Once they say they clicked Install, call approve_install again: their click holds for 10 minutes. The notebook's page also has its own button.",
             Clicked::NoBrowser => DOWNLOAD_CANT_ASK,
         };
@@ -938,6 +938,17 @@ mod tests {
             write!(socket, "POST /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
             socket.read_to_string(&mut String::new()).unwrap();
             assert!(!pages.held(&Consent::download_question(&all()).unwrap()), "a retired page holds no yes");
+            // A click that landed just before the page was retired holds nothing either.
+            let question = "Install the thing now?";
+            assert!(matches!(pages.ask(question, true, Duration::ZERO, &|| false, &open), super::super::install_page::Clicked::NotYet));
+            let url = opened.lock().unwrap().last().unwrap().clone();
+            let (port, path) = url.strip_prefix("http://127.0.0.1:").unwrap().split_once('/').unwrap();
+            let mut socket = std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
+            write!(socket, "POST /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            socket.read_to_string(&mut String::new()).unwrap();
+            assert!(pages.held(question));
+            pages.retire(question);
+            assert!(!pages.held(question), "the dialog's answer is the only one standing");
         }
         drop(to_client);
         let sent = answering.join().unwrap();
