@@ -253,7 +253,7 @@ set_newest() {
 pinner="the plugin"
 sums_from=$sums
 if [ -z "$into" ] && [ -z "$sums" ] && [ -n "$pin_url" ]; then
-  skip="Nothing was installed. To install the release's newest build checked only against the release's own checksum file, run it again with ENDEAVOR_PIN_URL=none."
+  skip="Nothing was installed. To install the release's newest build checked only against the release's own checksum file, run it again with ENDEAVOR_PIN_URL=none (piped from curl: curl -fsSL https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/install.sh | ENDEAVOR_PIN_URL=none sh)."
   fetch "$pin_url" "$tmp/release-key" || fail "couldn't read the build main pins from $pin_url, so the download can't be checked against it. $skip"
   pinned_key=$(head -n 1 "$tmp/release-key" | tr -d ' \t\r\n')
   if ! is_key "$pinned_key" || ! grep -Eq '^[0-9a-fA-F]{64} [ *]' "$tmp/release-key"; then

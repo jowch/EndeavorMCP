@@ -246,6 +246,12 @@ fn a_server_without_the_helper_is_described_and_nothing_is_written() {
         assert!(needs_line(&home, &state, "process", &bin(None, Some("exit 1"))).contains(&format!(" need process-recorded:{pid} first ")), "{name}");
         if name != "busybox" {
             assert!(needs_line(&home, &state, "process", &bin(None, Some("echo sleep 60"))).contains(" need none first "), "{name}: a pid that was reused");
+            // A `ps` that cuts `args` short unless given -ww, and one that refuses -ww (#430).
+            let cuts = r#"[ "$1" = -ww ] && echo 'endeavor core --state-dir fake' || echo 'endeavor core'"#;
+            let refuses = r#"[ "$1" = -ww ] && exit 1; echo 'endeavor core --state-dir fake'"#;
+            for ps in [cuts, refuses] {
+                assert!(needs_line(&home, &state, "process", &bin(None, Some(ps))).contains(&format!(" need process:{pid} first ")), "{name}: {ps}");
+            }
         }
         drop(core);
         write(format!(r#"{{"launcher":"process","node":"n","pid":{pid},"port":5,"token":"t"}}"#));
