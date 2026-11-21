@@ -503,6 +503,17 @@ the app opens again and its helper reattaches, the helper calls
 of another build takes it for the plugin's own and stops it. Otherwise the
 runtime stops as before (app #232).
 
+With Keep running on, the app's quit is a Detach, and a killed app's input
+just ends. The app starts this computer's helper with
+`--exit-idle-after-client`, so in both cases the helper calls
+`endeavor/end_when_idle` before it exits. From then on the core ends once no
+notebook has been open for the idle limit, as a runtime started in the
+background does, and it is marked as ending when idle in `runtime.json`.
+Without this, a runtime the app left running never ended. `keep_for_app` undoes it when the app is
+back. Only the app does this, and only for its own computer: a server's
+helper is started without the flag, and a server's runtime keeps running
+(app #274).
+
 **Cancelling a test.** The app's Test connection (`client::test`) starts its
 helper with `--own-with-client`: when the helper's input ends without a Stop
 or Detach, which is what cancelling the test does by ending ssh, it stops a
