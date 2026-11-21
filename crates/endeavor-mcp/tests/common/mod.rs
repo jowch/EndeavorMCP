@@ -9,8 +9,12 @@
 
 #![allow(dead_code)]
 
+pub mod exec;
 pub mod front;
 pub mod helper;
+
+#[cfg(unix)]
+pub use exec::write_executable;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -80,15 +84,6 @@ exec sleep 600
     julia
 }
 
-#[cfg(unix)]
-/// Write `contents` to `path` as an executable file. A child process writes it: while this process holds
-/// a file open for writing, a fork by any of its threads copies that descriptor until the child execs,
-/// and running the file in that time fails with ETXTBSY ("Text file busy"). The tests run on many threads.
-pub fn write_executable(path: &Path, contents: &str) {
-    let status = std::process::Command::new("/bin/sh").args(["-c", r#"printf '%s' "$1" > "$0""#]).arg(path).arg(contents).status().unwrap();
-    assert!(status.success(), "couldn't write {}", path.display());
-    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-}
 
 /// For a test that sets an `ENDEAVOR_TEST_*` variable for the binary: a release build ignores them.
 pub fn require_debug_build() {
@@ -107,6 +102,9 @@ pub fn state_dir(name: &str) -> PathBuf {
 pub fn install_helper(root: &Path) {
     let dir = root.join(endeavor_mcp::embedded::BUILD_VERSION);
     std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    exec::copy_executable(Path::new(env!("CARGO_BIN_EXE_endeavor")), &dir.join("endeavor"));
+    #[cfg(not(unix))]
     std::fs::copy(env!("CARGO_BIN_EXE_endeavor"), dir.join("endeavor")).unwrap();
     for (path, contents) in endeavor_mcp::embedded::RUNTIME_FILES {
         let file = dir.join(path);

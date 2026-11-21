@@ -11,6 +11,9 @@
 
 #![cfg(unix)]
 
+#[path = "common/exec.rs"]
+mod exec;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -48,7 +51,7 @@ fn home_with_bare_juliaup(name: &str) -> (PathBuf, PathBuf) {
     std::fs::create_dir_all(&bin).unwrap();
     for entry in std::fs::read_dir(given.parent().unwrap()).unwrap() {
         let entry = entry.unwrap();
-        std::fs::copy(entry.path(), bin.join(entry.file_name())).unwrap();
+        exec::copy_executable(&entry.path(), &bin.join(entry.file_name()));
     }
     std::fs::rename(bin.join("juliaup"), bin.join("juliaup.real")).unwrap();
     let juliaup = bin.join("juliaup");
@@ -61,8 +64,7 @@ fi
 [ "$1" = add ] && [ -e "$dir/fail-add" ] && { echo "Error: the configuration file is locked" >&2; exit 1; }
 exec "$dir/juliaup.real" "$@"
 "#;
-    std::fs::write(&juliaup, wrapper).unwrap();
-    std::fs::set_permissions(&juliaup, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    exec::write_executable(&juliaup, wrapper);
     std::fs::write(home.join(".juliaup").join("juliaupself.json"), r#"{"JuliaupChannel":"release"}"#).unwrap();
     (home, juliaup)
 }

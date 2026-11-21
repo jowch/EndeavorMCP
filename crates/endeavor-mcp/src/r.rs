@@ -484,8 +484,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("Rscript");
         // Prints what the shell line set, then its arguments one per line.
-        std::fs::write(&fake, "#!/bin/sh\necho \"loaded=$LOADED\"\nfor a in \"$@\"; do echo \"$a\"; done\n").unwrap();
-        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        crate::test_exec::write_executable(&fake, "#!/bin/sh\necho \"loaded=$LOADED\"\nfor a in \"$@\"; do echo \"$a\"; done\n");
         let args = [Path::new("--vanilla"), Path::new("/a path/with 'quotes', \"double\", $dollars, `ticks` and !bang.R")];
         let expected = format!("loaded=yes\n--vanilla\n{}\n", args[1].display());
         let d = dir.display();

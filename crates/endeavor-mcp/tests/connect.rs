@@ -1293,15 +1293,14 @@ fn a_helper_whose_binary_was_replaced_never_starts_a_core_of_the_new_build() {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let exe = bin.join("endeavor");
-    std::fs::copy(env!("CARGO_BIN_EXE_endeavor"), &exe).unwrap();
+    common::exec::copy_executable(std::path::Path::new(env!("CARGO_BIN_EXE_endeavor")), &exe);
     let mut command = Command::new(&exe);
     command.args(["connect", "--state-dir"]).arg(&dir).args(["--runtime", "/nonexistent", "--depot", "/nonexistent", "--julia", julia.to_str().unwrap()]);
     let mut helper = Helper::spawn(command);
     helper.hello();
     // As `endeavor update` puts a new build in place: renamed over the running one.
     let part = bin.join("endeavor.part");
-    std::fs::write(&part, "#!/bin/sh\necho 'endeavor 9.9.9 (build 9.9.9-0123456789abcdef)'\n").unwrap();
-    std::fs::set_permissions(&part, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    common::write_executable(&part, "#!/bin/sh\necho 'endeavor 9.9.9 (build 9.9.9-0123456789abcdef)'\n");
     std::fs::rename(&part, &exe).unwrap();
     helper.request_start(None, true);
     if cfg!(target_os = "linux") {
@@ -1795,8 +1794,7 @@ impl FakeSlurm {
         ];
         for (name, body) in scripts {
             let path = bin.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            common::write_executable(&path, &format!("#!/bin/sh\n{body}"));
         }
         FakeSlurm { dir: state, bin }
     }

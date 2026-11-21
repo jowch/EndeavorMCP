@@ -331,8 +331,7 @@ add) n=$(cat "$dir/fails"); echo $((n - 1)) > "$dir/fails"
 esac
 "#;
         let juliaup = dir.join("juliaup");
-        std::fs::write(&juliaup, script).unwrap();
-        std::fs::set_permissions(&juliaup, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        crate::test_exec::write_executable(&juliaup, script);
         juliaup
     }
 

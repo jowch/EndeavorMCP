@@ -5,6 +5,9 @@
 
 #![cfg(unix)]
 
+#[path = "common/exec.rs"]
+mod exec;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -178,8 +181,7 @@ fn a_platform_without_builds_is_a_plain_error_naming_it() {
     place.release(&sha(NEW));
     let fake = place.dir.join("fake");
     std::fs::create_dir_all(&fake).unwrap();
-    std::fs::write(fake.join("uname"), "#!/bin/sh\n[ \"$1\" = -s ] && echo FreeBSD || echo riscv64\n").unwrap();
-    std::fs::set_permissions(fake.join("uname"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    exec::write_executable(&fake.join("uname"), "#!/bin/sh\n[ \"$1\" = -s ] && echo FreeBSD || echo riscv64\n");
     let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap());
     let bin = place.dir.join("bin");
     let (ok, _, stderr) = place.run(&["--dir", bin.to_str().unwrap()], &[("PATH", path)]);

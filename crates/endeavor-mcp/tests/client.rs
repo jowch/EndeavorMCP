@@ -5,6 +5,9 @@
 
 #![cfg(unix)]
 
+#[path = "common/exec.rs"]
+mod exec;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::process::CommandExt;
@@ -120,8 +123,7 @@ fn server_path(place: &Place, listed: Option<&str>) -> String {
     }
     if let Some(jobs) = listed {
         let squeue = bin.join("squeue");
-        std::fs::write(&squeue, format!("#!/bin/sh\nprintf '%s\\n' {jobs}\n")).unwrap();
-        std::fs::set_permissions(&squeue, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        exec::write_executable(&squeue, &format!("#!/bin/sh\nprintf '%s\\n' {jobs}\n"));
     }
     bin.display().to_string()
 }
@@ -292,8 +294,7 @@ fn a_server_without_a_helper_build_is_refused_plainly() {
     let bin = place.home.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let uname = bin.join("uname");
-    std::fs::write(&uname, "#!/bin/sh\n[ \"$1\" = -s ] && echo Plan9 || echo arm64\n").unwrap();
-    std::fs::set_permissions(&uname, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    exec::write_executable(&uname, "#!/bin/sh\n[ \"$1\" = -s ] && echo Plan9 || echo arm64\n");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     let transport = Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string()), ("PATH".into(), path)], ask: None };
     let asked: Mutex<Vec<(String, String)>> = Mutex::default();
@@ -465,8 +466,7 @@ fn cancel_while_booting(name: &str, as_test: bool) -> (Place, i32) {
     let place = Place::new(name);
     // A Julia that boots until it is stopped.
     let julia = place.home.join("julia");
-    std::fs::write(&julia, "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'julia version 1.12.0'; exit 0; }\necho booting\nexec sleep 600\n").unwrap();
-    std::fs::set_permissions(&julia, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    exec::write_executable(&julia, "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'julia version 1.12.0'; exit 0; }\necho booting\nexec sleep 600\n");
     let server = Server { julia: Some(julia.display().to_string()), ..Default::default() };
     let cancel = Arc::new(Cancel::default());
     let (seen, on) = events();
@@ -586,8 +586,7 @@ fn a_pid_that_is_not_a_runtime_is_not_reported_and_without_ps_it_is_only_recorde
     for tool in std::fs::read_dir(place.home.join("bin")).unwrap().flatten().filter(|t| t.file_name() != "ps") {
         let _ = std::os::unix::fs::symlink(std::fs::read_link(tool.path()).unwrap(), bin.join(tool.file_name()));
     }
-    std::fs::write(bin.join("ps"), "#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(bin.join("ps"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    exec::write_executable(&bin.join("ps"), "#!/bin/sh\nexit 1\n");
     let transport = Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string()), ("PATH".into(), bin.display().to_string())], ask: None };
     assert_eq!(needs(&transport).running, Some(Running::Process { pid: std::process::id(), checked: false }));
 }
@@ -670,8 +669,7 @@ fn only_a_complete_helper_of_another_build_makes_it_an_update() {
     let helper_in = |name: &str, with_runtime: bool| {
         let dir = place.root.join(name);
         std::fs::create_dir_all(dir.join("runtime")).unwrap();
-        std::fs::write(dir.join("endeavor"), "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(dir.join("endeavor"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        exec::write_executable(&dir.join("endeavor"), "#!/bin/sh\n");
         if with_runtime {
             std::fs::write(dir.join("runtime/boot.jl"), "").unwrap();
         }
@@ -712,8 +710,7 @@ fn the_helper_gets_this_builds_name_after_the_probe_found_a_job() {
     std::fs::write(place.state.join("job.json"), r#"{"job":"4242","summary":"8 CPUs"}"#).unwrap();
     let record = place.home.join("helper-args");
     let fake = place.home.join("fake-helper");
-    std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", record.display())).unwrap();
-    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    exec::write_executable(&fake, &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", record.display()));
     let helper = |_: &str, _: &str| Ok(fake.clone());
     let options = Options { helper: &helper, ..place.options() };
     let cluster = Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() };
