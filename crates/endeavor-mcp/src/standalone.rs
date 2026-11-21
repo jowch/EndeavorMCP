@@ -384,6 +384,7 @@ fn runtime_args(options: &Options, exit_idle: bool) -> Args {
         any_node: false,
         build: Some(embedded::BUILD_VERSION.into()),
         exit_idle,
+        exit_idle_after_client: false,
         core_env: core_env(options, exit_idle),
     }
 }

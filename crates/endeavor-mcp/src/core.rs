@@ -51,7 +51,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// missing, doesn't count (`network`); nor do descriptions and changes inside the core. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 45;
+pub const INTERFACE: u32 = 46;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -1660,11 +1660,13 @@ fn leave_to_plugin(served: &Arc<Served>, alive: Arc<dyn Fn(&crate::mcp::Front) -
     let mut left = served.left.lock().unwrap();
     if left.is_none() {
         eprintln!("[ Info: The app quit while the plugin works in this runtime; leaving it running for the plugin");
-        let generation = served.left_generation.fetch_add(1, SeqCst) + 1;
         *left = Some(served.bridge.notebooks.exits_when_idle.swap(true, SeqCst));
         rewrite_exits_when_idle(served, true);
-        watch_left(served.clone(), generation, alive);
     }
+    // A new watch even if it was left already: one an earlier app left running (`end_when_idle`) and didn't
+    // get back yet is watched for the plugin from now on.
+    let generation = served.left_generation.fetch_add(1, SeqCst) + 1;
+    watch_left(served.clone(), generation, alive);
     true
 }
 
@@ -1679,6 +1681,48 @@ fn keep_for_app(served: &Served) {
     served.left_generation.fetch_add(1, SeqCst);
     served.bridge.notebooks.exits_when_idle.store(before, SeqCst);
     rewrite_exits_when_idle(served, before);
+}
+
+/// The app is gone and its helper leaves this runtime running (`endeavor/end_when_idle`, app #274): its
+/// notebooks go on, each until it has been idle for the idle limit, as always, and once none is open the
+/// runtime ends `LEFT_GRACE` later (`watch_empty`), which leaves time for the app or Claude Code to come back
+/// to it. It is marked as ending when idle, so the plugin's fronts treat it as theirs. `keep_for_app` undoes
+/// it when the app is back. Nothing for one already left or ending when idle.
+fn end_when_idle(served: &Arc<Served>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut left = served.left.lock().unwrap();
+    if left.is_some() || served.bridge.notebooks.exits_when_idle.load(SeqCst) {
+        return;
+    }
+    eprintln!("[ Info: The app is gone; this runtime goes on until its notebooks are idle, then ends");
+    let generation = served.left_generation.fetch_add(1, SeqCst) + 1;
+    *left = Some(served.bridge.notebooks.exits_when_idle.swap(true, SeqCst));
+    rewrite_exits_when_idle(served, true);
+    watch_empty(served.clone(), generation);
+}
+
+/// End a runtime the app left once no notebook has been open in it for `LEFT_GRACE`, or stop watching when
+/// the app takes it back (`generation` moves on).
+fn watch_empty(served: Arc<Served>, generation: u64) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let check = crate::notebooks::idle_check().min(Duration::from_secs(60));
+    std::thread::spawn(move || {
+        let grace = left_grace();
+        let mut empty_since = Instant::now();
+        loop {
+            std::thread::sleep(check);
+            if served.left_generation.load(SeqCst) != generation {
+                return;
+            }
+            if served.bridge.notebooks.open_count() != Some(0) {
+                empty_since = Instant::now();
+            } else if empty_since.elapsed() >= grace {
+                eprintln!("[ Info: No notebook open for {} minutes since the app left; stopping", grace.as_secs() / 60);
+                served.shutdown();
+                return;
+            }
+        }
+    });
 }
 
 /// Set `exits_when_idle` in `runtime.json`, if the record there is still this core's.
@@ -1944,10 +1988,10 @@ struct Served {
     not_let_in: String,
     /// The state folder, whose `runtime.json` this core wrote (`record`).
     state_dir: PathBuf,
-    /// While the app's quit has left this runtime to the plugin (`leave_to_plugin`), whether it ended
-    /// when idle before.
+    /// While the app's quit has left this runtime to the plugin (`leave_to_plugin`), or the app has gone
+    /// and left it running (`end_when_idle`), whether it ended when idle before.
     left: Mutex<Option<bool>>,
-    /// Moves on each leave and each take-back, so a stale watch (`watch_left`) stops.
+    /// Moves on each leave and each take-back, so a stale watch (`watch_left`, `watch_empty`) stops.
     left_generation: std::sync::atomic::AtomicU64,
 }
 
@@ -1995,6 +2039,7 @@ impl Served {
             "endeavor/allow_r_install" => self.allow_r_install.store(true, std::sync::atomic::Ordering::SeqCst),
             "endeavor/leave_to_plugin" => result = json!({ "left": leave_to_plugin(self, Arc::new(|front: &crate::mcp::Front| front.alive())) }),
             "endeavor/keep_for_app" => keep_for_app(self),
+            "endeavor/end_when_idle" => end_when_idle(self),
             _ => {}
         }
         json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }).to_string()
@@ -2921,6 +2966,28 @@ mod tests {
         *served.left.lock().unwrap() = Some(true);
         keep_for_app(&served);
         assert!(served.bridge.notebooks.exits_when_idle.load(SeqCst));
+    }
+
+    #[test]
+    fn a_runtime_the_app_leaves_running_ends_when_idle_until_the_app_is_back() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let served = stand_in();
+        let generation = served.left_generation.load(SeqCst);
+        end_when_idle(&served);
+        assert!(served.bridge.notebooks.exits_when_idle.load(SeqCst), "it ends once no notebook has been open for the idle limit");
+        assert_eq!(*served.left.lock().unwrap(), Some(false));
+        let watching = served.left_generation.load(SeqCst);
+        assert_ne!(watching, generation);
+        end_when_idle(&served);
+        assert_eq!(served.left_generation.load(SeqCst), watching, "asked again, nothing more is watched");
+        keep_for_app(&served);
+        assert!(!served.bridge.notebooks.exits_when_idle.load(SeqCst), "the app has it again");
+        assert_ne!(served.left_generation.load(SeqCst), watching, "and the idle watch stops");
+        // A runtime that already ends when idle (started in the background) is as it was.
+        let served = stand_in();
+        served.bridge.notebooks.exits_when_idle.store(true, SeqCst);
+        end_when_idle(&served);
+        assert!(served.left.lock().unwrap().is_none());
     }
 
     #[test]

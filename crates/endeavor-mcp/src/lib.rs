@@ -80,7 +80,7 @@ use wire::slurm::JobRequest;
 use runtime::{Ended, Hooks, Looked, Outcome, Up, Waiting, Want};
 use wire::{Frame, ToApp, ToHelper};
 
-const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto|own | --julia-shell LINE) [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm|auto] [--quit-with-client | --own-with-client] [--any-node] [--exit-idle] [--build BUILD]
+const USAGE: &str = "usage: endeavor connect [--state-dir DIR] (--julia JULIA|auto|own | --julia-shell LINE) [--julia-when-needed] [--r RSCRIPT|auto | --r-shell LINE] --runtime RUNTIME_DIR --depot DEPOT [--launcher process|slurm|auto] [--quit-with-client | --own-with-client] [--any-node] [--exit-idle] [--exit-idle-after-client] [--build BUILD]
                         (--state-dir defaults to the folder `serve` and `mcp` use; with --launcher slurm, to one for the cluster;
                          auto is slurm where Slurm's sinfo is, else process)
        endeavor relay --state-dir DIR
@@ -126,6 +126,10 @@ struct Args {
     /// `--exit-idle`: the runtime ends once no notebook has been open for a while
     /// (see `core::main`). The Slurm launcher passes it on to the job.
     exit_idle: bool,
+    /// `--exit-idle-after-client`: a runtime here that the app leaves running as it goes (Detach, or the end
+    /// of input with nothing to stop) ends from then on once no notebook has been open for a while
+    /// (`core::end_when_idle`, app #274), rather than never. The app passes it for its own computer only.
+    exit_idle_after_client: bool,
     /// More of the core's environment: a standalone runtime's settings, and
     /// ENDEAVOR_EXIT_IDLE when `exit_idle`. Set on a core this helper starts; none removes an inherited variable.
     core_env: Vec<(&'static str, Option<String>)>,
@@ -360,7 +364,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
     }
     let (mut state_dir, mut julia, mut runtime, mut depot, mut r) = (None, None::<julia::Source>, None, None, None);
     let (mut quit_with_client, mut own_with_client, mut any_node, mut launcher, mut build, mut exit_idle, mut julia_when_needed) = (false, false, false, Launcher::Process, None, false, false);
-    let mut own_r = false;
+    let (mut own_r, mut exit_idle_after_client) = (false, false);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -386,6 +390,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             "--own-with-client" => own_with_client = true,
             "--any-node" => any_node = true,
             "--exit-idle" => exit_idle = true,
+            "--exit-idle-after-client" => exit_idle_after_client = true,
             "--own-r" => own_r = true,
             "--build" => build = Some(value()?),
             _ => return Err(format!("unknown argument {arg}")),
@@ -411,6 +416,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         build,
         own_r,
         exit_idle,
+        exit_idle_after_client,
         core_env: if exit_idle { vec![("ENDEAVOR_EXIT_IDLE", Some("1".into()))] } else { Vec::new() },
     })
 }
@@ -523,9 +529,9 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
             Event::App(ToHelper::Detach) => {
                 parts.discard();
                 keep_runtime();
-                std::process::exit(0)
+                left_running(args, attached, &routes, &mut inbox)
             }
-            Event::Eof => std::process::exit(0),
+            Event::Eof => left_running(args, attached, &routes, &mut inbox),
             Event::App(ToHelper::OwnWithClient { on }) => own_with_client(args, on),
             // Answered as they arrive (relay_stdin).
             Event::App(ToHelper::Files { .. }) => {}
@@ -551,6 +557,30 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
         }
     }
 }
+
+/// The app went and leaves the runtime running, and this helper exits. With `--exit-idle-after-client`, one
+/// here ends once idle (`core::end_when_idle`). A runtime of an older build, whose core can't, would then
+/// never end: it is left to the plugin if the plugin works in it, else stopped, as the app's quit used to.
+fn left_running(args: &Args, attached: Option<Attached>, routes: &Routes, inbox: &mut Inbox) -> ! {
+    if args.exit_idle_after_client
+        && let Some(attached) = attached
+        && matches!(attached.how, How::Process(..))
+    {
+        if attached.state.interface.is_none_or(|interface| interface < END_WHEN_IDLE_SINCE) {
+            if !attached.left_to_plugin()
+                && let Err(failed) = attached.stop(args, routes, inbox, standalone::start_lock_limit())
+            {
+                eprintln!("endeavor: {}", failed.1);
+            }
+        } else if let Err(e) = attached.end_when_idle() {
+            eprintln!("endeavor: couldn't have the runtime end when idle: {e}");
+        }
+    }
+    std::process::exit(0)
+}
+
+/// The first `core::INTERFACE` whose core has `endeavor/end_when_idle`.
+const END_WHEN_IDLE_SINCE: u32 = 46;
 
 /// The state folder as `connect` would pick it now: `named` when `--state-dir` was given (or on a cluster),
 /// else the plugin's folder, or the app's older one while a runtime there is alive (`Args::unnamed`).
@@ -624,6 +654,15 @@ impl Attached {
         let How::Process(_, port) = &self.how else { return false };
         *self.quitting.lock().unwrap() = true;
         bridge_rpc(*port, &self.state.token, "endeavor/leave_to_plugin", json!({})).is_ok_and(|reply| reply["result"]["left"] == true)
+    }
+
+    /// The app went and leaves this runtime running: it ends once idle from now on (`core::end_when_idle`).
+    /// Marked as quitting first, under the lock each try of `take_back` holds, so a take-back can't land after
+    /// it and undo it. A runtime of an older build ignores the call.
+    fn end_when_idle(&self) -> std::io::Result<()> {
+        let How::Process(_, port) = &self.how else { return Ok(()) };
+        *self.quitting.lock().unwrap() = true;
+        bridge_rpc(*port, &self.state.token, "endeavor/end_when_idle", json!({})).map(drop)
     }
 
     /// The app has this runtime again: one an earlier quit left to the plugin goes back to the lifetime it

@@ -736,6 +736,64 @@ fn the_end_of_input_does_what_the_keep_running_setting_says_now() {
     assert!(!dir.join("runtime.json").exists());
 }
 
+/// The app goes and leaves its runtime running (app #274): with `--exit-idle-after-client` the runtime then
+/// ends once no notebook has been open in it for a while, rather than never; an app that comes back first
+/// takes it back.
+#[test]
+fn a_runtime_the_app_leaves_running_ends_once_idle_unless_the_app_is_back() {
+    let (dir, cores, _julia) = held_dir("left-running-idle");
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    let record = || serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(dir.join("runtime.json")).unwrap_or_default()).unwrap_or_default();
+    // A quit, then the app is back before the runtime has been empty long enough.
+    let slow = [("ENDEAVOR_TEST_LEFT_GRACE_SECS", "600")];
+    let mut app = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--julia-when-needed", "--exit-idle-after-client"], &slow);
+    assert!(matches!(app.start_runtime(), ToApp::Ready { reattached: false, .. }));
+    let core = cores.pids()[0];
+    assert_eq!(record()["exits_when_idle"], false, "not while the app has it");
+    app.send(ToHelper::Detach);
+    app.exits();
+    assert!(common::pid_alive(core));
+    assert_eq!(record()["exits_when_idle"], true, "it ends once idle from now on");
+    let mut again = Helper::start(&dir, &["--julia-when-needed", "--exit-idle-after-client"]);
+    assert!(matches!(again.start_runtime(), ToApp::Ready { reattached: true, .. }));
+    common::wait_for("the app to take it back", || record()["exits_when_idle"] == false);
+
+    // Killed: the end of input does the same, and with no notebook open it then ends.
+    again.stdin.0.lock().unwrap().take();
+    again.exits();
+    assert_eq!(record()["exits_when_idle"], true);
+    let stopper = Helper::start(&dir, &[]);
+    stopper.hello();
+    let stop = stopper.request_stop();
+    assert_eq!(stopper.next(), ToApp::Stopped { id: stop });
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    drop(stopper);
+    let fast = [("ENDEAVOR_TEST_LEFT_GRACE_SECS", "0.5"), ("ENDEAVOR_IDLE_CHECK_SECS", "0.1")];
+    let mut app = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--julia-when-needed", "--exit-idle-after-client"], &fast);
+    assert!(matches!(app.start_runtime(), ToApp::Ready { reattached: false, .. }));
+    let core = cores.pids()[0];
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(common::pid_alive(core), "no idle exit while the app has it");
+    app.stdin.0.lock().unwrap().take();
+    app.exits();
+    common::wait_for("the idle runtime to end", || !common::pid_alive(core));
+    assert!(!dir.join("runtime.json").exists());
+
+    // Without the flag (a server's helper), a runtime left running stays.
+    let mut server = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--julia-when-needed"], &fast);
+    assert!(matches!(server.start_runtime(), ToApp::Ready { reattached: false, .. }));
+    let core = cores.pids()[0];
+    server.send(ToHelper::Detach);
+    server.exits();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(common::pid_alive(core) && record()["exits_when_idle"] == false);
+    let stopper = Helper::start(&dir, &[]);
+    stopper.hello();
+    let stop = stopper.request_stop();
+    assert_eq!(stopper.next(), ToApp::Stopped { id: stop });
+    common::wait_for("the core to end", || !common::pid_alive(core));
+}
+
 /// Keep running turned on while a start of the helper's own is still under way: the app is then killed,
 /// and the start goes on and is recorded (app #245), its lifeline let go.
 #[cfg(unix)]
@@ -1447,6 +1505,21 @@ fn detaching_leaves_the_runtime_and_quit_with_client_stops_it_on_eof() {
     helper.exits();
     assert!(!runtime.alive(), "the app going away stops it with --quit-with-client");
     assert!(!dir.join("runtime.json").exists());
+
+    // A runtime of a build before `endeavor/end_when_idle` (this fake says no interface) couldn't end once
+    // idle, so with --exit-idle-after-client the app going stops it, as a quit used to (app #274).
+    let runtime = FakeRuntime::start(&dir, "labbox3");
+    let mut helper = Helper::start(&dir, &["--any-node", "--exit-idle-after-client"]);
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
+    helper.send(ToHelper::Detach);
+    helper.exits();
+    assert!(!runtime.alive() && !dir.join("runtime.json").exists(), "a Detach stops an older runtime");
+    let runtime = FakeRuntime::start(&dir, "labbox3");
+    let mut helper = Helper::start(&dir, &["--any-node", "--exit-idle-after-client"]);
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+    assert!(!runtime.alive() && !dir.join("runtime.json").exists(), "so does the end of input");
 }
 
 #[test]

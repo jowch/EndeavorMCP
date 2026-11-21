@@ -158,6 +158,11 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   while a plugin session works in an open notebook and its front still runs.
   It ends 10 minutes after the plugin is out of it, and the app takes it back
   when it opens again (app #232, interface 45, `docs/plugins-and-remote.md`).
+  A runtime the app leaves running (any quit, or a killed app) goes on until
+  its notebooks have each been idle for the idle limit, and ends 10 minutes
+  after none is open (`connect --exit-idle-after-client`,
+  `endeavor/end_when_idle`, app #274, interface 46). The app's Keep running
+  setting goes. An older-build runtime is stopped as a quit used to stop it.
   Until the plugins' pinned build moves past this change, their fronts don't
   say which process they are, so for them the only rule is "called in the
   last 30 minutes".
