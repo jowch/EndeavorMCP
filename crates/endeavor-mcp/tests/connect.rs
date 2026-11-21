@@ -736,6 +736,29 @@ fn the_end_of_input_does_what_the_keep_running_setting_says_now() {
     assert!(!dir.join("runtime.json").exists());
 }
 
+/// Keep running turned on while a start of the helper's own is still under way: the app is then killed,
+/// and the start goes on and is recorded (app #245), its lifeline let go.
+#[cfg(unix)]
+#[test]
+fn a_start_goes_on_when_keep_running_is_turned_on_before_it_is_ready_and_the_app_is_killed() {
+    let (dir, cores, julia) = held_dir("start-own-kept");
+    let mut own = held_start(&dir, &julia, &["--own-with-client"]);
+    let core = cores.pids()[0];
+    own.send(ToHelper::OwnWithClient { on: false });
+    own.stdin.0.lock().unwrap().take();
+    own.exits();
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    common::wait_for("the runtime to be recorded", || dir.join("runtime.json").exists());
+    assert!(common::pid_alive(core), "the start goes on");
+    let mut stopper = Helper::start(&dir, &[]);
+    stopper.hello();
+    let stop = stopper.request_stop();
+    assert_eq!(stopper.next(), ToApp::Stopped { id: stop });
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    stopper.stdin.0.lock().unwrap().take();
+    stopper.exits();
+}
+
 /// A helper with `--own-with-client` that is killed outright, as some ssh servers do when the client goes,
 /// can't stop the start it began; the core then stops it itself (#95). One the app already has, or that the
 /// app detached from while it started, is left.

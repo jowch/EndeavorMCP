@@ -283,6 +283,15 @@ fn keep_runtime() {
     }
 }
 
+/// `ToHelper::OwnWithClient`: off, a start of this helper's that is under way is wanted too, so its
+/// lifeline lets go (`keep_runtime`) and a killed app leaves it (app #245).
+fn own_with_client(args: &Args, on: bool) {
+    args.own_with_client.store(on, Ordering::SeqCst);
+    if !on {
+        keep_runtime();
+    }
+}
+
 /// The helper's main, given its arguments without the program name. Call it
 /// before the process starts any thread: it blocks SIGUSR1 for all of them.
 pub fn run(argv: Vec<String>) -> ! {
@@ -517,7 +526,7 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
                 std::process::exit(0)
             }
             Event::Eof => std::process::exit(0),
-            Event::App(ToHelper::OwnWithClient { on }) => args.own_with_client.store(on, Ordering::SeqCst),
+            Event::App(ToHelper::OwnWithClient { on }) => own_with_client(args, on),
             // Answered as they arrive (relay_stdin).
             Event::App(ToHelper::Files { .. }) => {}
             Event::Exited(pid, status) => {
@@ -873,7 +882,7 @@ impl<'a> Client<'a> {
             // `await_runtime` stops the runtime this start began.
             Heard::Eof if self.args.own_with_client.load(Ordering::SeqCst) && waiting == Waiting::Ready => return false,
             Heard::Eof => std::process::exit(0),
-            Heard::OwnWithClient(on) => self.args.own_with_client.store(on, Ordering::SeqCst),
+            Heard::OwnWithClient(on) => own_with_client(self.args, on),
             Heard::Quiet | Heard::Event => {}
         }
         true
