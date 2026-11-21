@@ -1778,7 +1778,7 @@ impl LeftWatch {
         if open != Some(0) {
             self.empty_since = now;
         } else if now.duration_since(self.empty_since).as_secs_f64() >= hours * 3600.0 {
-            return Some(format!("No notebook open for {hours} hours"));
+            return Some(format!("No notebook open for {}", crate::notebooks::idle_span(hours)));
         }
         None
     }
@@ -1821,7 +1821,7 @@ fn exit_when_idle(served: Arc<Served>) {
             if notebooks.open_count() != Some(0) || hours <= 0.0 {
                 empty_since = std::time::Instant::now();
             } else if empty_since.elapsed().as_secs_f64() >= hours * 3600.0 {
-                eprintln!("[ Info: No notebook open for {hours} hours; stopping");
+                eprintln!("[ Info: No notebook open for {}; stopping", crate::notebooks::idle_span(hours));
                 served.end_on_its_own();
                 return;
             }
@@ -3026,7 +3026,7 @@ mod tests {
         assert_eq!(watch.tick(at(47 * 60), true, Some(0), 0.0), None);
         assert!(watch.tick(at(48 * 60), true, Some(0), 0.0).is_some_and(|why| why.contains("48 hours")));
         let mut watch = LeftWatch::new(LEFT_GRACE, start);
-        assert!(watch.tick(at(60), true, Some(0), 1.0).is_some_and(|why| why.contains("1 hours")), "the app's limit when it has one");
+        assert!(watch.tick(at(60), true, Some(0), 1.0).is_some_and(|why| why.contains("1 hour")), "the app's limit when it has one");
     }
 
     /// The runtime's port with a stand-in Ember on `ember` (none: not running), and its address.

@@ -1418,7 +1418,7 @@ impl Notebooks {
             if self.shutdown(&nb.id).is_ok() {
                 self.publish();
             }
-            eprintln!("[ Info: Stopped {} after {whole_hours} hours idle", nb.path);
+            eprintln!("[ Info: Stopped {} after {} idle", nb.path, idle_span(hours));
         }
         idle.into_iter().map(|nb| nb.path).collect()
     }
@@ -1950,6 +1950,17 @@ fn parent_dir(path: &str) -> String {
     match &path[..path.rfind('/').unwrap_or(0)] {
         "" => "/".into(),
         dir => dir.into(),
+    }
+}
+
+/// An idle limit in words for the runtime's log: "48 hours", "1 hour", or minutes under an hour (#460).
+pub(crate) fn idle_span(hours: f64) -> String {
+    if hours < 1.0 {
+        let minutes = ((hours * 60.0).round() as i64).max(1);
+        format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+    } else {
+        let hours = hours.round_ties_even() as i64;
+        format!("{hours} hour{}", if hours == 1 { "" } else { "s" })
     }
 }
 
