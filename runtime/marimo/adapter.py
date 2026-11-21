@@ -577,14 +577,15 @@ class Notebook:
         raised = [e.get("raising_cell") for e in (out.get("data") if isinstance(out.get("data"), list) else [])]
         return bool(raised) and all(r in self.cells and self.cells[r].get("awaiting_install") for r in raised)
 
-    def missing_modules(self, cells):
-        """The modules the cells failed to import, which nobody tried to install yet."""
+    def missing_modules(self, cells, tried=False):
+        """The modules the cells failed to import, which nobody tried to install yet (with `tried`,
+        those too)."""
         found = {}
         for c in cells:
             out = self.cells.get(c, {}).get("output") or {}
             for e in out.get("data") if isinstance(out.get("data"), list) else []:
                 m = re.match(r"No module named '([^'.]+)", e.get("msg", ""))
-                if e.get("exception_type") == "ModuleNotFoundError" and m and m.group(1) not in self.missing:
+                if e.get("exception_type") == "ModuleNotFoundError" and m and (tried or m.group(1) not in self.missing):
                     found.setdefault(m.group(1), []).append(c)
         return found
 
@@ -733,7 +734,9 @@ class Notebook:
             return None
         started = (self.installing or {}).get("started", time.time())
         waiting = [c for c in self.order if self.waits_for_install(c)]
-        return {"step": "installing", "packages": (self.installing or {}).get("packages") or sorted(self.missing_modules(waiting)),
+        # Between an install's end and its cells' rerun, `self.installing` is gone and the modules count as
+        # tried: the waiting cells' import errors still name them (#439).
+        return {"step": "installing", "packages": (self.installing or {}).get("packages") or sorted(self.missing_modules(waiting, tried=True)),
                 "seconds": int(time.time() - started), "last_line": None}
 
     def check_cell(self, cid):
