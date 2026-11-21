@@ -504,16 +504,17 @@ of another build takes it for the plugin's own and stops it. Otherwise the
 runtime stops as before (app #232).
 
 The app starts this computer's helper with `--exit-idle-after-client`. When
-the app goes and its helper leaves the runtime running, the helper calls
-`endeavor/end_when_idle` before it exits. That is a quit with Keep running on
-(a Detach), and a killed app whose helper has nothing to stop: Keep running
-on, or Keep running off with a runtime the helper didn't start. From then on the core ends once no
-notebook has been open for the idle limit, as a runtime started in the
-background does, and it is marked as ending when idle in `runtime.json`.
-Without this, a runtime the app left running never ended. `keep_for_app` undoes it when the app is
-back. Only the app does this, and only for its own computer: a server's
-helper is started without the flag, and a server's runtime keeps running
-(app #274).
+the app goes and its helper leaves the runtime running (a quit is a Detach;
+a killed app's input just ends), the helper calls `endeavor/end_when_idle`
+before it exits. The notebooks then go on, each until it has been idle for
+the idle limit, as always. Once no notebook is open, the core ends 10 minutes
+later, which leaves time for the app or Claude Code to come back to it. With
+the limit Never, it runs until it is stopped. It is marked as ending when
+idle in `runtime.json`, and `keep_for_app` undoes it when the app is back.
+This replaces the app's Keep running setting and covers the plugin too, since
+its open notebooks keep the runtime up like the app's; the Stop with
+`unless_shared` above is what older apps send. A server's helper is started
+without the flag, and a server's runtime keeps running (app #274).
 
 **Cancelling a test.** The app's Test connection (`client::test`) starts its
 helper with `--own-with-client`: when the helper's input ends without a Stop

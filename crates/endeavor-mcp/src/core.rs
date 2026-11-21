@@ -258,7 +258,7 @@ pub fn main(argv: &[String]) -> ! {
     // Let go after the record is written: whoever sees the lock free and no record knows the start died.
     crate::runtime::release_starting(starting_lock);
     if exit_idle {
-        exit_when_idle(served.clone(), None);
+        exit_when_idle(served.clone());
     }
     served.bridge.notebooks.start();
     if let Some(standalone) = served.bridge.standalone.as_ref().filter(|standalone| !standalone.no_folder) {
@@ -1664,7 +1664,7 @@ fn leave_to_plugin(served: &Arc<Served>, alive: Arc<dyn Fn(&crate::mcp::Front) -
         rewrite_exits_when_idle(served, true);
     }
     // A new watch even if it was left already: one an earlier app left running (`end_when_idle`) and didn't
-    // get back yet has only the idle exit, which never ends it with the limit Never.
+    // get back yet is watched for the plugin from now on.
     let generation = served.left_generation.fetch_add(1, SeqCst) + 1;
     watch_left(served.clone(), generation, alive);
     true
@@ -1683,21 +1683,46 @@ fn keep_for_app(served: &Served) {
     rewrite_exits_when_idle(served, before);
 }
 
-/// The app is gone and its Keep running setting leaves this runtime running (`endeavor/end_when_idle`,
-/// app #274): from now on it ends once no notebook has been open for the idle limit, as a runtime started
-/// in the background does, rather than never. It is marked as ending when idle, so the plugin's fronts treat
-/// it as theirs. `keep_for_app` undoes it when the app is back. Nothing for one already left or ending when idle.
+/// The app is gone and its helper leaves this runtime running (`endeavor/end_when_idle`, app #274): its
+/// notebooks go on, each until it has been idle for the idle limit, as always, and once none is open the
+/// runtime ends `LEFT_GRACE` later (`watch_empty`), which leaves time for the app or Claude Code to come back
+/// to it. It is marked as ending when idle, so the plugin's fronts treat it as theirs. `keep_for_app` undoes
+/// it when the app is back. Nothing for one already left or ending when idle.
 fn end_when_idle(served: &Arc<Served>) {
     use std::sync::atomic::Ordering::SeqCst;
     let mut left = served.left.lock().unwrap();
     if left.is_some() || served.bridge.notebooks.exits_when_idle.load(SeqCst) {
         return;
     }
-    eprintln!("[ Info: The app is gone and leaves this runtime running; it ends once no notebook has been open for the idle limit");
+    eprintln!("[ Info: The app is gone; this runtime goes on until its notebooks are idle, then ends");
     let generation = served.left_generation.fetch_add(1, SeqCst) + 1;
     *left = Some(served.bridge.notebooks.exits_when_idle.swap(true, SeqCst));
     rewrite_exits_when_idle(served, true);
-    exit_when_idle(served.clone(), Some(generation));
+    watch_empty(served.clone(), generation);
+}
+
+/// End a runtime the app left once no notebook has been open in it for `LEFT_GRACE`, or stop watching when
+/// the app takes it back (`generation` moves on).
+fn watch_empty(served: Arc<Served>, generation: u64) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let check = crate::notebooks::idle_check().min(Duration::from_secs(60));
+    std::thread::spawn(move || {
+        let grace = left_grace();
+        let mut empty_since = Instant::now();
+        loop {
+            std::thread::sleep(check);
+            if served.left_generation.load(SeqCst) != generation {
+                return;
+            }
+            if served.bridge.notebooks.open_count() != Some(0) {
+                empty_since = Instant::now();
+            } else if empty_since.elapsed() >= grace {
+                eprintln!("[ Info: No notebook open for {} minutes since the app left; stopping", grace.as_secs() / 60);
+                served.shutdown();
+                return;
+            }
+        }
+    });
 }
 
 /// Set `exits_when_idle` in `runtime.json`, if the record there is still this core's.
@@ -1786,16 +1811,12 @@ fn watch_left(served: Arc<Served>, generation: u64, alive: Arc<dyn Fn(&crate::mc
 /// End the runtime once no notebook has been open for the idle limit (none
 /// when it's 0): a runtime the stdio form or a server connection started in the
 /// background has no one to stop it.
-fn exit_when_idle(served: Arc<Served>, generation: Option<u64>) {
+fn exit_when_idle(served: Arc<Served>) {
     std::thread::spawn(move || {
         let notebooks = &served.bridge.notebooks;
         let mut empty_since = std::time::Instant::now();
-        let stale = || generation.is_some_and(|generation| served.left_generation.load(std::sync::atomic::Ordering::SeqCst) != generation);
         loop {
             std::thread::sleep(crate::notebooks::idle_check());
-            if stale() {
-                return;
-            }
             let hours = notebooks.idle_limit_hours();
             if notebooks.open_count() != Some(0) || hours <= 0.0 {
                 empty_since = std::time::Instant::now();
@@ -1970,7 +1991,7 @@ struct Served {
     /// While the app's quit has left this runtime to the plugin (`leave_to_plugin`), or the app has gone
     /// and left it running (`end_when_idle`), whether it ended when idle before.
     left: Mutex<Option<bool>>,
-    /// Moves on each leave and each take-back, so a stale watch (`watch_left`, `exit_when_idle`) stops.
+    /// Moves on each leave and each take-back, so a stale watch (`watch_left`, `watch_empty`) stops.
     left_generation: std::sync::atomic::AtomicU64,
 }
 
