@@ -1705,6 +1705,26 @@ fn a_runtime_started_with_exit_idle_ends_once_no_notebook_is_open() {
 }
 
 #[test]
+fn a_runtime_that_ends_when_idle_kills_a_julia_that_wont_shut_down() {
+    // A Julia that goes on through the shutdown still ends: the core kills it (#458).
+    let idle = [("ENDEAVOR_IDLE_CHECK_SECS", "0.2"), ("ENDEAVOR_IDLE_HOURS", "0.0003"), ("ENDEAVOR_TEST_STOP_GRACE_SECS", "0.5")];
+    let dir = state_dir("exit-idle-deaf");
+    std::fs::write(dir.join("deaf"), "").unwrap();
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    let mut helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap(), "--exit-idle"], &idle);
+    assert!(matches!(helper.start_runtime(), ToApp::Found { .. }));
+    let ToApp::Ready { pid, .. } = helper.after_progress() else { panic!("expected Ready") };
+    let julia_pid = common::read_json(&dir.join("julia.json"))["pid"].as_i64().unwrap() as i32;
+    common::wait_for("the runtime to end itself", || !common::pid_alive(pid as i32));
+    assert!(!common::pid_alive(julia_pid), "Julia was killed");
+    assert!(bridge.seen().iter().any(|s| String::from_utf8_lossy(&s.body).contains("endeavor/shutdown")), "it asked Julia to shut down first");
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
 fn a_cluster_job_is_submitted_with_exit_idle_and_its_node_start_passes_it_on() {
     let dir = state_dir("slurm-exit-idle");
     let julia = fake_julia(&dir);
