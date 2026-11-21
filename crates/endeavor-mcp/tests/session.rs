@@ -14,7 +14,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use common::{FakeBridge, TOKEN, julia_pids, pid_alive, serving_julia, wait_for, write_executable};
-use endeavor_mcp::client::{Auth, Config, Event, Launcher, Outcome, RuntimeInfo, Server, Session, SessionEvent, State, Status, Transport, Want};
+use endeavor_mcp::client::{Auth, Config, Event, Gone, Launcher, Outcome, RuntimeInfo, Server, Session, SessionEvent, State, Status, Transport, Want};
 
 /// One machine called `lab-NAME` whose helper and runtime live in a folder of the test's own.
 struct Place {
@@ -518,6 +518,26 @@ fn a_stop_during_a_start_is_no_failure() {
     std::thread::sleep(Duration::from_secs(1));
     let status = session.status();
     assert_eq!(status.state, State::Connected);
+}
+
+#[test]
+fn a_runtime_that_ends_says_so_as_a_typed_reason_until_one_is_asked_for_again() {
+    let place = Place::new("gone-died");
+    let session = place.session();
+    let before = ready(session.ensure(start(), LONG, false));
+    assert_eq!(session.status().gone, None);
+    // SAFETY: plain syscall, on the runtime this test's session started.
+    unsafe { libc::kill(-(before.pid as i32), libc::SIGKILL) };
+    let status = session.wait_for(LONG, |status| status.gone.is_some());
+    assert!(matches!(status.gone, Some(Gone::Died(_))), "{status:?}");
+    assert_eq!(status.state, State::NothingRunning, "{status:?}");
+    assert!(status.step.as_deref().is_some_and(|step| step.starts_with("Julia on lab stopped.")), "the words say the same: {status:?}");
+    let mut next = None;
+    wait_for("a new runtime", || {
+        next = Some(session.ensure(start(), Duration::from_millis(200), true));
+        matches!(next, Some(Outcome::Ready(_)))
+    });
+    assert_eq!(session.status().gone, None, "a new runtime clears it");
 }
 
 #[test]

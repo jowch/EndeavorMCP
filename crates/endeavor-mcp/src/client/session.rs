@@ -202,6 +202,19 @@ pub struct Status {
     pub hello: Option<HelloInfo>,
     /// The cluster job, from the time it is submitted. It outlasts a lost connection, since the job goes on.
     pub job: Option<JobInfo>,
+    /// Why the runtime last went away, until a runtime is asked for again or is attached: the same
+    /// as `state`'s and `step`'s words say, for a caller to tell the cases apart without matching them.
+    pub gone: Option<Gone>,
+}
+
+/// Why a runtime the session had, or was starting, went away (`Status::gone`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Gone {
+    /// Another connection took it over; asking for it again would take it back.
+    Replaced,
+    /// It stopped by itself, or was stopped from another connection: why, as the helper said it
+    /// (empty when it didn't say).
+    Died(String),
 }
 
 /// What a caller wants of the machine's runtime.
@@ -395,6 +408,8 @@ struct Inner {
     settled: Option<Launcher>,
     /// The runtime (its pid) the caller was told came from another build: a reconnect to it says nothing again.
     told_other_build: Option<u32>,
+    /// `Status::gone`.
+    gone: Option<Gone>,
 }
 
 struct Shared {
@@ -446,6 +461,7 @@ impl Session {
             may_kick: true,
             settled: None,
             told_other_build: None,
+            gone: None,
         };
         let shared = Arc::new(Shared {
             allow_install: AtomicBool::new(config.allow_install),
@@ -636,6 +652,7 @@ fn status_of(i: &Inner) -> Status {
         step: i.step.clone(),
         hello: i.hello.clone(),
         job: i.job.clone(),
+        gone: i.gone.clone(),
     }
 }
 
@@ -875,6 +892,7 @@ impl Shared {
         }
         i.wanted = Some(want.wish());
         i.resume = None;
+        i.gone = None;
         if i.state == State::NothingRunning {
             i.state = State::Connected;
         }
@@ -1178,10 +1196,12 @@ fn wait_for(inbox: &Receiver<Msg>, time: Duration) -> bool {
     }
 }
 
-/// The runtime went away, for `why`. A start it cut short failed, and so did a takeover by another connection (`kept`:
+/// The runtime went away, for `why` (`gone` in words). A start it cut short failed, and so did a takeover by another connection (kept:
 /// attaching again would take it back and put the two at odds); a runtime that was up and ended is just not running,
 /// and asking for one again starts one.
-fn gone(i: &mut Inner, why: String, kept: bool) {
+fn gone(i: &mut Inner, why: String, gone: Gone) {
+    let kept = gone == Gone::Replaced;
+    i.gone = Some(gone);
     let starting = i.starting();
     i.run = if starting { Run::Gone } else { Run::Idle };
     (i.wanted, i.job) = (None, None);
@@ -1230,6 +1250,7 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                             i.job = Some(JobInfo { id: job.id.clone(), summary: known.summary, node: Some(job.node.clone()), ends_at: job.ends_at });
                         }
                         i.run = Run::Idle;
+                        i.gone = None;
                         i.state = State::Ready(RuntimeInfo {
                             port: runtime.port,
                             token: runtime.token,
@@ -1303,7 +1324,7 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                 Notice::Died(reason) => {
                     let text = shared.with(|i| {
                         let text = format!("Julia on {} stopped. {reason}", i.name).trim_end().to_owned();
-                        gone(i, text.clone(), false);
+                        gone(i, text.clone(), Gone::Died(reason.trim().to_owned()));
                         text
                     });
                     shared.trouble(text);
@@ -1312,7 +1333,7 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                 Notice::Replaced => {
                     let text = shared.with(|i| {
                         let text = format!("Another connection took Julia on {} over.", i.name);
-                        gone(i, text.clone(), true);
+                        gone(i, text.clone(), Gone::Replaced);
                         text
                     });
                     shared.trouble(text);
