@@ -421,6 +421,36 @@ end
         @test occursin("x = 3", read(hard, String))
     end
 
+    @testset "saving: a staged copy a killed save left is removed once it is old (#469)" begin
+        dir = mktempdir()
+        path = joinpath(dir, "nb.jl")
+        nb = Pluto.Notebook([Pluto.Cell(; code="x = 1")], path)
+        Pluto.save_notebook(nb, path)
+        old = joinpath(dir, ".nb.jl.saving.999999.0")
+        fresh = joinpath(dir, ".nb.jl.saving.999999.1")
+        other = joinpath(dir, ".other.jl.saving.999999.0")
+        for f in (old, fresh, other)
+            write(f, "cut short")
+        end
+        hour_ago = time() - 3600
+        for f in (old, other)
+            ccall(:utime, Cint, (Cstring, Ptr{NTuple{2,Int}}), f, Ref((round(Int, hour_ago), round(Int, hour_ago))))
+        end
+        EndeavorRuntime._remove_left_staged(path)
+        @test !isfile(old)
+        @test isfile(fresh)  # it may be another save under way
+        @test isfile(other)  # another notebook's is left to that notebook's save
+        # A save does it, once per notebook in this process.
+        nb2 = joinpath(mktempdir(), "nb2.jl")
+        notebook2 = Pluto.Notebook([Pluto.Cell(; code="y = 1")], nb2)
+        left = joinpath(dirname(nb2), ".nb2.jl.saving.999999.0")
+        write(left, "cut short")
+        ccall(:utime, Cint, (Cstring, Ptr{NTuple{2,Int}}), left, Ref((round(Int, hour_ago), round(Int, hour_ago))))
+        Pluto.save_notebook(notebook2, nb2)
+        @test !isfile(left)
+        @test readdir(dirname(nb2)) == ["nb2.jl"]
+    end
+
     @testset "validation parses as Pluto does" begin
         session, nb, cells = make_session_with_notebook("x = 1")
         errors = EndeavorRuntime._parse_validation_errors(nb, cells[1], "a = 1\nb = 2")
