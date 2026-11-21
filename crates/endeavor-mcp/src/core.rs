@@ -1718,7 +1718,7 @@ fn watch_empty(served: Arc<Served>, generation: u64) {
                 empty_since = Instant::now();
             } else if empty_since.elapsed() >= grace {
                 eprintln!("[ Info: No notebook open for {} minutes since the app left; stopping", grace.as_secs() / 60);
-                served.shutdown();
+                served.end_on_its_own();
                 return;
             }
         }
@@ -1801,7 +1801,7 @@ fn watch_left(served: Arc<Served>, generation: u64, alive: Arc<dyn Fn(&crate::mc
                     return;
                 }
                 eprintln!("[ Info: {why}; stopping");
-                served.shutdown();
+                served.end_on_its_own();
                 return;
             }
         }
@@ -1822,7 +1822,7 @@ fn exit_when_idle(served: Arc<Served>) {
                 empty_since = std::time::Instant::now();
             } else if empty_since.elapsed().as_secs_f64() >= hours * 3600.0 {
                 eprintln!("[ Info: No notebook open for {hours} hours; stopping");
-                served.shutdown();
+                served.end_on_its_own();
                 return;
             }
         }
@@ -1953,14 +1953,20 @@ fn unless_julia_ends(served: Arc<Served>, pid: i32) {
         }
         eprintln!("[ Warning: Julia didn't stop on the signal; shutting it down");
         served.shutdown();
-        std::thread::sleep(stop_grace());
-        if runs() {
-            eprintln!("[ Warning: Julia didn't shut down; killing it");
-            // SAFETY: plain syscall. The pid is Julia's until the wait thread reaps it and stores 0; a reuse in
-            // that brief window is the only way this could hit another process.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-        }
+        kill_unless_shut_down(&served, pid);
     });
+}
+
+/// After a shutdown asked of Julia (`pid`): if it still runs after `stop_grace`, kill it; the core ends with it.
+#[cfg(unix)]
+fn kill_unless_shut_down(served: &Served, pid: i32) {
+    std::thread::sleep(stop_grace());
+    if served.julia.pid.load(std::sync::atomic::Ordering::SeqCst) == pid {
+        eprintln!("[ Warning: Julia didn't shut down; killing it");
+        // SAFETY: plain syscall. The pid is Julia's until the wait thread reaps it and stores 0; a reuse in
+        // that brief window is the only way this could hit another process.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
 }
 
 /// What the runtime's port serves: the bridge, and once Julia is ready, Pluto.
@@ -2005,6 +2011,20 @@ impl Served {
             _ => {
                 let _ = self.stops.send(Stop::Shutdown);
             }
+        }
+    }
+
+    /// `shutdown`, for a runtime that ends on its own (idle, or left and no longer wanted), which no one
+    /// waits on: if Julia still runs `stop_grace` later, kill it (#458). Not on Windows yet, where
+    /// Julia's start time isn't kept past its start, and a pid alone may name another process by then.
+    fn end_on_its_own(self: &Arc<Self>) {
+        #[cfg(unix)]
+        let pid = self.julia.pid.load(std::sync::atomic::Ordering::SeqCst);
+        self.shutdown();
+        #[cfg(unix)]
+        if pid > 0 {
+            let served = self.clone();
+            std::thread::spawn(move || kill_unless_shut_down(&served, pid));
         }
     }
 
