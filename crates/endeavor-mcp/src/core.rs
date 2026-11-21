@@ -1871,15 +1871,48 @@ fn pass_on_stop_signals(set: libc::sigset_t, served: Arc<Served>) {
                 let julia = &served.julia;
                 julia.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
                 match julia.pid.load(std::sync::atomic::Ordering::SeqCst) {
-                    // SAFETY: plain syscall.
-                    pid if pid > 0 => unsafe {
-                        libc::kill(pid, signal);
-                    },
+                    pid if pid > 0 => {
+                        // SAFETY: plain syscall.
+                        unsafe { libc::kill(pid, signal) };
+                        unless_julia_ends(served.clone(), pid);
+                    }
                     _ => {
                         let _ = served.stops.send(Stop::Signal(signal));
                     }
                 }
             }
+        }
+    });
+}
+
+/// How long Julia has to end after a stop signal, and again after the shutdown that follows, before the
+/// next step (`unless_julia_ends`).
+#[cfg(unix)]
+fn stop_grace() -> std::time::Duration {
+    #[cfg(debug_assertions)]
+    if let Some(secs) = std::env::var("ENDEAVOR_TEST_STOP_GRACE_SECS").ok().and_then(|s| s.parse().ok()) {
+        return std::time::Duration::from_secs_f64(secs);
+    }
+    std::time::Duration::from_secs(10)
+}
+
+/// A stop signal passed on to Julia (`pid`) didn't end it: Julia with notebooks open can go on (#316). Ask
+/// it to shut down, as `endeavor stop` does, and if it still runs, kill it; the core ends with it.
+#[cfg(unix)]
+fn unless_julia_ends(served: Arc<Served>, pid: i32) {
+    std::thread::spawn(move || {
+        let runs = || served.julia.pid.load(std::sync::atomic::Ordering::SeqCst) == pid;
+        std::thread::sleep(stop_grace());
+        if !runs() {
+            return;
+        }
+        eprintln!("[ Warning: Julia didn't stop on the signal; shutting it down");
+        served.shutdown();
+        std::thread::sleep(stop_grace());
+        if runs() {
+            eprintln!("[ Warning: Julia didn't shut down; killing it");
+            // SAFETY: plain syscall; the pid is still our unreaped child's.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     });
 }
