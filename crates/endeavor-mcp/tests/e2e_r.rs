@@ -484,6 +484,22 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
     });
 
+    step("after an interrupt, a dependent that kept an earlier run's output is named stale (#260)", || {
+        agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
+        let slow = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "slow <- 1", "after_cell_id": B }))["cell_id"].clone();
+        let after = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "slow + 1", "after_cell_id": slow }))["cell_id"].clone();
+        agent.ok("submit_changes", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": slow, "code": "slow <- { Sys.sleep(600); 1 }" }));
+        agent.ok("submit_changes", json!({ "notebook_id": notebook }));
+        common::wait_for("the slow cell to start", || agent.ok("list_notebooks", json!({}))[0]["running"].as_array().is_some_and(|r| r.contains(&slow)));
+        let stopped = agent.ok("interrupt_notebook", json!({ "notebook_id": notebook }));
+        assert_eq!((&stopped["stopped"], &stopped["stale_cells"]), (&json!([slow]), &json!([after])), "{stopped}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": after }));
+        assert!(read["stale"] == true && read["output"] == "[1] 2", "it keeps the earlier output: {read}");
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": after }));
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
+    });
+
     step("readline() and menu() in a cell wait for answer_prompt, and an interrupt ends the wait (#261)", || {
         agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
         let asks = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "who <- readline(\"Name? \")", "after_cell_id": B }))["cell_id"].clone();
