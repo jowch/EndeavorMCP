@@ -62,7 +62,7 @@ options:
   --r RSCRIPT|auto     the R for R notebooks (default auto: your login shell's Rscript) [serve, mcp]
   --r-shell LINE       a shell line that puts Rscript on the PATH, such as 'module load R' [serve, mcp]
   --depot DEPOT        JULIA_DEPOT_PATH (default ~/.cache/endeavor/depot:, or $SCRATCH/endeavor/depot:)
-  --cache DIR          where the runtime's files are unpacked (default ~/.cache/endeavor/serve) [serve, mcp]
+  --cache DIR          where the runtime's files are unpacked, a folder for Endeavor alone (default ~/.cache/endeavor/serve) [serve, mcp]
   --idle-stop HOURS    stop notebooks unused this long; 0 never (default 48)
   --state-dir DIR      the runtime's state (default ~/.local/state/endeavor/serve/<host>) [serve, mcp, stop, status, open]
   --json               print the facts as one JSON object [status]
@@ -317,6 +317,11 @@ fn remove_unused(cache: &Path, keep: &str) {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
+        // `--cache` can name a folder that also holds the user's own files (#126): touch only what
+        // `unpack` names, a crate version and a dash first.
+        if !named_by_unpack(&name) {
+            continue;
+        }
         if name.contains(".removing.") {
             let _ = std::fs::remove_dir_all(&path);
             continue;
@@ -347,6 +352,13 @@ fn remove_unused(cache: &Path, keep: &str) {
             let _ = std::fs::remove_dir_all(&trash);
         }
     }
+}
+
+/// Whether `name` starts the way `unpack`'s folders do: a crate version (`0.1.0`), then `-`.
+fn named_by_unpack(name: &str) -> bool {
+    let Some((version, _)) = name.split_once('-') else { return false };
+    let parts: Vec<&str> = version.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// A shared lock on an unpacked folder (`unpack`) that keeps another
