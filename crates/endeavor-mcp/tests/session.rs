@@ -532,6 +532,10 @@ fn a_runtime_that_ends_says_so_as_a_typed_reason_until_one_is_asked_for_again() 
     assert!(matches!(status.gone, Some(Gone::Died(_))), "{status:?}");
     assert_eq!(status.state, State::NothingRunning, "{status:?}");
     assert!(status.step.as_deref().is_some_and(|step| step.starts_with("Julia on lab stopped.")), "the words say the same: {status:?}");
+    // A stop asked for here afterwards is no runtime that went away.
+    session.stop().expect("stop");
+    let stopped = session.status();
+    assert_eq!((stopped.state, stopped.gone), (State::Connected, None));
     let mut next = None;
     wait_for("a new runtime", || {
         next = Some(session.ensure(start(), Duration::from_millis(200), true));

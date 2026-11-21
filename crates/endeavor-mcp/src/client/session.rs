@@ -928,6 +928,7 @@ impl Shared {
                         i.run = Run::Idle;
                         i.job = None;
                         i.state = State::Connected;
+                        i.gone = None;
                         i.step = Some("The runtime was stopped".into());
                     }
                 }
