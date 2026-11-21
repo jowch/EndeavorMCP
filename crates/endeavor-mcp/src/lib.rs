@@ -1858,6 +1858,10 @@ fn bridge_call_within(port: u16, path: &str, token: &str, method: &str, wait: Du
 }
 
 #[cfg(test)]
+#[path = "../tests/common/exec.rs"]
+pub(crate) mod test_exec;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

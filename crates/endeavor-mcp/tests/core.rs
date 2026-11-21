@@ -2000,8 +2000,7 @@ fn a_julia_that_would_need_downloading_isnt_started_ahead() {
     let dir = state_dir("core-warm-download");
     // No julia on the login shell's PATH and none of Endeavor's own: only a download would give one.
     let shell = dir.join("no-julia-shell");
-    std::fs::write(&shell, "#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    common::write_executable(&shell, "#!/bin/sh\nexit 1\n");
     let home = temp_folder("core-warm-download-home");
     let (shell, home) = (shell.display().to_string(), home.display().to_string());
     let env = [("SHELL", shell.as_str()), ("HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str())];
@@ -2046,8 +2045,7 @@ fn a_call_made_while_embers_install_runs_waits_for_it_as_the_first_did() {
     let julia = serving_julia(&dir, &bridge);
     // An R whose Ember install takes 5 s and then fails.
     let r = dir.join("slow-install-r");
-    std::fs::write(&r, "#!/bin/sh\ncase \"$*\" in *install.R*) sleep 5; exit 1;; esac\nexit 1\n").unwrap();
-    std::fs::set_permissions(&r, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    common::write_executable(&r, "#!/bin/sh\ncase \"$*\" in *install.R*) sleep 5; exit 1;; esac\nexit 1\n");
     let home = temp_folder("core-r-install-wait-home");
     let home = home.display().to_string();
     let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed"), std::ffi::OsStr::new("--r"), r.as_os_str()];
@@ -2077,8 +2075,7 @@ fn a_failed_ember_install_is_said_to_every_call_for_a_while_before_one_tries_aga
     let julia = serving_julia(&dir, &bridge);
     // An R whose Ember install fails at once, and counts its tries.
     let (r, tries) = (dir.join("failing-install-r"), dir.join("install-tries"));
-    std::fs::write(&r, format!("#!/bin/sh\ncase \"$*\" in *install.R*) echo try >> '{}'; exit 1;; esac\nexit 1\n", tries.display())).unwrap();
-    std::fs::set_permissions(&r, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    common::write_executable(&r, &format!("#!/bin/sh\ncase \"$*\" in *install.R*) echo try >> '{}'; exit 1;; esac\nexit 1\n", tries.display()));
     let home = temp_folder("core-r-install-failed-home");
     let home = home.display().to_string();
     let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed"), std::ffi::OsStr::new("--r"), r.as_os_str()];
@@ -2120,8 +2117,7 @@ fn calls_made_together_while_embers_install_runs_each_wait_no_longer_than_one_ca
     let julia = serving_julia(&dir, &bridge);
     // An R whose Ember install takes longer than all the calls below.
     let r = dir.join("slow-install-r");
-    std::fs::write(&r, "#!/bin/sh\ncase \"$*\" in *install.R*) sleep 30; exit 1;; esac\nexit 1\n").unwrap();
-    std::fs::set_permissions(&r, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    common::write_executable(&r, "#!/bin/sh\ncase \"$*\" in *install.R*) sleep 30; exit 1;; esac\nexit 1\n");
     let home = temp_folder("core-r-install-together-home");
     let home = home.display().to_string();
     let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed"), std::ffi::OsStr::new("--r"), r.as_os_str()];

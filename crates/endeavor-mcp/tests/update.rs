@@ -4,6 +4,9 @@
 
 #![cfg(unix)]
 
+#[path = "common/exec.rs"]
+mod exec;
+
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -109,7 +112,6 @@ fn update_with_a_bad_checksum_leaves_the_binary() {
 /// this platform's NEW: it says it is `version`, notes its arguments in `wget.log`, and
 /// for the binary prints headers (its -S) saying it came through a redirect to `to`.
 fn wget_only(dir: &std::path::Path, version: &str, to: &str) -> String {
-    use std::os::unix::fs::PermissionsExt;
     let (bin, files) = (dir.join("path"), dir.join("files"));
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&files).unwrap();
@@ -131,8 +133,7 @@ fn wget_only(dir: &std::path::Path, version: &str, to: &str) -> String {
         files = files.display(),
     );
     let _ = std::fs::remove_file(bin.join("wget"));
-    std::fs::write(bin.join("wget"), script).unwrap();
-    std::fs::set_permissions(bin.join("wget"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    exec::write_executable(&bin.join("wget"), &script);
     bin.display().to_string()
 }
 

@@ -339,15 +339,13 @@ mod tests {
         assert_eq!(in_home("process"), env.state_dir(), "gone");
 
         // A `ps` that cuts `args` short (to $COLUMNS) unless given -ww, and one that refuses -ww (#430).
-        use std::os::unix::fs::PermissionsExt;
         let real_ps = ["/usr/bin/ps", "/bin/ps"].into_iter().find(|p| Path::new(p).exists()).expect("ps");
         let mut core = Command::new("sh").args(["-c", "sleep 60; :", "core", "--state-dir"]).arg(&old).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
         record(&crate::hostname(), i64::from(core.id()));
         for (name, body) in [("cuts", format!("[ \"$1\" = -ww ] && exec {real_ps} \"$@\"; {real_ps} \"$@\" | cut -c1-20")), ("refuses-ww", format!("[ \"$1\" = -ww ] && {{ echo 'ps: unknown option' >&2; exit 1; }}; exec {real_ps} \"$@\""))] {
             let fake = home.join(format!("ps-{name}"));
             std::fs::create_dir_all(&fake).unwrap();
-            std::fs::write(fake.join("ps"), format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(fake.join("ps"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_exec::write_executable(&fake.join("ps"), &format!("#!/bin/sh\n{body}\n"));
             let out = Command::new("sh").arg("-c").arg(format!("{PICK_STATE_DIR_SH}; printf %s \"$pd\"")).env_clear().env("PATH", format!("{}:{path}", fake.display())).env("HOME", &home).env("ln", "process").env("st", "").output().unwrap();
             assert_eq!(PathBuf::from(String::from_utf8(out.stdout).unwrap()), old, "a ps that {name}");
         }

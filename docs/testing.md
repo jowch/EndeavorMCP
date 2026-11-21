@@ -19,6 +19,16 @@ Endeavor's own checks,
 including the smoke test in the app, are in
 [Endeavor's testing.md](https://github.com/jowch/Endeavor/blob/main/docs/testing.md).
 
+A test that writes a stand-in tool and then runs it writes it with
+`write_executable` (or copies one with `copy_executable`) from
+`tests/common/exec.rs`, never with `fs::write` and a chmod. The tests run on
+many threads, and a file this process still has open for writing can be
+copied into a child that another thread is starting. Running the file then
+fails with "Text file busy" until that child execs, which is rare and looks
+like a flake. A child process writes the file, so the test process never
+holds it open. The crate's own tests reach the same file as
+`crate::test_exec`.
+
 ## Trying the plugin before a release
 
 The plugin's launcher gets its binary from the Helpers release, which holds no

@@ -561,8 +561,7 @@ fn a_look_on_this_computer_waits_for_a_start_another_process_has_under_way() {
 #[cfg(unix)]
 fn failing_julia(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let (script, log) = (dir.join("julia"), dir.join("runs"));
-    std::fs::write(&script, format!("#!/bin/sh\necho run >> {}\nexit 1\n", log.display())).unwrap();
-    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    crate::test_exec::write_executable(&script, &format!("#!/bin/sh\necho run >> {}\nexit 1\n", log.display()));
     (script, log)
 }
 

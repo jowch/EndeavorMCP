@@ -11,6 +11,9 @@
 
 #![cfg(unix)]
 
+#[path = "common/exec.rs"]
+mod exec;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -61,8 +64,7 @@ fi
 [ "$1" = add ] && [ -e "$dir/fail-add" ] && { echo "Error: the configuration file is locked" >&2; exit 1; }
 exec "$dir/juliaup.real" "$@"
 "#;
-    std::fs::write(&juliaup, wrapper).unwrap();
-    std::fs::set_permissions(&juliaup, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    exec::write_executable(&juliaup, wrapper);
     std::fs::write(home.join(".juliaup").join("juliaupself.json"), r#"{"JuliaupChannel":"release"}"#).unwrap();
     (home, juliaup)
 }

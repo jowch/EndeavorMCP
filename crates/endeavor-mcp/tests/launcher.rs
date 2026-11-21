@@ -8,6 +8,9 @@
 
 #![cfg(unix)]
 
+#[path = "common/exec.rs"]
+mod exec;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::io::Write;
@@ -97,8 +100,7 @@ impl Place {
 
     fn fake(&self, name: &str, body: &str) {
         let path = self.dir.join("fake").join(name);
-        std::fs::write(&path, body).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exec::write_executable(&path, body);
     }
 
     fn command(&self, script: &str, args: &[&str], url: &str) -> Command {
@@ -140,8 +142,7 @@ impl Place {
         let down = self.dir.join("offline");
         std::fs::create_dir_all(&down).unwrap();
         let curl = down.join("curl");
-        std::fs::write(&curl, format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 7\n", self.dir.join("fake/curl.log").display())).unwrap();
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exec::write_executable(&curl, &format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 7\n", self.dir.join("fake/curl.log").display()));
         let path = format!("{}:{}:{}", down.display(), self.dir.join("fake").display(), std::env::var("PATH").unwrap());
         self.launch_with(args, &[("PATH", &path)])
     }
@@ -394,8 +395,7 @@ fn fetch_only_gets_the_binary_and_runs_nothing() {
 fn the_developer_override_runs_that_binary_without_touching_the_network_or_the_data_folder() {
     let place = Place::new("override");
     let mine = place.dir.join("mine");
-    std::fs::write(&mine, BIN).unwrap();
-    std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o755)).unwrap();
+    exec::write_executable(&mine, std::str::from_utf8(BIN).unwrap());
     let env = [("ENDEAVOR_BIN", mine.to_str().unwrap())];
     let run = place.launch_with(&["--folder", "p"], &env);
     assert!(run.ok && run.stdout == expected("--folder p"), "{}", run.stderr);

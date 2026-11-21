@@ -2081,8 +2081,7 @@ impl FakeSlurm {
         ];
         for (name, body) in scripts {
             let path = bin.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            common::write_executable(&path, &format!("#!/bin/sh\n{body}"));
         }
         FakeSlurm { dir, bin }
     }
@@ -2424,13 +2423,11 @@ fn a_remembered_project_never_installs() {
 
 /// A `PATH` of fake `curl` and `wget` that only note they were run (and fail), then the system's own.
 fn no_julia_path(place_dir: &Path) -> String {
-    use std::os::unix::fs::PermissionsExt;
     let bin = place_dir.join("fake-bin");
     std::fs::create_dir_all(&bin).unwrap();
     for tool in ["curl", "wget"] {
         let script = format!("#!/bin/sh\necho {tool} >> '{}'\necho 'no network in this test' >&2\nexit 1\n", place_dir.join("download-tried").display());
-        std::fs::write(bin.join(tool), script).unwrap();
-        std::fs::set_permissions(bin.join(tool), std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_executable(&bin.join(tool), &script);
     }
     format!("{}:/usr/bin:/bin", bin.display())
 }

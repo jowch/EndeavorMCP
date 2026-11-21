@@ -4,7 +4,9 @@
 // The workflow runs it on Linux (sha256sum).
 #![cfg(target_os = "linux")]
 
-use std::os::unix::fs::PermissionsExt;
+#[path = "common/exec.rs"]
+mod exec;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -55,8 +57,7 @@ esac
             release = dir.join("release").display(),
             log = dir.join("gh.log").display(),
         );
-        std::fs::write(dir.join("bin/gh"), gh).unwrap();
-        std::fs::set_permissions(dir.join("bin/gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        exec::write_executable(&dir.join("bin/gh"), &gh);
         Run { dir }
     }
 

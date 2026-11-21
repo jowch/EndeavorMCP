@@ -261,8 +261,7 @@ fn an_r_notebook_through_the_runtime() {
     let real = String::from_utf8(Command::new("sh").args(["-c", "command -v Rscript"]).output().unwrap().stdout).unwrap().trim().to_owned();
     let module = fresh(work.join("module r"));
     let ran = module.join("ran");
-    std::fs::write(module.join("Rscript"), format!("#!/bin/sh\necho \"$LOADED\" >> '{}'\nexec '{real}' \"$@\"\n", ran.display())).unwrap();
-    std::fs::set_permissions(module.join("Rscript"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    common::write_executable(&module.join("Rscript"), &format!("#!/bin/sh\necho \"$LOADED\" >> '{}'\nexec '{real}' \"$@\"\n", ran.display()));
     let line = format!("export PATH=\"{}:$PATH\" LOADED=by-the-line; echo the line ran", module.display());
     let mut serve = command(&["serve", "--folder", folder.to_str().unwrap(), "--r-shell", &line], &work, &julia, &depot)
         .stdout(Stdio::piped())
@@ -1223,8 +1222,7 @@ fn endeavors_own_r_on_a_mac() {
     std::fs::write(folder.join("which.R"), format!("### An Ember notebook ###\n\n# %% id={A}\n{cell}\n\n# /// cell order\n# {A}\n# ///\n")).unwrap();
     // A login shell whose PATH has no R.
     let shell = work.join("shell without r");
-    std::fs::write(&shell, "#!/bin/sh\nshift\nPATH=/usr/bin:/bin exec /bin/sh -c \"$1\"\n").unwrap();
-    std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    common::write_executable(&shell, "#!/bin/sh\nshift\nPATH=/usr/bin:/bin exec /bin/sh -c \"$1\"\n");
 
     let mut serve = command(&["serve", "--folder", folder.to_str().unwrap()], &work, &julia, &depot)
         .env("HOME", &home)

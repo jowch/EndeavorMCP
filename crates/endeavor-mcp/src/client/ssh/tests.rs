@@ -110,7 +110,6 @@ fn shells() -> Vec<(&'static str, PathBuf)> {
 /// `listed` (is absent for `None`), so that the real scheduler isn't asked. `ps` is the system's unless `ps` says otherwise.
 #[cfg(unix)]
 fn server_path(dir: &Path, shell: &Path, listed: Option<&str>, ps: Option<&str>) -> String {
-    use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).unwrap();
     std::os::unix::fs::symlink(shell, dir.join("sh")).unwrap();
@@ -121,8 +120,7 @@ fn server_path(dir: &Path, shell: &Path, listed: Option<&str>, ps: Option<&str>)
     let script = |name: &str, body: &str| {
         let path = dir.join(name);
         let _ = std::fs::remove_file(&path);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_exec::write_executable(&path, &format!("#!/bin/sh\n{body}\n"));
     };
     if let Some(listed) = listed {
         script("squeue", &format!("printf '%s\\n' {listed}"));
@@ -148,13 +146,11 @@ fn the_bootstrap_runs_under_a_shell_and_asks_for_an_install() {
 /// A `v1` install under `root` whose `endeavor` says how it was run.
 #[cfg(unix)]
 fn fake_install(root: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     let dir = root.join("v1");
     std::fs::create_dir_all(dir.join("runtime")).unwrap();
     std::fs::write(dir.join("runtime/boot.jl"), "").unwrap();
     let helper = dir.join("endeavor");
-    std::fs::write(&helper, "#!/bin/sh\nfor a in \"$@\"; do echo \"arg:$a\"; done\n").unwrap();
-    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_exec::write_executable(&helper, "#!/bin/sh\nfor a in \"$@\"; do echo \"arg:$a\"; done\n");
 }
 
 /// The `connect` arguments the script gives the helper, as lines.
@@ -474,13 +470,11 @@ fn the_collected_stderr_survives_a_line_that_is_not_utf8() {
 #[test]
 #[cfg(unix)]
 fn a_cancel_holds_ssh_while_the_helper_lives_and_lets_go_once_it_has_exited() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = crate::client::scratch("cancel-pid");
     std::fs::write(dir.join("frames"), ToApp::Hello { protocol: wire::PROTOCOL, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: false, launcher: String::new() }.frame().encode()).unwrap();
     // Says hello, then stays until the client sends it anything (a detach).
     let script = dir.join("helper");
-    std::fs::write(&script, format!("#!/bin/sh\ncat '{}'\nhead -c 1 >/dev/null\n", dir.join("frames").display())).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_exec::write_executable(&script, &format!("#!/bin/sh\ncat '{}'\nhead -c 1 >/dev/null\n", dir.join("frames").display()));
     let fake = |_: &str, _: &str| Ok(script.clone());
     let options = Options { helper: &fake, root: dir.join("root").display().to_string(), ..options("", "", "") };
     let transport = Transport::Shell { env: vec![("HOME".into(), dir.display().to_string())], ask: None };
@@ -495,15 +489,13 @@ fn a_cancel_holds_ssh_while_the_helper_lives_and_lets_go_once_it_has_exited() {
 #[test]
 #[cfg(unix)]
 fn a_helper_of_another_protocol_is_refused_at_once_and_not_retried() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = crate::client::scratch("other-protocol");
     let with_protocol = ToApp::Hello { protocol: 0, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: false, launcher: String::new() }.frame().encode();
     let without = wire::Frame::Control(br#"{"type":"Hello","version":"0","node":"n","home":"/"}"#.to_vec()).encode();
     for (name, hello) in [("says 0", with_protocol), ("says none", without)] {
         std::fs::write(dir.join("frames"), hello).unwrap();
         let script = dir.join("helper");
-        std::fs::write(&script, format!("#!/bin/sh\ncat '{}'\nhead -c 1 >/dev/null\n", dir.join("frames").display())).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_exec::write_executable(&script, &format!("#!/bin/sh\ncat '{}'\nhead -c 1 >/dev/null\n", dir.join("frames").display()));
         let fake = |_: &str, _: &str| Ok(script.clone());
         let options = Options { helper: &fake, root: dir.join("root").display().to_string(), ..options("", "", "") };
         let transport = Transport::Shell { env: vec![("HOME".into(), dir.display().to_string())], ask: None };
