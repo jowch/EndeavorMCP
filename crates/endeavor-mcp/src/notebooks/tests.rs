@@ -2600,7 +2600,7 @@ fn arguments_are_refused_as_julia_refused_them() {
     assert_eq!(read(json!({ "notebook_id": Value::Null, "cell_id": X })), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: 'nothing'".into()));
     assert_eq!(
         read(json!({ "notebook_id": 123, "cell_id": X })),
-        Err("KeyError: key \"notebook_not_found::No notebook with id '123' in the current session. Run list_notebooks to see what's open.\" not found".into())
+        Err(format!("KeyError: key \"notebook_not_found::No notebook with id '123' in the current session. Open now: '{NB}' (/n/a.jl).\" not found"))
     );
     assert_eq!(read(json!({ "notebook_id": NB, "cell_id": "zzz" })), Err("ArgumentError: invalid_cell_id::Invalid cell ID: 'zzz'".into()));
     assert_eq!(read(json!({ "notebook_id": NB, "cell_id": 7 })), not_found("cell", "7", "notebook"));
@@ -3159,7 +3159,7 @@ fn keep_notebook_alive_checks_its_arguments_as_julia_did() {
     assert_eq!(keep(Value::Null, json!(true)), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: 'nothing'".into()));
     assert_eq!(keep(json!(-1), json!(true)), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: '-1'".into()));
     let not_found =
-        |shown: &str| Err(format!("KeyError: key \"notebook_not_found::No notebook with id '{shown}' in the current session. Run list_notebooks to see what's open.\" not found"));
+        |shown: &str| Err(format!("KeyError: key \"notebook_not_found::No notebook with id '{shown}' in the current session. Open now: '{NB}' (/n/a.jl).\" not found"));
     assert_eq!(keep(json!(missing), json!(true)), not_found(missing));
     assert_eq!(keep(json!(123), json!(true)), not_found("123"));
     assert_eq!(s.notebooks.keep_alive(&json!({ "keep": true })), Err("ArgumentError: invalid_notebook_id::Invalid notebook ID: ''".into()));
@@ -3168,8 +3168,26 @@ fn keep_notebook_alive_checks_its_arguments_as_julia_did() {
     let text = |raw: &str| crate::mcp::tool_error(raw, false)["content"][0]["text"].as_str().unwrap().to_owned();
     assert_eq!(
         text(&keep(json!(missing), json!(true)).unwrap_err()),
-        format!(r#"{{"error":"notebook_not_found","message":"No notebook with id '{missing}' in the current session. Run list_notebooks to see what's open."}}"#)
+        format!(r#"{{"error":"notebook_not_found","message":"No notebook with id '{missing}' in the current session. Open now: '{NB}' (/n/a.jl)."}}"#)
     );
+}
+
+#[test]
+fn a_notebook_id_that_isnt_open_is_told_which_are() {
+    // An agent that copied an id with one character wrong goes on with the right one, without another
+    // call (#274).
+    let s = setup();
+    let read = |nb: &str| s.call("", "read_cell", json!({ "notebook_id": nb, "cell_id": X })).unwrap_err();
+    let missing = "cccccccc-0000-0000-0000-000000000000";
+    assert!(read(missing).contains("No notebook is open; open one with open_notebook."), "{}", read(missing));
+    let ids: Vec<String> = (0..7).map(|n| format!("aaaaaaaa-0000-0000-0000-00000000000{n}")).collect();
+    for (n, id) in ids.iter().enumerate() {
+        s.engine.open(id, &format!("/n/{n}.jl"), &[]);
+    }
+    let error = read(missing);
+    assert!(error.contains("Open now: '") && ids.iter().filter(|id| error.contains(id.as_str())).count() == 5, "{error}");
+    assert_eq!(error.matches(" (/n/").count(), 5, "a few at most: {error}");
+    assert!(error.contains("and 2 more (list_notebooks)."), "{error}");
 }
 
 #[test]

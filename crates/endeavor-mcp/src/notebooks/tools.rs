@@ -270,7 +270,7 @@ impl Call<'_> {
         let value = self.arg("notebook_id")?;
         let shown = julia_string(value);
         let id = uuid_value(value).ok_or_else(|| argument_error(&format!("invalid_notebook_id::Invalid notebook ID: '{shown}'")))?;
-        self.nbs.snapshot(&id).map_err(|e| if e.contains("notebook_not_found::") { notebook_not_found(&shown) } else { e })
+        self.nbs.snapshot(&id).map_err(|e| if e.contains("notebook_not_found::") { notebook_not_found(&shown, self.nbs.open_now().as_deref()) } else { e })
     }
 
     /// The cell `cell_id` names.
@@ -2222,8 +2222,25 @@ pub fn key_error(key: &str) -> String {
 /// No notebook with `shown`'s id: the error `notebook()` and `notebook_arg`
 /// both raise. `mcp::tool_error` unwraps this back to `notebook_not_found`
 /// with this message.
-pub fn notebook_not_found(shown: &str) -> String {
-    key_error(&format!("notebook_not_found::No notebook with id '{shown}' in the current session. Run list_notebooks to see what's open."))
+pub fn notebook_not_found(shown: &str, open: Option<&[(String, String)]>) -> String {
+    key_error(&format!("notebook_not_found::No notebook with id '{shown}' in the current session.{}", open_now(open)))
+}
+
+/// What an agent that named a notebook that isn't open needs to go on without another call (#274): the
+/// open ones by id and path, a few at most. Without them (the engine didn't answer), where to look.
+fn open_now(open: Option<&[(String, String)]>) -> String {
+    const SHOWN: usize = 5;
+    match open {
+        None => " Run list_notebooks to see what's open.".into(),
+        Some([]) => " No notebook is open; open one with open_notebook.".into(),
+        Some(open) => {
+            let mut named: Vec<String> = open.iter().take(SHOWN).map(|(id, path)| format!("'{id}' ({path})")).collect();
+            if open.len() > SHOWN {
+                named.push(format!("and {} more (list_notebooks)", open.len() - SHOWN));
+            }
+            format!(" Open now: {}.", named.join(", "))
+        }
+    }
 }
 
 /// Julia's error for `UUID(s)` on a string that isn't one.
