@@ -703,6 +703,39 @@ fn the_end_of_input_stops_only_a_start_of_its_own_with_own_with_client() {
     assert!(!dir.join("runtime.json").exists());
 }
 
+/// The app's Keep running setting changes while its helper runs (app #245): an app that is then killed
+/// leaves its runtime, or stops the one it started, as the setting says now, not as it was at the start.
+#[test]
+fn the_end_of_input_does_what_the_keep_running_setting_says_now() {
+    let (dir, cores, _julia) = held_dir("start-own-changed");
+    std::fs::remove_file(dir.join("hold")).unwrap();
+    // Started with Keep running off, then turned on: the app is killed and the runtime stays.
+    let mut kept = Helper::start(&dir, &["--julia-when-needed", "--own-with-client"]);
+    assert!(matches!(kept.start_runtime(), ToApp::Ready { reattached: false, .. }));
+    let core = cores.pids()[0];
+    kept.send(ToHelper::OwnWithClient { on: false });
+    kept.stdin.0.lock().unwrap().take();
+    kept.exits();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(common::pid_alive(core) && dir.join("runtime.json").exists(), "the runtime is kept");
+    let stopper = Helper::start(&dir, &[]);
+    stopper.hello();
+    let stop = stopper.request_stop();
+    assert_eq!(stopper.next(), ToApp::Stopped { id: stop });
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    drop(stopper);
+
+    // Started with Keep running on, then turned off: the runtime goes with the app.
+    let mut own = Helper::start(&dir, &["--julia-when-needed"]);
+    assert!(matches!(own.start_runtime(), ToApp::Ready { reattached: false, .. }));
+    let core = cores.pids()[0];
+    own.send(ToHelper::OwnWithClient { on: true });
+    own.stdin.0.lock().unwrap().take();
+    own.exits();
+    common::wait_for("the core to end", || !common::pid_alive(core));
+    assert!(!dir.join("runtime.json").exists());
+}
+
 /// A helper with `--own-with-client` that is killed outright, as some ssh servers do when the client goes,
 /// can't stop the start it began; the core then stops it itself (#95). One the app already has, or that the
 /// app detached from while it started, is left.
