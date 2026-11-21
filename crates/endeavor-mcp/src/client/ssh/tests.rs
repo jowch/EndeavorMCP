@@ -561,6 +561,19 @@ fn only_sign_in_and_host_key_failures_end_a_reconnect() {
     assert!(!explain_retry(&lab(), &ask, &[], None, true, false).1, "a cancel");
 }
 
+#[test]
+fn a_sign_in_the_server_stopped_waiting_for_is_tried_again_however_ssh_ends() {
+    // The askpass gave up on an unanswered question (#64): after a key's passphrase ssh says
+    // "Permission denied"; after a password the connection just closes.
+    let ask = Auth::Env(vec![("SSH_ASKPASS".into(), "/askpass".into())]);
+    for after in ["jc@lab: Permission denied (publickey).", "Connection closed by 10.0.0.1 port 22"] {
+        let stderr = [SIGN_IN_GAVE_UP.to_owned(), after.to_owned()];
+        assert_eq!(explain_retry(&lab(), &ask, &stderr, None, false, false), ("lab stopped waiting for the sign-in.".to_owned(), true), "{after}");
+    }
+    // A refusal with no askpass giving up still ends the reconnect.
+    assert!(!explain_retry(&lab(), &ask, &["jc@lab: Permission denied (publickey).".to_owned()], None, false, false).1);
+}
+
 #[cfg(unix)]
 #[test]
 fn the_bootstrap_script_settles_auto_as_the_helper_does() {

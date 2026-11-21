@@ -766,6 +766,10 @@ const ADD_KEY: &str = if cfg!(windows) {
     "run `ssh-add` in a terminal to add it"
 };
 
+/// What an askpass writes on ssh's stderr when it ends without an answer because the server stopped
+/// waiting for the sign-in (sshd's LoginGraceTime): the app's does (its `askpass_watch`).
+pub const SIGN_IN_GAVE_UP: &str = "the server stopped waiting for the sign-in.";
+
 /// `explain`, and whether trying again by itself could help (`ConnectError`).
 fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: Option<ExitStatus>, cancelled: bool, signed_in: bool) -> (String, bool) {
     if cancelled {
@@ -786,6 +790,11 @@ fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: 
         Some((format!("{host} isn't one of the servers this computer has connected to before, so Endeavor can't check its identity (host key). Run `{}` once in a terminal and accept its host key, then try again.", transport.login_command()), false))
     } else if said("Host key verification failed") {
         Some((format!("{host}'s identity (host key) wasn't confirmed, so Endeavor didn't connect."), false))
+    } else if said(SIGN_IN_GAVE_UP) {
+        // Nobody refused anything: the user wasn't there to answer. ssh's own words after it depend
+        // on what it asked ("Permission denied" when a key's passphrase went unanswered, a closed
+        // connection after a password), so this is said first, and a reconnect tries again either way (#64).
+        Some((format!("{host} stopped waiting for the sign-in."), true))
     } else if said("Permission denied") && batch {
         Some((format!("{host} refused the sign-in. Either your key isn't accepted there, or it has a passphrase and isn't in your ssh agent ({}). Or the server asks for a password or a code, which Endeavor can't ask for yet.", ADD_KEY), false))
     } else if said("Permission denied") {
