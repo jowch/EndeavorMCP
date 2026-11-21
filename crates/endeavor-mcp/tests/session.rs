@@ -228,6 +228,56 @@ fn a_connection_that_drops_comes_back_on_the_same_port() {
 }
 
 #[test]
+fn retry_now_ends_the_pause_after_a_lost_connection_and_does_nothing_while_connected() {
+    let place = Place::new("retry-now");
+    let (up, tries) = (place.dir.join("up"), place.dir.join("tries"));
+    std::fs::write(&up, "").unwrap();
+    // The server is out of reach while `up` isn't there, as ssh says it.
+    let ask = format!(
+        "echo x >> '{}'; [ -e '{}' ] || {{ echo 'ssh: connect to host lab port 22: Connection refused' >&2; exit 255; }}",
+        tries.display(),
+        up.display()
+    );
+    let session = place.session_with(true, Some(ask));
+    let before = ready(session.ensure(start(), LONG, false));
+    let helper = place.helpers();
+    session.retry_now();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(place.helpers(), helper, "connected: nothing changes");
+    assert_eq!(session.status().state, State::Ready(before.clone()));
+
+    std::fs::remove_file(&up).unwrap();
+    let count = || std::fs::read_to_string(&tries).map_or(0, |t| t.lines().count());
+    let first = count();
+    place.drop_connection();
+    // Three failed tries wait 1, 2 and 4 s; the fourth begins a pause of 8 s.
+    wait_for("four tries to fail", || count() >= first + 4);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(session.status().state, State::Connecting);
+    std::fs::write(&up, "").unwrap();
+    let asked = Instant::now();
+    session.retry_now();
+    let status = session.wait_for(Duration::from_secs(20), |status| status.state.runtime().is_some());
+    assert!(asked.elapsed() < Duration::from_secs(4), "the pause was cut short: {:?}", asked.elapsed());
+    assert_eq!(status.state.runtime().map(|r| (r.port, r.pid)), Some((before.port, before.pid)), "the same listener and runtime");
+}
+
+#[test]
+fn retry_now_tries_a_failed_connection_again() {
+    let place = Place::new("retry-failed");
+    let up = place.dir.join("up");
+    // Refused, which isn't tried again by itself, until `up` is there.
+    let ask = format!("[ -e '{}' ] || {{ echo 'Permission denied (publickey).' >&2; exit 255; }}", up.display());
+    let session = place.session_with(true, Some(ask));
+    let failed = session.wait_for(LONG, |status| matches!(status.state, State::Failed(_)));
+    assert!(matches!(&failed.state, State::Failed(why) if why.contains("refused the sign-in")), "{failed:?}");
+    std::fs::write(&up, "").unwrap();
+    session.retry_now();
+    let status = session.wait_for(LONG, |status| status.state == State::Connected);
+    assert_eq!(status.state, State::Connected, "{status:?}");
+}
+
+#[test]
 fn closing_leaves_the_runtime_running_and_ends_everything_else() {
     let place = Place::new("close");
     let session = place.session();
