@@ -400,8 +400,24 @@ pub fn own_installed() -> Option<OwnJulia> {
     if let Some(julia) = downloaded().filter(|julia| julia.exists()) {
         return Some(OwnJulia { julia, from: OwnFrom::Download });
     }
-    let channel = crate::juliaup::channel_julia(&crate::juliaup::find()?, JULIA_VERSION)?;
+    let juliaup = crate::juliaup::find()?;
+    let listed = crate::juliaup::listing(&juliaup);
+    if let Some(mark) = added_mark() {
+        forget_if_gone(listed.as_deref(), &mark);
+    }
+    let channel = crate::juliaup::channel(&listed?, JULIA_VERSION).filter(|channel| channel.julia.is_file())?;
     Some(OwnJulia { julia: channel.julia, from: OwnFrom::Juliaup { added: marked(), default: channel.default } })
+}
+
+/// Delete the mark that says Endeavor added juliaup's channel when juliaup's `listed` channels have
+/// none for its Julia: the channel went some other way (`juliaup remove`), so one added later is the
+/// person's, and Remove must leave it (#118). A juliaup that couldn't say (`None`), or said something
+/// that isn't its listing, leaves the mark.
+fn forget_if_gone(listed: Option<&str>, mark: &Path) {
+    let read = |listed: &str| serde_json::from_str::<serde_json::Value>(listed.trim()).is_ok_and(|config| config.get("DefaultChannel").is_some());
+    if listed.is_some_and(|listed| read(listed) && crate::juliaup::channel(listed, JULIA_VERSION).is_none()) {
+        let _ = std::fs::remove_file(mark);
+    }
 }
 
 /// Install Endeavor's own Julia unless it is installed: with juliaup when the computer has it (on
@@ -626,6 +642,26 @@ fn sha256_of(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_added_mark_goes_once_juliaup_lists_no_channel_for_the_julia() {
+        let dir = std::env::temp_dir().join(format!("endeavor-julia-mark-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mark = dir.join(format!("julia-{JULIA_VERSION}.juliaup"));
+        let with = format!(r#"{{"DefaultChannel":{{"Name":"release","File":"/j/julia"}},"OtherChannels":[{{"Name":"{JULIA_VERSION}","File":"/j/julia"}}]}}"#);
+        let without = r#"{"DefaultChannel":{"Name":"release","File":"/j/julia"},"OtherChannels":[]}"#;
+        std::fs::write(&mark, "").unwrap();
+        forget_if_gone(None, &mark);
+        assert!(mark.exists(), "a juliaup that couldn't say leaves the mark");
+        forget_if_gone(Some("Error: something else"), &mark);
+        assert!(mark.exists(), "so does one that said something else");
+        forget_if_gone(Some(&with), &mark);
+        assert!(mark.exists(), "the channel is still there");
+        forget_if_gone(Some(without), &mark);
+        assert!(!mark.exists(), "the channel went another way");
+        forget_if_gone(Some(without), &mark);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[cfg(unix)]
     #[test]
