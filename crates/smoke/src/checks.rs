@@ -287,8 +287,11 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                     // A marimo notebook's cell ids aren't in its file, so a reload gives new
                     // ones (#353): there, the same code in the same place is the same cell. The
                     // same code, that is, but for the spaces on its blank lines, which marimo's
-                    // file doesn't keep (L1 on Haiku, 11-20).
-                    match again.cell(&cell.id).or_else(|| again.cells.get(at).filter(|a| same_code(&a.code, &cell.code))) {
+                    // file doesn't keep (L1 on Haiku, 11-20). An id alone isn't enough: marimo
+                    // hands out its ids in a fixed order, so after a cell was put in above it, a
+                    // reload gives a cell's old id to the one now in its place (P4, 11-21).
+                    let same = |a: &&crate::mcp::Cell| same_code(&a.code, &cell.code);
+                    match again.cell(&cell.id).filter(same).or_else(|| again.cells.get(at).filter(same)) {
                         None => differ.push(format!("{}: gone", first_line(&cell.code))),
                         Some(a) if a.errored != cell.errored => differ.push(format!("{}: errored {} then {}", first_line(&cell.code), cell.errored, a.errored)),
                         Some(a) if is_picture(&cell.output) && is_picture(&a.output) => {}
@@ -573,6 +576,12 @@ mod tests {
         };
         assert!(judge(Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "b = 1", "c = 1", "d = 1"])])).passed, "a reload that gives new ids matches by place and code");
         assert!(!judge(Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "c = 1", "b = 1", "d = 1"])])).passed, "but not a cell that moved");
+        // A cell put in above another took a new id; the reload gives the other's id to it, as marimo
+        // gives ids in order (P4 on the default model, 11-21).
+        let inserted = renamed(["Hbol", "Xref", "MJUe", "vblA"], ["a = 1", "b = 1", "c = 1", "d = 1"]);
+        let ev = Evidence { calls: &[], notebooks: std::slice::from_ref(&inserted), agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "b = 1", "c = 1", "d = 1"])])), turns: &[], server_files: &[], questions: &[], pages: &[] };
+        let after = run(&json!({ "check": "reproducible" }), &ev);
+        assert!(after.passed, "a reused id on another cell's code isn't that cell: {}", after.detail);
         let mut spaced = left.clone();
         spaced[0].cells[1].code = "b = 1\n    \nb".into();
         let ev = Evidence { calls: &[], notebooks: &spaced, agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "b = 1\n\nb", "c = 1", "d = 1"])])), turns: &[], server_files: &[], questions: &[], pages: &[] };
