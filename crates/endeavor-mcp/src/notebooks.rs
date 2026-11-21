@@ -1954,7 +1954,7 @@ fn parent_dir(path: &str) -> String {
 }
 
 /// An idle limit in words for the runtime's log: "48 hours", "1 hour", or minutes under an hour (#460).
-fn idle_span(hours: f64) -> String {
+pub(crate) fn idle_span(hours: f64) -> String {
     if hours < 1.0 {
         let minutes = ((hours * 60.0).round() as i64).max(1);
         format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
