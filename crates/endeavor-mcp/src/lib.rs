@@ -596,6 +596,9 @@ struct Attached {
     how: How,
     state: State,
     reattached: bool,
+    /// Set as the app quits (`left_to_plugin`), under the lock each try of `take_back` holds, so a
+    /// take-back can't land after the runtime was left to the plugin and undo it (#453).
+    quitting: Arc<Mutex<bool>>,
 }
 
 enum How {
@@ -609,6 +612,7 @@ impl Attached {
     /// (`core::leave_to_plugin`). One that doesn't answer is stopped, as before.
     fn left_to_plugin(&self) -> bool {
         let How::Process(_, port) = &self.how else { return false };
+        *self.quitting.lock().unwrap() = true;
         bridge_rpc(*port, &self.state.token, "endeavor/leave_to_plugin", json!({})).is_ok_and(|reply| reply["result"]["left"] == true)
     }
 
@@ -619,8 +623,8 @@ impl Attached {
     /// the plugin is out of it (#453).
     fn take_back(&self) {
         let How::Process(_, port) = &self.how else { return };
-        let (port, token) = (*port, self.state.token.clone());
-        std::thread::spawn(move || take_back_with(&|| bridge_rpc(port, &token, "endeavor/keep_for_app", json!({})).map(drop), &TAKE_BACK_WAITS));
+        let (port, token, quitting) = (*port, self.state.token.clone(), self.quitting.clone());
+        std::thread::spawn(move || take_back_with(&|| bridge_rpc(port, &token, "endeavor/keep_for_app", json!({})).map(drop), &TAKE_BACK_WAITS, &quitting));
     }
 
     fn ready(&self, id: u32, reattached: bool) -> ToApp {
@@ -946,7 +950,7 @@ fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>
     // A process's runtime only: on a cluster (`slurm::attach`) a new one would wait in the queue again.
     let want = Want { args, engine, install, runtime: &|| Ok(args.runtime.clone()), events, attach_only, replace_older: !attach_only };
     match runtime::find_or_start(&want, &mut client) {
-        Outcome::Ready(Up { state, port, runtime, started }) => Ok(Attached { how: How::Process(runtime, port), state, reattached: !started }),
+        Outcome::Ready(Up { state, port, runtime, started }) => Ok(Attached { how: How::Process(runtime, port), state, reattached: !started, quitting: Default::default() }),
         other => Err(client.unstarted(other)),
     }
 }
@@ -1738,15 +1742,22 @@ pub(crate) fn is_this_node(node: &str) -> bool {
 /// The app's calls on the runtime's port.
 const CALL: &str = "/endeavor/call";
 
-/// POST one JSON-RPC call to the runtime's calls; its reply.
 /// The waits between tries of `endeavor/keep_for_app` (`Attached::take_back`): about a minute in all.
 const TAKE_BACK_WAITS: [Duration; 5] = [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(15), Duration::from_secs(30)];
 
-/// Call `call` until it answers, waiting `waits` between tries. Whether it answered.
-fn take_back_with(call: &dyn Fn() -> std::io::Result<()>, waits: &[Duration]) -> bool {
+/// Call `call` until it answers, waiting `waits` between tries, and stop once `quitting` is set. Each try
+/// holds `quitting`'s lock, so none is under way once it is set. Whether it answered.
+fn take_back_with(call: &dyn Fn() -> std::io::Result<()>, waits: &[Duration], quitting: &Mutex<bool>) -> bool {
     let mut waits = waits.iter();
     loop {
-        match call() {
+        let tried = {
+            let quitting = quitting.lock().unwrap();
+            if *quitting {
+                return false;
+            }
+            call()
+        };
+        match tried {
             Ok(()) => return true,
             Err(e) => match waits.next() {
                 Some(wait) => std::thread::sleep(*wait),
@@ -1759,6 +1770,7 @@ fn take_back_with(call: &dyn Fn() -> std::io::Result<()>, waits: &[Duration]) ->
     }
 }
 
+/// POST one JSON-RPC call to the runtime's calls; its reply.
 fn bridge_rpc(port: u16, token: &str, method: &str, params: Value) -> std::io::Result<Value> {
     let mut socket = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(2))?;
     socket.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1804,15 +1816,46 @@ mod tests {
             tries.set(tries.get() + 1);
             if tries.get() < 3 { Err(std::io::ErrorKind::ConnectionRefused.into()) } else { Ok(()) }
         };
-        assert!(take_back_with(&fails_twice, &[Duration::ZERO; 5]));
+        assert!(take_back_with(&fails_twice, &[Duration::ZERO; 5], &Mutex::new(false)));
         assert_eq!(tries.get(), 3, "it stops once it answers");
         tries.set(0);
         let never = || {
             tries.set(tries.get() + 1);
             Err(std::io::ErrorKind::ConnectionRefused.into())
         };
-        assert!(!take_back_with(&never, &[Duration::ZERO; 5]));
+        assert!(!take_back_with(&never, &[Duration::ZERO; 5], &Mutex::new(false)));
         assert_eq!(tries.get(), 6, "one try, then one after each wait");
+    }
+
+    #[test]
+    fn no_take_back_lands_once_the_app_is_quitting() {
+        // The app quits while a try is under way: setting `quitting` waits for that try, and none starts
+        // after it, so none undoes `leave_to_plugin` (#453).
+        let quitting = Arc::new(Mutex::new(false));
+        let (started, in_try) = (Arc::new(std::sync::Barrier::new(2)), Arc::new(AtomicBool::new(false)));
+        let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let retrying = {
+            let (quitting, started, in_try, tries) = (quitting.clone(), started.clone(), in_try.clone(), tries.clone());
+            std::thread::spawn(move || {
+                let call = || {
+                    if tries.fetch_add(1, Ordering::SeqCst) == 0 {
+                        in_try.store(true, Ordering::SeqCst);
+                        started.wait();
+                        std::thread::sleep(Duration::from_millis(200));
+                        in_try.store(false, Ordering::SeqCst);
+                    }
+                    Err(std::io::ErrorKind::ConnectionRefused.into())
+                };
+                take_back_with(&call, &[Duration::from_millis(10); 5], &quitting)
+            })
+        };
+        started.wait();
+        *quitting.lock().unwrap() = true;
+        assert!(!in_try.load(Ordering::SeqCst), "the try under way ended before the quit went on");
+        assert!(!retrying.join().unwrap());
+        assert_eq!(tries.load(Ordering::SeqCst), 1, "no try after the quit");
+        // Already quitting: no try at all.
+        assert!(!take_back_with(&|| Ok(()), &[], &Mutex::new(true)));
     }
 
     /// The runtime records Julia's `gethostname()`, the DNS name in its own
