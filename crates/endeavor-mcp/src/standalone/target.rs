@@ -180,6 +180,9 @@ impl Local {
     /// background (it ends itself when idle, so nobody relies on its port), no notebook is open in it, and
     /// the call may start a runtime (`may_start`), so that the call starts one of this build. Any other is
     /// kept, and the agent is told. A runtime with no notebook open is left for a call that may start one.
+    /// One of this build's interface whose Julia was removed since it started (`crate::julia_removed`), so
+    /// that no notebook can start in it, is stopped in the same way and the same once (#347); kept, it is
+    /// used as it is, and its calls say why they can't start a notebook.
     pub(super) fn other_build(&self, runtime: &RuntimeInfo, may_start: bool) -> OtherBuild {
         let mut builds = self.builds.lock().unwrap();
         if !runtime.reattached || builds.checked == Some(runtime.pid) {
@@ -188,7 +191,8 @@ impl Local {
         let dir = &self.state_dir();
         let Some(state) = crate::read_state(dir).filter(|state| state.pid as u32 == runtime.pid) else { return OtherBuild::Fine };
         let this = crate::embedded::BUILD_VERSION;
-        if state.usable_as_is() {
+        let removed = state.usable_as_is() && crate::julia_removed(&state, runtime.port);
+        if state.usable_as_is() && !removed {
             builds.checked = Some(runtime.pid);
             return OtherBuild::Fine;
         }
@@ -201,11 +205,17 @@ impl Local {
         if idle {
             let which = crate::which_build(state.build.as_deref());
             builds.stopped_one = true;
-            eprintln!("endeavor: the runtime here (pid {}) was started by {which}, and no notebook is open in it; stopping it so that this build ({this}) starts its own", runtime.pid);
+            match removed {
+                true => eprintln!("endeavor: the runtime here (pid {}) runs on a Julia that was removed since it started, and no notebook is open in it; stopping it so that it starts again on the Julia here now", runtime.pid),
+                false => eprintln!("endeavor: the runtime here (pid {}) was started by {which}, and no notebook is open in it; stopping it so that this build ({this}) starts its own", runtime.pid),
+            }
             match self.stop(false) {
                 Ok(()) => return OtherBuild::Stopped,
                 Err(e) => eprintln!("endeavor: {e}"),
             }
+        }
+        if removed {
+            return OtherBuild::Fine;
         }
         builds.kept = Some(runtime.pid);
         OtherBuild::Kept(other_build_notice(LOCAL, LOCAL, state.interface, open))

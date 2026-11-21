@@ -244,12 +244,17 @@ fn lazy_front(place: &Place, more: &[(&str, &str)]) -> Front {
 }
 
 fn julia_when_needed_front(place: &Place, folder_args: &[&str], more: &[(&str, &str)]) -> Command {
+    front_command(place, folder_args, more, &place.local_julia)
+}
+
+/// The command for a front like `julia_when_needed_front`'s, whose runtime on this computer runs `julia`.
+fn front_command(place: &Place, folder_args: &[&str], more: &[(&str, &str)], julia: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
     command
         .args(["mcp", "--skills", "plugin"])
         .args(folder_args)
         .arg("--julia")
-        .arg(&place.local_julia)
+        .arg(julia)
         .arg("--depot")
         .arg(place.dir.join("local-depot"))
         .arg("--state-dir")
@@ -1521,6 +1526,36 @@ fn a_runtime_of_another_build_with_no_notebook_open_is_replaced_by_the_first_cal
     assert!(new != old && !pid_alive(old), "{old} was stopped and {new} started");
     assert_ne!(read_record(&place.local_state)["build"], ANOTHER_BUILD);
     assert!(second.said().iter().any(|line| line.contains(&format!("(pid {old}) was started by build {ANOTHER_BUILD}, and no notebook is open in it"))), "{:?}", second.said());
+    second.finish();
+}
+
+#[test]
+fn a_runtime_whose_julia_was_removed_with_no_notebook_open_is_replaced_by_the_first_call_that_may_start_one() {
+    let place = Place::new("julia-removed-idle");
+    let path = place.project.join("idle.jl").display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    // Its Julia is a copy that juliaup removes once it runs (#347).
+    let old_julia = place.dir.join("julia-1.12.5").join("bin").join("julia");
+    std::fs::create_dir_all(old_julia.parent().unwrap()).unwrap();
+    common::exec::copy_executable(&place.local_julia, &old_julia);
+    let mut command = front_command(&place, &["--folder", &place.project.display().to_string()], &[], &old_julia);
+    command.env("ENDEAVOR_TEST_JULIA_AT_START", "1");
+    let mut first = Front::spawn(command);
+    first.initialize();
+    first.call("open_notebook", json!({ "path": path }));
+    let old = place.local_runtime().expect("started by the call");
+    first.finish();
+    std::fs::remove_file(&old_julia).unwrap();
+
+    let mut second = place.front();
+    second.initialize();
+    let (failed, listed) = second.contents("list_notebooks", json!({}));
+    assert!(!failed && listed == [json!([])], "a query is answered by the runtime there, with nothing to add: {listed:?}");
+    assert_eq!(place.local_runtime(), Some(old), "a query starts nothing, so it stops nothing");
+    second.call("open_notebook", json!({ "path": path }));
+    let new = place.local_runtime().expect("a runtime");
+    assert!(new != old && !pid_alive(old), "{old} was stopped and {new} started");
+    assert!(second.said().iter().any(|line| line.contains(&format!("(pid {old}) runs on a Julia that was removed since it started, and no notebook is open in it"))), "{:?}", second.said());
     second.finish();
 }
 
