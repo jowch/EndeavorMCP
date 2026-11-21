@@ -570,7 +570,10 @@ Next:
   was removed while it ran: Julia gives the new file its source's mode, and a
   missing source's is 0 (#383). The smoke runner did that on every task; it now
   waits for the precompile, and `endeavor mcp`'s precompile runs the check again
-  when it's done.
+  when it's done. The same check removes a native image of those packages with
+  no `.ji` beside it, once it is an hour old: Julia never uses or removes one
+  (#382). Old compiled sets, one per runtime folder, still pile up to Julia's
+  limit of 10 per package.
 - Julia starts only when it's needed (#76). With `--julia-when-needed` the
   core writes `runtime.json` and answers at once, finds Julia itself (and
   downloads it only with `--install-julia`) the first time a Julia notebook is
