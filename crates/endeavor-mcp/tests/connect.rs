@@ -53,12 +53,24 @@ impl FakeRuntime {
     }
 
     /// One whose `list_notebooks` answers `notebooks`, a JSON list.
-    fn listing(dir: &Path, node: &str, mut state: serde_json::Value, delay: Duration, notebooks: &'static str) -> FakeRuntime {
+    fn listing(dir: &Path, node: &str, state: serde_json::Value, delay: Duration, notebooks: &'static str) -> FakeRuntime {
+        FakeRuntime::serving(dir, node, state, delay, notebooks, None)
+    }
+
+    /// One whose `list_notebooks` answers `notebooks`, and whose `endeavor/julia_status` names `julia` as
+    /// the Julia it started.
+    fn running_julia(dir: &Path, node: &str, state: serde_json::Value, notebooks: &'static str, julia: PathBuf) -> FakeRuntime {
+        FakeRuntime::serving(dir, node, state, Duration::ZERO, notebooks, Some(julia))
+    }
+
+    /// One that takes `delay` to exit, whose `list_notebooks` answers `notebooks`, and whose
+    /// `endeavor/julia_status` names `julia` as the Julia it started (none: Julia hasn't started).
+    fn serving(dir: &Path, node: &str, mut state: serde_json::Value, delay: Duration, notebooks: &'static str, julia: Option<PathBuf>) -> FakeRuntime {
         let process = Command::new("sleep").arg("600").process_group(0).spawn().unwrap();
         let pid = process.id();
         let process = Arc::new(Mutex::new(process));
         let p = process.clone();
-        let port = serve(move |socket| one_port(socket, &p, delay, notebooks));
+        let port = serve(move |socket| one_port(socket, &p, delay, notebooks, julia.as_deref()));
         let fields = serde_json::json!({ "node": node, "pid": pid, "port": port, "token": TOKEN });
         state.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
         std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
@@ -98,7 +110,7 @@ fn serve(handle: impl Fn(TcpStream) + Send + Sync + 'static) -> u16 {
 /// What a stand-in runtime's `list_notebooks` answers unless a test says otherwise: two notebooks are open.
 const TWO_NOTEBOOKS: &str = r#"[{"path":"a.jl"},{"path":"b.jl"}]"#;
 
-fn one_port(mut socket: TcpStream, process: &Mutex<Child>, delay: Duration, notebooks: &str) {
+fn one_port(mut socket: TcpStream, process: &Mutex<Child>, delay: Duration, notebooks: &str, julia: Option<&Path>) {
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let (mut request, mut auth, mut length) = (String::new(), String::new(), 0);
     reader.read_line(&mut request).unwrap();
@@ -132,6 +144,14 @@ fn one_port(mut socket: TcpStream, process: &Mutex<Child>, delay: Duration, note
         let mut process = process.lock().unwrap();
         let _ = process.kill();
         let _ = process.wait();
+    }
+    if String::from_utf8_lossy(&body).contains("endeavor/julia_status") {
+        let reply = match julia {
+            Some(julia) => serde_json::json!({ "result": { "state": "ready", "julia": { "path": julia, "version": "1.12.6" } } }),
+            None => serde_json::json!({ "result": { "state": "not_started" } }),
+        };
+        let _ = write!(socket, "HTTP/1.1 200 OK\r\n\r\n{reply}");
+        return;
     }
     if String::from_utf8_lossy(&body).contains("list_notebooks") {
         let reply = serde_json::json!({ "result": { "content": [{ "text": notebooks }] } });
@@ -298,6 +318,57 @@ fn a_runtime_an_older_version_started_with_no_notebook_open_is_stopped_for_this_
     assert_eq!(helper.after_progress(), ToApp::Stopped { id: stop });
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
+}
+
+/// A record of this build's interface, on `node`.
+fn this_interface() -> serde_json::Value {
+    serde_json::json!({ "launcher": "process", "build": "0.1.0-same", "interface": endeavor_mcp::CORE_INTERFACE })
+}
+
+#[test]
+fn a_runtime_whose_julia_was_removed_with_no_notebook_open_is_stopped_for_a_new_one() {
+    // juliaup removed the version it runs on (#347): no notebook could start in it.
+    let dir = state_dir("julia-removed-idle");
+    let removed = dir.join("julia-1.12.5").join("bin").join("julia");
+    let stale = FakeRuntime::running_julia(&dir, &this_host(), this_interface(), "[]", removed);
+    let bridge = common::FakeBridge::start(&dir);
+    let julia = common::serving_julia(&dir, &bridge);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    let mut helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
+    helper.hello();
+    helper.request_start(None, false);
+    let (answer, lines) = after_lines(&helper);
+    assert!(lines.iter().any(|line| line.contains("runs on a Julia that was removed since it started") && line.contains("stopping it")), "{lines:?} {answer:?}");
+    let ToApp::Ready { pid, reattached: false, .. } = answer else { panic!("expected a new runtime: {answer:?}") };
+    assert_ne!(pid, stale.pid);
+    common::wait_for("the stale runtime to end", || !stale.alive());
+    let stop = helper.request_stop();
+    assert_eq!(helper.after_progress(), ToApp::Stopped { id: stop });
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+}
+
+#[test]
+fn a_runtime_whose_julia_was_removed_is_kept_while_a_notebook_is_open_or_on_another_computer_and_one_whose_julia_is_there_always() {
+    let kept = |name: &str, node: &str, notebooks: &'static str, julia: PathBuf| {
+        let dir = state_dir(name);
+        let runtime = FakeRuntime::running_julia(&dir, node, this_interface(), notebooks, julia);
+        let mut helper = Helper::start(&dir, &["--any-node"]);
+        helper.hello();
+        helper.request_start(None, false);
+        let (answer, lines) = after_lines(&helper);
+        assert!(matches!(answer, ToApp::Ready { pid, reattached: true, .. } if pid == runtime.pid), "{name}: {answer:?}");
+        assert!(lines.iter().all(|line| !line.contains("stopping it")), "{name}: {lines:?}");
+        assert!(runtime.alive(), "{name}");
+        helper.stdin.0.lock().unwrap().take();
+        let _ = helper.process.wait();
+    };
+    let gone = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-such-julia").join("bin").join("julia");
+    kept("julia-removed-open", &this_host(), TWO_NOTEBOOKS, gone.clone());
+    // Where Julia is on another computer can't be looked at from here.
+    kept("julia-removed-elsewhere", "labbox3", "[]", gone);
+    // It is there: this test's own program stands for it.
+    kept("julia-there", &this_host(), "[]", std::env::current_exe().unwrap());
 }
 
 #[test]

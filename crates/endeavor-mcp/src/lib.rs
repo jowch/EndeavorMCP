@@ -1064,6 +1064,19 @@ fn open_notebooks(port: u16, token: &str) -> Option<u32> {
     list.as_array().map(|a| a.len() as u32)
 }
 
+/// Whether the runtime that answers on `port`, which `state` records, runs on a Julia removed since it
+/// started, so that no notebook can start in it (#346, #347): it runs on this computer, its core says which
+/// julia it started (`endeavor/julia_status`), and that file is gone. juliaup removes a version when it
+/// updates past it, even while that version runs. False when Julia hasn't started there, when the core
+/// doesn't say, and on another computer, where this one can't look.
+fn julia_removed(state: &State, port: u16) -> bool {
+    if state.node != hostname() {
+        return false;
+    }
+    let Ok(reply) = bridge_rpc(port, &state.token, "endeavor/julia_status", json!({})) else { return false };
+    reply["result"]["julia"]["path"].as_str().is_some_and(|path| !Path::new(path).exists())
+}
+
 /// A runtime process this helper watches.
 struct Runtime {
     pid: i32,

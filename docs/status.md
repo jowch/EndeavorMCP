@@ -685,5 +685,9 @@ Next:
   notebook's process, which is that same Julia started again. Restart, open,
   new and Run notebook then refuse with `julia_removed`, before they stop
   anything, and Pluto's page Restart does nothing; restarting Julia fixes it
-  (#346).
+  (#346). A client that finds such a runtime on this computer with no notebook
+  open stops it and starts a new one on the Julia there now, as for an older
+  version's (#347): the app's helper always, a plugin's front once, when the
+  runtime ends when idle and the call may start one. With a notebook open it
+  is kept, and its calls say why.
 - marimo after Ember.

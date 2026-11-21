@@ -142,7 +142,8 @@ pub(crate) struct Want<'a> {
     /// runs (`Outcome::NothingRunning`) when there is none or the start ended without one.
     pub attach_only: bool,
     /// Stop a runtime that an older version started, which offers an older interface than this build's
-    /// (or none), when no notebook is open in it, and start this build's in its place (`replaces`).
+    /// (or none), or one whose Julia was removed, when no notebook is open in it, and start this build's
+    /// in its place (`replaces`).
     pub replace_older: bool,
 }
 
@@ -225,11 +226,13 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
         let looked_at = Instant::now();
         // Before the look: a core that records itself and lets go in between is then found by the look.
         let starting = lock_state(dir).is_held();
-        // An older version's runtime this call replaces once its own start is ready to go.
-        let mut older = false;
+        // A runtime this call replaces once its own start is ready to go, and why.
+        let mut older = None;
         match look(dir, want.args.any_node, true) {
-            Looked::Running(state, port) if !starting && !replaced && replaces(want, &state, port) => (replaced, older) = (true, true),
-            Looked::Running(state, port) => return Outcome::Ready(up(want, state, port, None)),
+            Looked::Running(state, port) => match (!starting && !replaced).then(|| replaces(want, &state, port)).flatten() {
+                Some(why) => (replaced, older) = (true, Some(why)),
+                None => return Outcome::Ready(up(want, state, port, None)),
+            },
             unusable @ (Looked::OtherNode(_) | Looked::Older(_)) => return Outcome::Unusable(unusable),
             // Never a second runtime beside one that is alive: both would open the same notebooks.
             Looked::Silent(state) if !starting && !want.attach_only => {
@@ -266,11 +269,14 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
         }
         let (runtime_dir, julia, token) = match prepare(want, hooks) {
             Ok(prepared) => prepared,
-            // The older runtime is kept rather than leave none.
-            Err(outcome) if older && !matches!(outcome, Outcome::Cancelled) => {
+            // The runtime it would replace is kept rather than leave none.
+            Err(outcome) if older.is_some() && !matches!(outcome, Outcome::Cancelled) => {
                 return match look(dir, want.args.any_node, true) {
                     Looked::Running(state, port) => {
-                        hooks.progress(format!("This version couldn't start here, so the older version's runtime (pid {}) is used as it is.", state.pid));
+                        hooks.progress(match older {
+                            Some(Replacing::Older) => format!("This version couldn't start here, so the older version's runtime (pid {}) is used as it is.", state.pid),
+                            _ => format!("Endeavor couldn't start again here, so the runtime (pid {}) is used as it is.", state.pid),
+                        });
                         Outcome::Ready(up(want, state, port, None))
                     }
                     _ => outcome,
@@ -278,11 +284,14 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
             }
             Err(outcome) => return outcome,
         };
-        if older {
+        if older.is_some() {
             // Looked at again: finding or installing Julia can take minutes, and a notebook may have been opened meanwhile.
             match look(dir, want.args.any_node, true) {
-                Looked::Running(state, port) if replaces(want, &state, port) => {
-                    hooks.progress(format!("Endeavor here (pid {}) was started by an older version, and no notebook is open in it; stopping it so that this version starts.", state.pid));
+                Looked::Running(state, port) if let Some(why) = replaces(want, &state, port) => {
+                    hooks.progress(match why {
+                        Replacing::Older => format!("Endeavor here (pid {}) was started by an older version, and no notebook is open in it; stopping it so that this version starts.", state.pid),
+                        Replacing::JuliaRemoved => format!("Endeavor here (pid {}) runs on a Julia that was removed since it started (juliaup removes a version when it updates past it), and no notebook is open in it; stopping it so that it starts again on the Julia here now.", state.pid),
+                    });
                     match end(dir, want.args.any_node, stopped::How::Connection, false, want.events) {
                         // On to the start below, with the lock still held, and the note for the clients still attached to it kept.
                         Ended::Stopped(_) | Ended::NotRunning => {}
@@ -329,18 +338,34 @@ fn prepare(want: &Want, hooks: &mut dyn Hooks) -> Result<(PathBuf, Vec<String>, 
     Ok((runtime_dir, julia, token))
 }
 
-/// Whether `want` replaces the runtime `state` records, which answers on `port`: it asks for that, the
-/// runtime offers an older interface than this build's or says none (so it is an older version's, which
-/// may lack what this one has, R notebooks among them), and no notebook is open in it. A newer one is
-/// left alone, so two versions that share a state folder never take turns stopping each other's; so is
-/// one whose notebooks can't be counted. "No notebook open" is a count taken just before the stop, not
-/// a guarantee: the start lock doesn't hold back the calls of clients already attached to it, so a
-/// notebook another session opens between the count and the stop is cut off (its file is on disk).
-fn replaces(want: &Want, state: &State, port: u16) -> bool {
-    want.replace_older
-        && !state.usable_as_is()
-        && state.interface.is_none_or(|theirs| theirs < crate::core::INTERFACE)
-        && crate::open_notebooks(port, &state.token) == Some(0)
+/// Why a runtime is stopped for a new one (`replaces`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Replacing {
+    /// An older version started it.
+    Older,
+    /// The Julia it runs on was removed since it started (`crate::julia_removed`).
+    JuliaRemoved,
+}
+
+/// Whether `want` replaces the runtime `state` records, which answers on `port`, and why: it asks for
+/// that, no notebook is open in it, and either it offers an older interface than this build's or says
+/// none (so it is an older version's, which may lack what this one has, R notebooks among them), or it
+/// is one this build uses as it is whose Julia was removed, so that no notebook could start in it (#347).
+/// A newer one is left alone even then, so two versions that share a state folder never take turns
+/// stopping each other's; so is one whose notebooks can't be counted. "No notebook open" is a count taken
+/// just before the stop, not a guarantee: the start lock doesn't hold back the calls of clients already
+/// attached to it, so a notebook another session opens between the count and the stop is cut off (its
+/// file is on disk).
+fn replaces(want: &Want, state: &State, port: u16) -> Option<Replacing> {
+    if !want.replace_older {
+        return None;
+    }
+    let why = if state.usable_as_is() {
+        crate::julia_removed(state, port).then_some(Replacing::JuliaRemoved)
+    } else {
+        state.interface.is_none_or(|theirs| theirs < crate::core::INTERFACE).then_some(Replacing::Older)
+    };
+    why.filter(|_| crate::open_notebooks(port, &state.token) == Some(0))
 }
 
 /// A runtime to use, the one `started` if it was started here.
