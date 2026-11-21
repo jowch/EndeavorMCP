@@ -380,7 +380,7 @@ fn an_older_versions_runtime_is_kept_when_this_version_cant_start() {
     helper.request_start(None, false);
     let (answer, lines) = after_lines(&helper);
     assert!(matches!(answer, ToApp::Ready { pid, reattached: true, .. } if pid == older.pid), "{answer:?}");
-    assert!(lines.iter().any(|line| line.contains("couldn't start here, so the older version's runtime")), "{lines:?}");
+    assert!(lines.iter().any(|line| line.contains("couldn't start here, so the older version's runtime") && line.contains("/nonexistent/julia")), "it says why: {lines:?}");
     assert!(lines.iter().all(|line| !line.contains("stopping it")), "{lines:?}");
     assert!(older.alive(), "no Julia for this version: the older one is better than none");
 }

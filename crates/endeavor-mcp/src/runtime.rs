@@ -273,9 +273,14 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
             Err(outcome) if older.is_some() && !matches!(outcome, Outcome::Cancelled) => {
                 return match look(dir, want.args.any_node, true) {
                     Looked::Running(state, port) => {
+                        let why = match &outcome {
+                            Outcome::NeedsInstall(_) => " Julia wasn't found here.".to_owned(),
+                            Outcome::Failed(why) => format!(" {why}"),
+                            _ => String::new(),
+                        };
                         hooks.progress(match older {
-                            Some(Replacing::Older) => format!("This version couldn't start here, so the older version's runtime (pid {}) is used as it is.", state.pid),
-                            _ => format!("Endeavor couldn't start again here, so the runtime (pid {}) is used as it is.", state.pid),
+                            Some(Replacing::Older) => format!("This version couldn't start here, so the older version's runtime (pid {}) is used as it is.{why}", state.pid),
+                            _ => format!("Endeavor couldn't start again here, so the runtime (pid {}) is used as it is.{why}", state.pid),
                         });
                         Outcome::Ready(up(want, state, port, None))
                     }
@@ -351,8 +356,8 @@ enum Replacing {
 /// that, no notebook is open in it, and either it offers an older interface than this build's or says
 /// none (so it is an older version's, which may lack what this one has, R notebooks among them), or it
 /// is one this build uses as it is whose Julia was removed, so that no notebook could start in it (#347).
-/// A newer one is left alone even then, so two versions that share a state folder never take turns
-/// stopping each other's; so is one whose notebooks can't be counted. "No notebook open" is a count taken
+/// One that offers a newer interface is left alone even then, so two versions that share a state folder
+/// never take turns stopping each other's; so is one whose notebooks can't be counted. "No notebook open" is a count taken
 /// just before the stop, not a guarantee: the start lock doesn't hold back the calls of clients already
 /// attached to it, so a notebook another session opens between the count and the stop is cut off (its
 /// file is on disk).

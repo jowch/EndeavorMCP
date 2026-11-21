@@ -55,8 +55,9 @@ function endeavor_drop_unreadable_caches(depot::AbstractString=first(DEPOT_PATH)
                 rm(path; force=true, recursive=true)
                 push!(stem in bad ? removed : dropped, path)
             catch e
-                why = stem in bad ? "which can't be read, so Julia may fail to start until it's removed" : "which Julia doesn't use"
-                println(log, "Couldn't remove $path, $why: ", sprint(showerror, e))
+                # One Julia doesn't use may still be loaded (on Windows a loaded image can't be removed): it
+                # is tried again at the next start, and saying so at every start would only be noise.
+                stem in bad && println(log, "Couldn't remove $path, which can't be read, so Julia may fail to start until it's removed: ", sprint(showerror, e))
             end
         end
     end
