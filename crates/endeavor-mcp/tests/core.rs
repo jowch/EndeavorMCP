@@ -354,7 +354,7 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     assert_eq!(error["error"], "notebook_not_found");
     assert_eq!(
         error["message"],
-        "No notebook with id 'aaaaaaaa-0000-0000-0000-000000000000' in the current session. Run list_notebooks to see what's open.\n\
+        "No notebook with id 'aaaaaaaa-0000-0000-0000-000000000000' in the current session. Open now: 'n1' (/n/a.jl).\n\
          See `notebook_guide` with `topic` set to `endeavor-notebooks/reference/errors.md` for what this error means and what to do."
     );
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));

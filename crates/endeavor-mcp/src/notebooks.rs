@@ -1134,7 +1134,12 @@ impl Notebooks {
         if known || self.snapshot(&id).is_ok() {
             return Ok(id);
         }
-        Err(tools::notebook_not_found(&shown))
+        Err(tools::notebook_not_found(&shown, self.open_now().as_deref()))
+    }
+
+    /// The open notebooks by id and path, for an id that isn't one of them (`tools::notebook_not_found`).
+    fn open_now(&self) -> Option<Vec<(String, String)>> {
+        self.snapshots().ok().map(|open| open.into_iter().map(|nb| (nb.id, nb.path)).collect())
     }
 
     /// The app binds a session to its notebook; an empty path clears it.
