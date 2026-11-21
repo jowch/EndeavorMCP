@@ -18,6 +18,9 @@
 //! both directions; either side may send it, and frames for an id that's
 //! already closed are dropped.
 
+// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub mod askpass;
 pub mod backend;
 pub mod files;

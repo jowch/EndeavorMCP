@@ -3,6 +3,9 @@
 //! doesn't answer through to Pluto or Julia's bridge, streams as they're
 //! written, lets a browser in with its cookie, and lives and dies with it.
 
+// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
+#![allow(clippy::disallowed_methods)]
+
 #![cfg(unix)]
 
 mod common;

@@ -59,6 +59,14 @@ jobs:
             echo "::error::This PR changes the pinned build (release-key). Only the Helpers workflow sets it, on main. Take main's copy: git checkout origin/main -- scripts/release-key '*/launch/release-key'"
             exit 1
           fi
+      # On Windows a socket's `try_clone` is an inheritable copy, and a child started while it is
+      # open keeps the connection open (#154). clippy.toml forbids it; only this lint is checked, and
+      # only outside tests, which may copy sockets.
+      - name: No socket copies outside tests
+        if: runner.os == 'Linux'
+        run: |
+          rustup component add clippy
+          cargo clippy --locked --workspace --lib --bins -- -A clippy::all -D clippy::disallowed_methods
       - name: Build
         run: cargo build --locked --workspace --all-targets
       - name: Test
