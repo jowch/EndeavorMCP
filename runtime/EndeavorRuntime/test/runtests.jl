@@ -468,6 +468,27 @@ end
         @test precompiled()
     end
 
+    @testset "lifecycle: a native image of ours with no .ji is removed once it is old" begin
+        include(joinpath(@__DIR__, "..", "..", "cache_guard.jl"))
+        depot = mktempdir()
+        dir = joinpath(depot, "compiled", "v1.12", "EndeavorRuntime")
+        other = joinpath(depot, "compiled", "v1.12", "Other")
+        mkpath(dir); mkpath(other)
+        # A set in use, two images whose .ji is gone (one with a debug bundle, one whose name isn't
+        # ASCII), a precompile's temporary file, and someone else's image.
+        for name in ("a.ji", "a.so", "b.so", "é.dylib", "jl_t.so")
+            write(joinpath(dir, name), "x")
+        end
+        mkpath(joinpath(dir, "b.dylib.dSYM")); mkpath(joinpath(dir, "é.dylib.dSYM"))
+        write(joinpath(other, "z.so"), "x")
+        @test endeavor_drop_unreadable_caches(depot; log=devnull) == String[]
+        @test length(readdir(dir)) == 7
+        removed = endeavor_drop_unreadable_caches(depot; log=devnull, now=time() + 2 * ENDEAVOR_ORPHAN_AGE)
+        @test sort(basename.(removed)) == sort(["b.so", "b.dylib.dSYM", "é.dylib", "é.dylib.dSYM"])
+        @test sort(readdir(dir)) == sort(["a.ji", "a.so", "jl_t.so"])
+        @test isfile(joinpath(other, "z.so"))
+    end
+
     @testset "lifecycle: a compiled file of ours that can't be read is removed, then compiled again" begin
         include(joinpath(@__DIR__, "..", "..", "cache_guard.jl"))
         # A small package by the warm-up's name, in a project and a depot of its own. Loading it
