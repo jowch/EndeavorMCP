@@ -361,7 +361,8 @@ macOS:
 curl -fsSL https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/install.sh | sh
 ```
 
-It puts `endeavor` in `~/.local/bin` after checking its SHA-256. The Windows
+It puts `endeavor` in `~/.local/bin` after checking it against the SHA-256
+this repository pins. The Windows
 script, other folders and building from source are in
 [docs/serve.md](docs/serve.md#install-the-program-by-hand).
 

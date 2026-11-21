@@ -1,5 +1,8 @@
 //! `endeavor --version`, and `endeavor update`: replace this binary with the
-//! newest build on the Helpers release, the one its `LATEST` file names.
+//! build main's `scripts/release-key` pins, checked against the checksums
+//! there, the build the plugins run. When main can't be read, or its pin has
+//! no checksums, it is the newest build on the Helpers release, the one its
+//! `LATEST` file names, checked against the release's own checksum file.
 //!
 //! The release has binaries for Linux, macOS and Windows (`release::platform_name`).
 //! A copy the Endeavor app installed, or one cargo installed, is left to the
@@ -8,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::release::{asset_name, checksum_for, download, sha256_of, this_platform_name};
+use crate::release::{asset_name, checksum_for, download, read_pin, sha256_of, this_platform_name};
 use crate::{embedded, paths, release, standalone};
 
 const CARGO_INSTALL: &str = "cargo install --git https://github.com/jowch/EndeavorMCP endeavor-mcp";
@@ -51,6 +54,8 @@ struct Here {
     /// Where the plugins' launcher keeps binaries (`paths::Env::plugin_bin`).
     plugin_bin: PathBuf,
     release: String,
+    /// Where main's release-key is read from, if anywhere (`release::pin_url`).
+    pin: Option<String>,
     /// Where a runtime from the old build would be recorded.
     state_dir: PathBuf,
 }
@@ -67,6 +72,7 @@ impl Here {
             plugin_bin: env.plugin_bin(),
             server_root: env.server_root(),
             release: release::base_url(),
+            pin: release::pin_url(),
             state_dir: crate::runtime::default_state_dir(&env),
         })
     }
@@ -126,19 +132,38 @@ fn update(here: &Here) -> Result<String, String> {
 
     clear_asides(exe, cfg!(windows));
     let release = here.release.trim_end_matches('/');
-    let key = String::from_utf8_lossy(&download(&format!("{release}/LATEST"), None)?).trim().to_owned();
-    if key.is_empty() || !key.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(format!("The release's LATEST file doesn't name a build ({key:?})."));
-    }
-    let name = asset_name(&key, platform);
-    let sums = String::from_utf8_lossy(&download(&format!("{release}/endeavor-{key}.sha256"), None)?).into_owned();
-    let want = checksum_for(&sums, &name).ok_or_else(|| format!("The newest build ({key}) has no binary for {platform}."))?;
+    let pin = match here.pin.as_deref().map(read_pin) {
+        Some(Ok(pin)) => pin,
+        Some(Err(e)) => {
+            eprintln!("Couldn't read the build main pins ({e}), so the download is checked only against the release's own checksum file.");
+            None
+        }
+        None => None,
+    };
+    let pinned = pin.is_some();
+    let (key, name, want) = match pin {
+        Some((key, sums)) => {
+            let name = asset_name(&key, platform);
+            let want = checksum_for(&sums, &name).ok_or_else(|| format!("The checksums main pins list no binary of build {key} for {platform}."))?;
+            (key, name, want)
+        }
+        None => {
+            let key = String::from_utf8_lossy(&download(&format!("{release}/LATEST"), None)?).trim().to_owned();
+            if key.is_empty() || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!("The release's LATEST file doesn't name a build ({key:?})."));
+            }
+            let name = asset_name(&key, platform);
+            let sums = String::from_utf8_lossy(&download(&format!("{release}/endeavor-{key}.sha256"), None)?).into_owned();
+            let want = checksum_for(&sums, &name).ok_or_else(|| format!("The newest build ({key}) has no binary for {platform}."))?;
+            (key, name, want)
+        }
+    };
     if sha256_of(exe)? == want {
         return Ok(format!("endeavor is up to date: {} is the newest build ({key}).", exe.display()));
     }
 
     let part = dir.join(format!(".endeavor.part.{}{}", std::process::id(), if cfg!(windows) { ".exe" } else { "" }));
-    let installed = install(&format!("{release}/{name}"), &part, &want, exe);
+    let installed = install(&format!("{release}/{name}"), &part, &want, pinned, exe);
     let _ = std::fs::remove_file(&part);
     let (new_build, new_interface) = installed?;
     let mut message = format!("Updated {} to the newest build ({key}).", exe.display());
@@ -157,14 +182,16 @@ fn same(a: &Path, b: &Path) -> bool {
     real(a) == real(b)
 }
 
-/// Download `url` to `part`, check it against `sha256`, and put it in place of
-/// `exe`. The new binary's build and interface number, as far as it says them.
-fn install(url: &str, part: &Path, sha256: &str, exe: &Path) -> Result<(Option<String>, Option<u32>), String> {
+/// Download `url` to `part`, check it against `sha256` (main's, when
+/// `pinned`), and put it in place of `exe`. The new binary's build and
+/// interface number, as far as it says them.
+fn install(url: &str, part: &Path, sha256: &str, pinned: bool, exe: &Path) -> Result<(Option<String>, Option<u32>), String> {
     download(url, Some(part))?;
     let got = sha256_of(part)?;
     if got != sha256 {
+        let against = if pinned { "the checksum main pins" } else { "its checksum" };
         return Err(format!(
-            "The download from {url} doesn't match its checksum (SHA-256 {got}, expected {sha256}). It was deleted; {} is unchanged.",
+            "The download from {url} doesn't match {against} (SHA-256 {got}, expected {sha256}). It was deleted; {} is unchanged.",
             exe.display()
         ));
     }

@@ -76,7 +76,7 @@ fn files(dir: &Path) -> Vec<String> {
 fn the_helper_is_fetched_checked_and_kept_for_the_owner() {
     let dir = scratch("fetch");
     let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(HELPER)));
-    let kept = fetch_helper("linux", "aarch64", Some(KEY), &url, &cache, &removed_build).unwrap();
+    let kept = fetch_helper("linux", "aarch64", Some(KEY), &url, None, &cache, &removed_build).unwrap();
     assert_eq!(kept, cache.join(KEY).join("linux-aarch64/endeavor"));
     assert_eq!(std::fs::read(&kept).unwrap(), HELPER);
     assert_eq!(std::fs::read_to_string(cache.join(KEY).join("linux-aarch64/endeavor.sha256")).unwrap(), sha256_hex(HELPER));
@@ -94,13 +94,13 @@ fn the_helper_is_fetched_checked_and_kept_for_the_owner() {
 fn a_kept_helper_is_used_again_without_downloading_unless_it_changed() {
     let dir = scratch("reuse");
     let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(HELPER)));
-    let first = fetch_helper("linux", "aarch64", Some(KEY), &url, &cache, &removed_build).unwrap();
+    let first = fetch_helper("linux", "aarch64", Some(KEY), &url, None, &cache, &removed_build).unwrap();
     // The release is gone, so a second call that succeeds didn't download.
     std::fs::remove_dir_all(dir.join("release")).unwrap();
-    assert_eq!(fetch_helper("linux", "aarch64", Some(KEY), &url, &cache, &removed_build).unwrap(), first);
+    assert_eq!(fetch_helper("linux", "aarch64", Some(KEY), &url, None, &cache, &removed_build).unwrap(), first);
 
     std::fs::write(&first, "changed on disk").unwrap();
-    let error = fetch_helper("linux", "aarch64", Some(KEY), &url, &cache, &removed_build).unwrap_err();
+    let error = fetch_helper("linux", "aarch64", Some(KEY), &url, None, &cache, &removed_build).unwrap_err();
     assert!(error.starts_with("Couldn't get the helper for linux aarch64 servers from the release"), "{error}");
     assert_eq!(std::fs::read(&first).unwrap(), b"changed on disk", "a kept file is only replaced by a checked download");
     let _ = std::fs::remove_dir_all(&dir);
@@ -110,7 +110,7 @@ fn a_kept_helper_is_used_again_without_downloading_unless_it_changed() {
 fn a_download_that_fails_its_checksum_is_refused_and_nothing_is_kept() {
     let dir = scratch("checksum");
     let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(b"something else")));
-    let error = fetch_helper("linux", "aarch64", Some(KEY), &url, &cache, &removed_build).unwrap_err();
+    let error = fetch_helper("linux", "aarch64", Some(KEY), &url, None, &cache, &removed_build).unwrap_err();
     assert!(error.contains("doesn't match its checksum") && error.ends_with("It was deleted."), "{error}");
     assert_eq!(files(&cache), [KEY, &format!("{KEY}/linux-aarch64"), &format!("{KEY}/linux-aarch64/endeavor.lock")]);
     let _ = std::fs::remove_dir_all(&dir);
@@ -121,32 +121,93 @@ fn a_release_without_the_helper_says_so() {
     let dir = scratch("missing");
     let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(HELPER)));
     // Not in the checksum file.
-    let error = fetch_helper("darwin", "aarch64", Some(KEY), &url, &cache, &removed_build).unwrap_err();
+    let error = fetch_helper("darwin", "aarch64", Some(KEY), &url, None, &cache, &removed_build).unwrap_err();
     assert_eq!(error, format!("The release has no helper for darwin aarch64 servers in build {KEY} (endeavor-{KEY}-darwin-aarch64 isn't in its checksum file)."));
     // In the checksum file, but the file isn't there.
-    let error = fetch_helper("linux", "x86_64", Some(KEY), &url, &cache, &removed_build).unwrap_err();
+    let error = fetch_helper("linux", "x86_64", Some(KEY), &url, None, &cache, &removed_build).unwrap_err();
     assert!(error.starts_with("Couldn't get the helper for linux x86_64 servers from the release: Couldn't download file://"), "{error}");
     // No checksum file for this key, and no LATEST.
-    let error = fetch_helper("linux", "aarch64", Some("ffffffffffff"), &url, &cache, &removed_build).unwrap_err();
+    let error = fetch_helper("linux", "aarch64", Some("ffffffffffff"), &url, None, &cache, &removed_build).unwrap_err();
     assert!(error.starts_with("Couldn't get the helper for linux aarch64 servers from the release: Couldn't download file://"), "{error}");
     // No checksum file for this key, and LATEST names another: it was removed.
     std::fs::write(dir.join("release").join("LATEST"), format!("{KEY}\n")).unwrap();
-    let error = fetch_helper("linux", "aarch64", Some("ffffffffffff"), &url, &cache, &removed_build).unwrap_err();
+    let error = fetch_helper("linux", "aarch64", Some("ffffffffffff"), &url, None, &cache, &removed_build).unwrap_err();
     assert_eq!(error, "Build ffffffffffff of endeavor is old and was removed from the release, so it can't get the helper for linux aarch64 servers. Update endeavor: update the plugin, or run `endeavor update` if you installed it with the install script.");
     assert!(files(&cache).iter().all(|f| !f.ends_with("endeavor") && !f.contains(".part")), "{:?}", files(&cache));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Main's release-key in `dir`, pinning `key` with `sum` for linux-aarch64; its address.
+fn main_pin(dir: &Path, key: &str, sum: &str) -> String {
+    let file = dir.join("main-release-key");
+    std::fs::write(&file, format!("{key}\r\n{}  endeavor-{key}-linux-x86_64\r\n{sum}  endeavor-{key}-linux-aarch64\r\n", sha256_hex(b"other"))).unwrap();
+    file_url(&file.display().to_string())
+}
+
+#[test]
+fn a_helper_main_pins_is_checked_against_mains_checksum_not_the_releases() {
+    // The release was tampered with: its helper and its checksum file agree, and main pins the real helper's checksum.
+    let dir = scratch("pinned");
+    let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(HELPER)));
+    let pin = main_pin(&dir, KEY, &sha256_hex(b"the real helper"));
+    let error = fetch_helper("linux", "aarch64", Some(KEY), &url, Some(&pin), &cache, &removed_build).unwrap_err();
+    assert!(error.contains(&format!("doesn't match the checksum pinned for build {KEY}")) && error.ends_with("It was deleted."), "{error}");
+    assert!(!cache.join(KEY).join("linux-aarch64/endeavor").exists());
+
+    // The real helper, and the release's checksum file gone: main's checksum is all it needs.
+    std::fs::remove_file(dir.join(format!("release/endeavor-{KEY}.sha256"))).unwrap();
+    let pin = main_pin(&dir, KEY, &sha256_hex(HELPER));
+    let kept = fetch_helper("linux", "aarch64", Some(KEY), &url, Some(&pin), &cache, &removed_build).unwrap();
+    assert_eq!(std::fs::read(&kept).unwrap(), HELPER);
+
+    // A pin that lists no helper for this platform says so.
+    let error = fetch_helper("darwin", "aarch64", Some(KEY), &url, Some(&pin), &cache, &removed_build).unwrap_err();
+    assert_eq!(error, format!("The checksums pinned for build {KEY} list no helper for darwin aarch64 servers (endeavor-{KEY}-darwin-aarch64)."));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pin_of_another_build_or_none_leaves_the_releases_checksum() {
+    let dir = scratch("pinned-other");
+    let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(HELPER)));
+    // Main pins a newer build: this build's helper is checked against the release's checksum file.
+    let pin = main_pin(&dir, "eeeeeeeeeeee", &sha256_hex(b"not this build"));
+    fetch_helper("linux", "aarch64", Some(KEY), &url, Some(&pin), &cache, &removed_build).unwrap();
+    // Main can't be read: the same.
+    std::fs::remove_dir_all(&cache).unwrap();
+    fetch_helper("linux", "aarch64", Some(KEY), &url, Some("file:///no/such/release-key"), &cache, &removed_build).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pinned_build_the_release_no_longer_holds_says_it_was_removed() {
+    let dir = scratch("pinned-removed");
+    let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(HELPER)));
+    std::fs::write(dir.join("release").join("LATEST"), format!("{KEY}\n")).unwrap();
+    let pin = main_pin(&dir, "ffffffffffff", &sha256_hex(HELPER));
+    let error = fetch_helper("linux", "aarch64", Some("ffffffffffff"), &url, Some(&pin), &cache, &removed_build).unwrap_err();
+    assert!(error.starts_with("Build ffffffffffff of endeavor is old and was removed from the release"), "{error}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_release_key_pins_checksums_only_when_it_holds_some() {
+    assert_eq!(pinned_key(&format!("{KEY}\n{}  endeavor-{KEY}-linux-x86_64\n", sha256_hex(b"x"))), Some(KEY));
+    assert_eq!(pinned_key(&format!("{KEY}\n")), None, "a pin from before checksums were written");
+    assert_eq!(pinned_key("<html>not found</html>\n"), None);
+    assert_eq!(pinned_key(""), None);
+}
+
 #[test]
 fn a_build_without_a_release_key_says_what_it_needs() {
-    let error = fetch_helper("darwin", "aarch64", None, "file:///nowhere", Path::new("/nowhere"), &removed_build).unwrap_err();
+    let error = fetch_helper("darwin", "aarch64", None, "file:///nowhere", None, Path::new("/nowhere"), &removed_build).unwrap_err();
     assert_eq!(error, "A helper for darwin aarch64 servers needs a release build of Endeavor, installed with the install script, and this build has none.");
 }
 
 #[test]
 fn a_platform_the_release_doesnt_build_for_says_so() {
     for (os, arch) in [("linux", "riscv64"), ("freebsd", "x86_64"), ("windows", "x86_64")] {
-        assert_eq!(fetch_helper(os, arch, Some(KEY), "file:///nowhere", Path::new("/nowhere"), &removed_build).unwrap_err(), client::no_helper(os, arch));
+        assert_eq!(fetch_helper(os, arch, Some(KEY), "file:///nowhere", None, Path::new("/nowhere"), &removed_build).unwrap_err(), client::no_helper(os, arch));
     }
 }
 
@@ -211,7 +272,7 @@ fn helpers_fetched_at_once_are_downloaded_once_and_all_valid() {
     let paths: Vec<_> = (0..6)
         .map(|_| {
             let (url, cache) = (url.clone(), cache.clone());
-            std::thread::spawn(move || fetch_helper("linux", "aarch64", Some(KEY), &url, &cache, &removed_build))
+            std::thread::spawn(move || fetch_helper("linux", "aarch64", Some(KEY), &url, None, &cache, &removed_build))
         })
         .collect::<Vec<_>>()
         .into_iter()
@@ -233,17 +294,17 @@ fn the_folders_of_other_keys_are_removed_when_a_helper_is_fetched_or_reused() {
     let older = cache.join("ffffffffffff/linux-aarch64");
     std::fs::create_dir_all(&older).unwrap();
     std::fs::write(older.join("endeavor"), "old").unwrap();
-    fetch_helper("linux", "aarch64", Some(KEY), &url, &cache, &removed_build).unwrap();
+    fetch_helper("linux", "aarch64", Some(KEY), &url, None, &cache, &removed_build).unwrap();
     assert!(!cache.join("ffffffffffff").exists());
 
     std::fs::create_dir_all(&older).unwrap();
     std::fs::remove_dir_all(dir.join("release")).unwrap();
-    let kept = fetch_helper("linux", "aarch64", Some(KEY), &url, &cache, &removed_build).unwrap();
+    let kept = fetch_helper("linux", "aarch64", Some(KEY), &url, None, &cache, &removed_build).unwrap();
     assert!(kept.exists() && !cache.join("ffffffffffff").exists());
 
     // A failed fetch leaves the others alone.
     std::fs::create_dir_all(&older).unwrap();
-    fetch_helper("linux", "aarch64", Some("eeeeeeeeeeee"), &url, &cache, &removed_build).unwrap_err();
+    fetch_helper("linux", "aarch64", Some("eeeeeeeeeeee"), &url, None, &cache, &removed_build).unwrap_err();
     assert!(older.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -193,3 +193,58 @@ fn an_unknown_argument_is_refused() {
     let (ok, _, stderr) = Place::new("argument").run(&["--sudo"], &[]);
     assert!(!ok && stderr.contains("unknown argument --sudo"), "{stderr}");
 }
+
+/// Main's release-key in the place's folder, naming `key` with `sum` for this platform, and the
+/// variable that points install.sh at it.
+fn main_pin(place: &Place, key: &str, sum: &str) -> (&'static str, String) {
+    let file = place.dir.join("main-release-key");
+    std::fs::write(&file, format!("{key}\n{}  endeavor-{key}-other-platform\n{sum}  endeavor-{key}-{}\n", sha(b"other"), platform())).unwrap();
+    ("ENDEAVOR_PIN_URL", format!("file://{}", file.display()))
+}
+
+#[test]
+fn run_by_hand_it_installs_the_build_main_pins_checked_against_mains_checksums() {
+    // The release was tampered with: its binary and its checksum file agree, and main's pin has the real build's checksum.
+    let place = Place::new("main-pin");
+    let tampered: &[u8] = b"#!/bin/sh\necho tampered\n";
+    place.release(&sha(tampered));
+    std::fs::write(place.dir.join(format!("release/endeavor-{KEY}-{}", platform())), tampered).unwrap();
+    let bin = place.dir.join("bin");
+    let pin = main_pin(&place, KEY, &sha(NEW));
+    let (ok, _, stderr) = place.run(&["--dir", bin.to_str().unwrap()], std::slice::from_ref(&pin));
+    assert!(!ok && stderr.contains("doesn't match the checksum main pins") && stderr.contains("nothing was installed"), "{stderr}");
+    assert!(!bin.join("endeavor").exists());
+
+    // Main pins an older build than LATEST: that one is installed, and the release's checksum file for it isn't needed.
+    let pinned = "00000000aaaa";
+    std::fs::write(place.dir.join(format!("release/endeavor-{pinned}-{}", platform())), NEW).unwrap();
+    let pin = main_pin(&place, pinned, &sha(NEW));
+    let (ok, stdout, stderr) = place.run(&["--dir", bin.to_str().unwrap()], std::slice::from_ref(&pin));
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains(&format!("Installed endeavor (build {pinned}, ")), "{stdout}");
+    assert_eq!(std::fs::read(bin.join("endeavor")).unwrap(), NEW);
+
+    // --key with another build than main's: main's checksums aren't for it, so only the release's are checked.
+    let (ok, _, stderr) = place.run(&["--dir", bin.to_str().unwrap(), "--key", KEY], &[pin]);
+    assert!(ok, "{stderr}");
+    assert_eq!(std::fs::read(bin.join("endeavor")).unwrap(), tampered);
+}
+
+#[test]
+fn a_pin_that_cant_be_read_falls_back_to_latest_and_says_so() {
+    let place = Place::new("main-pin-missing");
+    place.release(&sha(NEW));
+    let bin = place.dir.join("bin");
+    let missing = ("ENDEAVOR_PIN_URL", format!("file://{}", place.dir.join("no-such-file").display()));
+    let (ok, _, stderr) = place.run(&["--dir", bin.to_str().unwrap()], &[missing]);
+    assert!(ok, "{stderr}");
+    assert!(stderr.contains("couldn't read the build main pins") && stderr.contains("checked only against the release's own checksum file"), "{stderr}");
+    assert_eq!(std::fs::read(bin.join("endeavor")).unwrap(), NEW);
+
+    // A pin from before checksums were written (the key alone) isn't used.
+    std::fs::write(place.dir.join("old-pin"), "00000000aaaa\n").unwrap();
+    let old = ("ENDEAVOR_PIN_URL", format!("file://{}", place.dir.join("old-pin").display()));
+    let (ok, stdout, stderr) = place.run(&["--dir", bin.to_str().unwrap()], &[old]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains(&format!("Installed endeavor (build {KEY}, ")), "{stdout}");
+}

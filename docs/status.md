@@ -194,8 +194,12 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   key in `release-key`, and the launcher passes them to `install.sh`
   (`--sums`), so a release changed after the pin is caught, not only a
   damaged download (#98). A binary published under a key is never replaced. The install
-  scripts run by hand, `endeavor update` and the helpers fetched for servers
-  still check against the release's own checksum file.
+  scripts run by hand and `endeavor update` install the build `main` pins,
+  checked against its checksums, and fall back to `LATEST` with the release's
+  checksum file only when `main` can't be read (#422). A server's helper is
+  checked against the checksums a build of the pin commit carries
+  (`embedded::PINNED_SUMS`), else `main`'s while it still pins that key, else
+  the release's.
 - `endeavor update` replaces the binary from the Helpers release with the
   newest build on Linux, macOS and Windows (tested for Linux's logic and the
   Windows rename on Linux; not run on a Mac or Windows). `endeavor --version`

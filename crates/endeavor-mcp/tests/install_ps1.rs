@@ -69,15 +69,15 @@ fn serve(files: HashMap<String, Vec<u8>>) -> u16 {
     port
 }
 
-fn install(release: &str, dir: &Path) -> (bool, String) {
+fn install(release: &str, dir: &Path, pin: Option<&str>) -> (bool, String) {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/install.ps1");
-    let out = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
-        .arg(script)
-        .env("ENDEAVOR_RELEASE_URL", release)
-        .env("ENDEAVOR_INSTALL_DIR", dir)
-        .output()
-        .unwrap();
+    let mut command = Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]).arg(script).env("ENDEAVOR_RELEASE_URL", release).env("ENDEAVOR_INSTALL_DIR", dir);
+    match pin {
+        Some(url) => command.env("ENDEAVOR_PIN_URL", url),
+        None => command.env_remove("ENDEAVOR_PIN_URL"),
+    };
+    let out = command.output().unwrap();
     (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
 }
 
@@ -93,17 +93,39 @@ fn windows_powershell_follows_the_releases_redirects_by_hand_and_checks_the_down
     files.insert("LATEST".to_owned(), format!("{KEY}\n").into_bytes());
     files.insert(format!("endeavor-{KEY}.sha256"), format!("{}  {name}\n", sha(&exe)).into_bytes());
     files.insert(name.clone(), exe.clone());
+    // Main's pins: one naming an older build the release still holds, and one whose checksum isn't the release's binary's.
+    let pinned = "00000000aaaa";
+    let pinned_exe = b"the pinned build".to_vec();
+    files.insert(format!("endeavor-{pinned}-windows-x86_64.exe"), pinned_exe.clone());
+    files.insert("pin-older".to_owned(), format!("{pinned}\r\n{}  endeavor-{pinned}-windows-x86_64.exe\r\n", sha(&pinned_exe)).into_bytes());
+    files.insert("pin-other-sum".to_owned(), format!("{KEY}\n{}  {name}\n", sha(b"the real build")).into_bytes());
     let port = serve(files);
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("install-ps1");
     let _ = std::fs::remove_dir_all(&dir);
 
-    let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir);
+    let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, None);
     assert!(ok, "{said}");
     assert!(said.contains(&format!("Installed endeavor (build {KEY}, windows-x86_64)")), "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), exe);
 
     // A release that answers 404 says which file it couldn't get, and installs nothing over the binary there.
-    let (ok, said) = install(&format!("http://127.0.0.1:{port}/missing"), &dir);
+    let (ok, said) = install(&format!("http://127.0.0.1:{port}/missing"), &dir, None);
     assert!(!ok && said.contains(&format!("Couldn't download http://127.0.0.1:{port}/missing/LATEST")) && said.contains("404"), "{said}");
+    assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), exe);
+
+    // Main pins a build: that one is installed, checked against main's checksum.
+    let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, Some(&format!("http://127.0.0.1:{port}/rel/pin-older")));
+    assert!(ok, "{said}");
+    assert!(said.contains(&format!("Installed endeavor (build {pinned}, windows-x86_64)")), "{said}");
+    assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), pinned_exe);
+
+    // The release's binary and checksum file agree, but main pins another checksum: refused.
+    let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, Some(&format!("http://127.0.0.1:{port}/rel/pin-other-sum")));
+    assert!(!ok && said.contains("doesn't match the checksum main pins"), "{said}");
+    assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), pinned_exe);
+
+    // Main can't be read: LATEST, checked against the release's checksum file, with a warning.
+    let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, Some(&format!("http://127.0.0.1:{port}/no-such-pin")));
+    assert!(ok && said.contains("Couldn't read the build main pins"), "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), exe);
 }

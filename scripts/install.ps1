@@ -1,10 +1,15 @@
-# Install the newest endeavor from the Helpers release on GitHub, for Windows
+# Install endeavor from the Helpers release on GitHub, for Windows
 # (PowerShell 5.1 or newer; macOS and Linux: scripts/install.sh).
 #
 #   irm https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/install.ps1 | iex
 #
-# It reads LATEST from the release, downloads endeavor-<key>-windows-x86_64.exe
-# and endeavor-<key>.sha256, checks the SHA-256, and puts the binary in $Dir as
+# It reads release-key from main, the same place this script comes from. When
+# that holds checksums, it installs the build it names and checks it against
+# them: the build the plugins run, checked the way they check it. Otherwise
+# (main can't be read, or its pin is from before checksums were written) it
+# reads LATEST from the release, downloads endeavor-<key>.sha256 and checks
+# against that, saying so when main couldn't be read. It downloads
+# endeavor-<key>-windows-x86_64.exe and puts it in $Dir as
 # endeavor.exe, replacing one that is there (a copy that is running is renamed
 # to endeavor.exe.old-<pid>, which the next install or `endeavor update` removes
 # once nothing runs from it).
@@ -15,9 +20,10 @@
 # Everything runs in a script block, so `irm | iex` leaves no variables,
 # functions or preferences in your session.
 # $env:ENDEAVOR_RELEASE_URL replaces the release's address (for tests; a
-# file:// address or a folder works). The checksum file comes from the same
-# release as the binary, so the check catches a damaged download and not a
-# tampered release.
+# file:// address or a folder works), and $env:ENDEAVOR_PIN_URL the address of
+# main's release-key; with only the first set, no pin is read. The release's
+# checksum file comes from the same release as the binary, so a check against
+# it catches a damaged download and not a tampered release.
 # From an https address, a redirect is followed only to https. PowerShell 7
 # (.NET's HttpClient) refuses any other itself; Windows PowerShell 5.1's
 # Invoke-WebRequest has no such switch, so there each redirect is followed by
@@ -33,6 +39,7 @@
     $release = $env:ENDEAVOR_RELEASE_URL
     if (-not $release) { $release = 'https://github.com/jowch/EndeavorMCP/releases/download/helpers' }
     $release = $release.TrimEnd('/', '\')
+    $pinUrl = if ($null -ne $env:ENDEAVOR_PIN_URL) { $env:ENDEAVOR_PIN_URL } elseif ($env:ENDEAVOR_RELEASE_URL) { '' } else { 'https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/release-key' }
 
     if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
         throw "install.ps1 is for Windows. On macOS and Linux use scripts/install.sh."
@@ -94,40 +101,68 @@
         }
     }
 
-    # Fetch NAME from the release to FILE, giving up after SECS seconds (a build is about 5 MB).
-    function Get-Release([string]$Name, [string]$File, [int]$Secs = 60) {
-        $url = "$release/$Name"
+    # Fetch URL (an address, or a file's path) to FILE, giving up after SECS seconds.
+    function Get-Url([string]$Url, [string]$File, [int]$Secs = 60) {
         try {
-            if ($url -match '^file:') {
-                Copy-Item -LiteralPath ([Uri]$url).LocalPath -Destination $File
-            } elseif ($release -match '^[A-Za-z]:\\|^\\\\') {
-                Copy-Item -LiteralPath (Join-Path $release $Name) -Destination $File
+            if ($Url -match '^file:') {
+                Copy-Item -LiteralPath ([Uri]$Url).LocalPath -Destination $File
+            } elseif ($Url -match '^[A-Za-z]:\\|^\\\\') {
+                Copy-Item -LiteralPath $Url -Destination $File
             } elseif ($PSVersionTable.PSEdition -eq 'Core') {
-                Invoke-WebRequest -UseBasicParsing -TimeoutSec $Secs -Uri $url -OutFile $File
+                Invoke-WebRequest -UseBasicParsing -TimeoutSec $Secs -Uri $Url -OutFile $File
             } else {
-                Save-Url $url $File $Secs
+                Save-Url $Url $File $Secs
             }
         } catch {
-            throw "Couldn't download $url ($($_.Exception.Message))."
+            throw "Couldn't download $Url ($($_.Exception.Message))."
         }
+    }
+
+    # Fetch NAME from the release to FILE, giving up after SECS seconds (a build is about 5 MB).
+    function Get-Release([string]$Name, [string]$File, [int]$Secs = 60) {
+        $url = if ($release -match '^[A-Za-z]:\\|^\\\\') { Join-Path $release $Name } else { "$release/$Name" }
+        Get-Url $url $File $Secs
+    }
+
+    # The SHA-256 the sha256sum-style LINES give for NAME, if any.
+    function Find-Sum($Lines, [string]$Name) {
+        foreach ($line in $Lines) {
+            $parts = $line.Trim() -split '\s+', 2
+            if ($parts.Count -eq 2 -and $parts[0] -match '^[0-9a-fA-F]{64}$' -and $parts[1].TrimStart('*') -eq $Name) { return $parts[0].ToLower() }
+        }
+        return $null
     }
 
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     $tmp = Join-Path $Dir (".endeavor-install-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
-        Get-Release 'LATEST' (Join-Path $tmp 'LATEST')
-        $key = "$(Get-Content -Raw -LiteralPath (Join-Path $tmp 'LATEST'))".Trim()
-        if ($key -notmatch '^[0-9a-fA-F]+$') { throw "The release's LATEST file doesn't name a build ('$key')." }
-
-        $name = "endeavor-$key-$platform.exe"
-        Get-Release "endeavor-$key.sha256" (Join-Path $tmp 'sums')
-        $want = $null
-        foreach ($line in Get-Content -LiteralPath (Join-Path $tmp 'sums')) {
-            $parts = $line.Trim() -split '\s+', 2
-            if ($parts.Count -eq 2 -and $parts[1].TrimStart('*') -eq $name) { $want = $parts[0].ToLower(); break }
+        # Main's pin, when it can be read and holds checksums.
+        $key = $null
+        $pinned = $false
+        if ($pinUrl) {
+            $pinFile = Join-Path $tmp 'release-key'
+            $pin = $null
+            try { Get-Url $pinUrl $pinFile; $pin = @(Get-Content -LiteralPath $pinFile) } catch {
+                Write-Warning "Couldn't read the build main pins ($($_.Exception.Message)), so the download is checked only against the release's own checksum file."
+            }
+            if ($pin -and "$($pin[0])".Trim() -match '^[0-9a-fA-F]+$' -and ($pin | Where-Object { $_ -match '^[0-9a-fA-F]{64}\s' })) {
+                $key = "$($pin[0])".Trim()
+                $pinned = $true
+                $name = "endeavor-$key-$platform.exe"
+                $want = Find-Sum $pin $name
+                if (-not $want) { throw "The checksums in $pinUrl list no binary of build $key for $platform." }
+            }
         }
-        if (-not $want) { throw "The newest build ($key) has no binary for $platform." }
+        if (-not $pinned) {
+            Get-Release 'LATEST' (Join-Path $tmp 'LATEST')
+            $key = "$(Get-Content -Raw -LiteralPath (Join-Path $tmp 'LATEST'))".Trim()
+            if ($key -notmatch '^[0-9a-fA-F]+$') { throw "The release's LATEST file doesn't name a build ('$key')." }
+            $name = "endeavor-$key-$platform.exe"
+            Get-Release "endeavor-$key.sha256" (Join-Path $tmp 'sums')
+            $want = Find-Sum (Get-Content -LiteralPath (Join-Path $tmp 'sums')) $name
+            if (-not $want) { throw "The newest build ($key) has no binary for $platform." }
+        }
 
         $new = Join-Path $tmp 'endeavor.exe'
         Get-Release $name $new 900
@@ -135,6 +170,9 @@
         # doesn't load when PSModulePath names PowerShell 7's modules (a 5.1 started from pwsh).
         $stream = [IO.File]::OpenRead($new)
         try { $have = (-join ([Security.Cryptography.SHA256]::Create().ComputeHash($stream) | ForEach-Object { $_.ToString('x2') })) } finally { $stream.Close() }
+        if ($have -ne $want -and $pinned) {
+            throw "The download from $release/$name doesn't match the checksum main pins (SHA-256 $have, expected $want). It was deleted; nothing was installed."
+        }
         if ($have -ne $want) {
             throw "The download from $release/$name doesn't match its checksum (SHA-256 $have, expected $want). It was deleted; nothing was installed."
         }

@@ -814,15 +814,18 @@ The plugin's entry is `endeavor mcp`, found on the `PATH`.
 
 - Two install scripts, `scripts/install.sh` (`sh`, macOS and Linux) and
   `scripts/install.ps1` (PowerShell 5.1, Windows): pick the platform, read
-  `LATEST` from the release, download `endeavor-<key>-<platform>` (`.exe` on
-  Windows) and `endeavor-<key>.sha256`, check the SHA-256, and put
+  `main`'s `scripts/release-key` and take the build it pins and its SHA-256
+  (or, when that can't be read or holds no checksums, read `LATEST` from the
+  release and download `endeavor-<key>.sha256`), download
+  `endeavor-<key>-<platform>` (`.exe` on Windows), check the SHA-256, and put
   `endeavor` in `~/.local/bin` (`%LOCALAPPDATA%\Endeavor\bin`), or in the
   folder given by `--dir` / `-Dir` or `ENDEAVOR_INSTALL_DIR`. An existing
   binary is replaced; a Windows one that is running is renamed aside.
   `install.sh` prints the `PATH` line to add and edits no file;
   `install.ps1` adds the folder to the user `PATH` and says so. No `sudo`
   and no administrator rights. `ENDEAVOR_RELEASE_URL` replaces the release's
-  address, for tests.
+  address and `ENDEAVOR_PIN_URL` main's `release-key`, for tests; with only
+  the first set, no pin is read.
 - The Helpers workflow builds `linux-x86_64`, `linux-aarch64`,
   `darwin-x86_64`, `darwin-aarch64` and `windows-x86_64`, and every build gets
   the release's key (`scripts/helpers.sh --key`) in `ENDEAVOR_RELEASE_KEY`.
@@ -834,7 +837,9 @@ The plugin's entry is `endeavor mcp`, found on the `PATH`.
   to `endeavor.exe.old` and the new one put in its place; the next update
   deletes the old one.
 - When the server's platform isn't this computer's, the front fetches
-  `endeavor-<key>-<platform>` from the release, checks it against
+  `endeavor-<key>-<platform>` from the release, checks it against the
+  checksums pinned for `<key>` (the ones the binary carries, else `main`'s
+  `release-key` when it pins that key) or, with none, against
   `endeavor-<key>.sha256` from the same release, and keeps it as
   `<cache>/endeavor/helpers/<key>/<platform>/endeavor` (`~/.cache` by
   default, `%LOCALAPPDATA%\Endeavor\helpers` on Windows; the folders 0700
@@ -1108,12 +1113,20 @@ agents).
   before it calls `sbatch`.
 - The plugins check their download against the SHA-256 that `main`'s
   `release-key` pins for each platform, so a release changed after the pin
-  can't give them a different binary (#98). The rest still trust the release: the helper
-  fetched for a server of another platform is checked against the release's
-  SHA-256 before it is kept, and again each time it is used, and so are the
-  install scripts' downloads and `endeavor update`'s. Those guard against a
-  damaged download and not a tampered release. The app sends its bundled
-  helper unchecked.
+  can't give them a different binary (#98). The install scripts run by hand
+  and `endeavor update` take the build `main` pins and check it the same way
+  (#422); when `main` can't be read they fall back to `LATEST` and the
+  release's own checksum file, and say so.
+- A server's helper is checked against pinned checksums too when there are
+  some for its build. `build.rs` embeds `scripts/release-key` as
+  `embedded::PINNED_SUMS` when its key is the build's own: a build of the pin
+  commit, which Endeavor's `Cargo.lock` usually pins, carries the checksums of
+  the release's binaries for its key (a build can't carry its own, but the
+  release's were built earlier from the same source). Failing that, `main`'s
+  `release-key` is read, and used when it still pins the key. A build that
+  `main` no longer pins and that carries none is checked against the
+  release's checksum file, which catches a damaged download and not a
+  tampered release. The app sends its bundled helper unchecked.
 - A binary published under a key is never replaced: a later run of the same
   key adds only the platforms the release lacks, since builds aren't
   byte-for-byte reproducible and the plugins pin each one's SHA-256.
