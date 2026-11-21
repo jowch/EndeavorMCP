@@ -298,6 +298,27 @@ fn closing_leaves_the_runtime_running_and_ends_everything_else() {
 }
 
 #[test]
+fn a_handed_over_port_goes_to_the_next_session_while_the_old_one_still_closes() {
+    // As when a server's connection settings change: the app closes the old session in a thread of
+    // its own, so it hands the port over first.
+    let place = Place::new("hand-over");
+    let session = place.session();
+    let runtime = ready(session.ensure(start(), LONG, false));
+    // An agent's connection that stays open meanwhile.
+    let held = TcpStream::connect(("127.0.0.1", runtime.port)).unwrap();
+    let mut config = place.config(true, None);
+    config.socket = Some(session.hand_over_port().expect("the socket"));
+    let second = Session::new(config).expect("a session");
+    assert_eq!(second.port(), runtime.port);
+    // The old session's close, after the new one has the port, leaves it alone.
+    std::thread::spawn(move || session.close()).join().unwrap();
+    let again = ready(second.ensure(Want::Attach { install: false }, LONG, false));
+    assert_eq!((again.port, again.pid, again.mcp_url.as_str()), (runtime.port, runtime.pid, runtime.mcp_url.as_str()));
+    assert!(call(again.port, &again.token).contains(r#""result""#), "an agent's call reaches the runtime");
+    drop(held);
+}
+
+#[test]
 fn a_dropped_session_ends_its_thread_helper_and_port_and_stops_nothing() {
     let place = Place::new("drop");
     let session = place.session();

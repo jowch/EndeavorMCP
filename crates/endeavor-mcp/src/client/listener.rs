@@ -64,7 +64,12 @@ pub struct Listener {
     /// How the client asks the user to restart the runtime when the agent calls `request_restart` (`set_restart`).
     restart: OnceLock<Box<AskRestart>>,
     messages: Messages,
+    /// Where the accept loop hands back its socket once it stops (`hand_over`).
+    socket: Mutex<Option<std::sync::mpsc::Receiver<TcpListener>>>,
 }
+
+/// How long `hand_over` waits for the accept loop to stop.
+const STOP: Duration = Duration::from_secs(2);
 
 /// Where a listener's connections go.
 enum Upstream {
@@ -93,7 +98,18 @@ impl Listener {
 
     /// A listener with `refuse` (if any) and its own wording for the messages it gives.
     pub fn new(name: &str, refuse: Option<Refuse>, messages: Messages) -> Result<Arc<Listener>, String> {
-        let socket = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        Listener::on_socket(name, refuse, messages, None)
+    }
+
+    /// As `new`, taking connections on `socket` when there is one: a stopped listener's
+    /// (`hand_over`), so the agents that have its port in their MCP URL reach this one, and a
+    /// connection that waits to be taken is taken here. Without one, on a free port.
+    pub fn on_socket(name: &str, refuse: Option<Refuse>, messages: Messages, socket: Option<TcpListener>) -> Result<Arc<Listener>, String> {
+        let socket = match socket {
+            Some(socket) => socket,
+            None => TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?,
+        };
+        let (hand_back, handed) = std::sync::mpsc::channel();
         let listener = Arc::new(Listener {
             port: socket.local_addr().map_err(|e| e.to_string())?.port(),
             name: name.to_owned(),
@@ -104,14 +120,18 @@ impl Listener {
             snapshot: OnceLock::new(),
             restart: OnceLock::new(),
             messages,
+            socket: Mutex::new(Some(handed)),
         });
         let accepting = listener.clone();
         std::thread::spawn(move || {
             // A failed accept (no file descriptors left, a connection reset before it was taken) doesn't end the listener.
             let mut backoff = Backoff::default();
-            for connection in socket.incoming() {
+            loop {
+                let connection = socket.accept().map(|(connection, _)| connection);
                 if accepting.closed.load(Ordering::SeqCst) {
-                    break;
+                    // The socket goes to whoever stopped this, with the connections that still wait on it.
+                    let _ = hand_back.send(socket);
+                    return;
                 }
                 match connection {
                     Ok(connection) => {
@@ -273,13 +293,22 @@ impl Listener {
 
     /// Stop taking connections and close the port. A connection already relayed goes on until its ends close.
     pub fn close(&self) {
+        drop(self.hand_over());
+    }
+
+    /// Close as `close` does, but keep the socket and give it back, for a new listener to take
+    /// connections on (`on_socket`): the port is never free in between, so nothing else can have it.
+    /// None when the listener was closed already, or its accept loop didn't stop within `STOP`.
+    pub fn hand_over(&self) -> Option<TcpListener> {
         if self.closed.swap(true, Ordering::SeqCst) {
-            return;
+            return None;
         }
         *self.upstream.lock().unwrap() = Upstream::None;
         self.changed.notify_all();
+        let handed = self.socket.lock().unwrap().take()?;
         // The accept loop is woken by a connection of its own.
         let _ = TcpStream::connect(("127.0.0.1", self.port));
+        handed.recv_timeout(STOP).ok()
     }
 
     /// The MCP URL the agent's config carries; the same for the listener's whole life.

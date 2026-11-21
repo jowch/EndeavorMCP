@@ -6,6 +6,7 @@
 //! `Session`, which ends when the session is closed or dropped. Closing
 //! detaches from the helper and never stops the runtime.
 
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -311,6 +312,10 @@ pub struct Config {
     pub julia_when_needed: bool,
     /// Hears the session's events. The default writes each `Trouble` to stderr and drops the steps.
     pub on_event: OnEvent,
+    /// The socket the listener takes connections on: a closed session's (`Session::hand_over_port`),
+    /// so the agents that have its port in their MCP URL reach this session, as when a server's
+    /// connection settings change. None, the default: a free port.
+    pub socket: Option<TcpListener>,
 }
 
 impl Config {
@@ -322,7 +327,7 @@ impl Config {
                 eprintln!("{text}");
             }
         });
-        Config { server, transport, root: String::new(), state: String::new(), depot: String::new(), allow_install: false, messages: Messages::default(), helper: Box::new(helper), launcher: None, auth: Auth::Batch, exit_idle: true, julia_when_needed: false, on_event }
+        Config { server, transport, root: String::new(), state: String::new(), depot: String::new(), allow_install: false, messages: Messages::default(), helper: Box::new(helper), launcher: None, auth: Auth::Batch, exit_idle: true, julia_when_needed: false, on_event, socket: None }
     }
 }
 
@@ -438,9 +443,9 @@ pub struct Session {
 impl Session {
     /// Open the listener and begin connecting to the machine in a thread of its own; nothing is
     /// asked of the runtime until `ensure`.
-    pub fn new(config: Config) -> Result<Session, String> {
+    pub fn new(mut config: Config) -> Result<Session, String> {
         let name = config.server.display_name();
-        let listener = Listener::new(&name, None, config.messages)?;
+        let listener = Listener::on_socket(&name, None, config.messages, config.socket.take())?;
         let (inbox, messages) = mpsc::channel();
         let inner = Inner {
             id: config.server.id.clone(),
@@ -587,9 +592,19 @@ impl Session {
         self.shared.request_install();
     }
 
-    /// The listener's port on this computer, the same for the session's whole life.
+    /// The listener's port on this computer, the same for the session's whole life. A new session can
+    /// have it after this one (`hand_over_port`).
     pub fn port(&self) -> u16 {
         self.shared.listener.port()
+    }
+
+    /// Close the listener now and hand over its socket, for a new session to take connections on
+    /// (`Config::socket`) while `close`, which can wait on a connect being cut short, runs in a thread
+    /// of its own. The port is never free in between, and a connection that comes meanwhile waits for
+    /// the new session. Call `close` next: nothing else is of use after this. None when the listener
+    /// was closed already.
+    pub fn hand_over_port(&self) -> Option<TcpListener> {
+        self.shared.listener.hand_over()
     }
 
     /// Let go of the machine's helper (which leaves the runtime running, and discards what an

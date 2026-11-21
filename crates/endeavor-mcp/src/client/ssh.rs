@@ -790,7 +790,7 @@ fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: 
         Some((format!("{host} isn't one of the servers this computer has connected to before, so Endeavor can't check its identity (host key). Run `{}` once in a terminal and accept its host key, then try again.", transport.login_command()), false))
     } else if said("Host key verification failed") {
         Some((format!("{host}'s identity (host key) wasn't confirmed, so Endeavor didn't connect."), false))
-    } else if said(SIGN_IN_GAVE_UP) {
+    } else if stderr.iter().any(|l| l.trim() == SIGN_IN_GAVE_UP) {
         // Nobody refused anything: the user wasn't there to answer. ssh's own words after it depend
         // on what it asked ("Permission denied" when a key's passphrase went unanswered, a closed
         // connection after a password), so this is said first, and a reconnect tries again either way (#64).
