@@ -510,7 +510,10 @@ class Notebook:
         t, cid = ch["type"], ch.get("cellId")
         if t == "create-cell" and cid not in self.cells:
             self.cells[cid] = new_cell(ch.get("code", ""), ch.get("name", ""))
-            self.cells[cid]["hide_code"] = bool((ch.get("config") or {}).get("hide_code"))
+            config = dict(ch.get("config") or {})
+            self.cells[cid]["hide_code"] = bool(config.get("hide_code"))
+            # Keep the rest (disabled, column) for `save`, as set-config does (#425).
+            self.cells[cid]["config"] = {k: config[k] for k in ("disabled", "column", "expand_output") if k in config}
             if ch.get("after") in self.order:
                 self.order.insert(self.order.index(ch["after"]) + 1, cid)
             elif ch.get("before") in self.order:

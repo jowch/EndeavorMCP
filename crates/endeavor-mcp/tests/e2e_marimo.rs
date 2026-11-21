@@ -204,7 +204,10 @@ async def main(base, session, cookie, token, cell):
             if json.loads(raw).get("op") == "kernel-ready":
                 break
         change = {"type": "set-config", "cellId": cell, "column": None, "disabled": True, "hideCode": False, "expandOutput": False}
-        request = urllib.request.Request(f"http://{base}/marimo/api/document/transaction", data=json.dumps({"changes": [change]}).encode(), method="POST",
+        # A cell made on the page, disabled from the start.
+        created = {"type": "create-cell", "cellId": "Zpge", "code": "z = 1", "name": "_", "after": cell,
+                   "config": {"column": None, "disabled": True, "hide_code": False, "expand_output": False}}
+        request = urllib.request.Request(f"http://{base}/marimo/api/document/transaction", data=json.dumps({"changes": [change, created]}).encode(), method="POST",
                                          headers={"Cookie": cookie, "Content-Type": "application/json", "Marimo-Session-Id": session, "Marimo-Server-Token": token})
         with urllib.request.urlopen(request) as reply:
             print(reply.status, flush=True)
@@ -671,6 +674,7 @@ fn a_python_notebook_through_the_runtime() {
             saved = std::fs::read_to_string(&path).unwrap();
         }
         assert!(saved.contains("x = 6") && saved.contains("@app.cell(disabled=True)\ndef _(x):"), "the agent's edit is saved and the cell stays disabled: {saved}");
+        assert!(saved.contains("@app.cell(disabled=True)\ndef _():\n    z = 1"), "a cell made disabled on the page stays disabled: {saved}");
     });
 
     step("stopping the runtime stops marimo", || {
