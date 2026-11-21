@@ -529,6 +529,13 @@ impl Session {
         Some(channel.files(request))
     }
 
+    /// Try to connect now: end the pause between tries after the connection was lost, or try again a
+    /// connection that failed, as a Try now or Reconnect does. Nothing while it is connected or
+    /// connecting, while it waits for the user's agreement to install the helper, or once it is closed.
+    pub fn retry_now(&self) {
+        self.shared.retry_now();
+    }
+
     /// Whether the helper is connected, which `stop` needs.
     pub fn connected(&self) -> bool {
         self.shared.inner().channel.is_some()
@@ -805,6 +812,20 @@ impl Shared {
         self.with(|i| {
             if matches!(i.state, State::NeedsInstall(_)) && i.channel.is_none() {
                 self.reconnect_now(i);
+            }
+        });
+    }
+
+    fn retry_now(&self) {
+        self.with(|i| {
+            if self.leaving.load(Ordering::SeqCst) || i.channel.is_some() {
+                return;
+            }
+            match i.state {
+                // Waiting between tries (the supervisor may be woken) or connecting (it may not, and `kick` does nothing).
+                State::Connecting => self.kick(i),
+                State::Failed(_) => self.reconnect_now(i),
+                _ => {}
             }
         });
     }
