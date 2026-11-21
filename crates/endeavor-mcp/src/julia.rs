@@ -686,6 +686,8 @@ fn sha256_of(path: &Path) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    // Unix paths; on Windows `processes` lists nothing, so the check never fires.
+    #[cfg(unix)]
     #[test]
     fn a_julia_is_in_use_while_a_process_runs_a_program_from_its_folder() {
         let dir = Path::new("/home/ada/.cache/endeavor/julia-1.12.6");
