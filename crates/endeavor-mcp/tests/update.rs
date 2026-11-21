@@ -59,7 +59,7 @@ fn copy(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let exe = dir.join("endeavor");
-    std::fs::copy(env!("CARGO_BIN_EXE_endeavor"), &exe).unwrap();
+    exec::copy_executable(std::path::Path::new(env!("CARGO_BIN_EXE_endeavor")), &exe);
     exe
 }
 

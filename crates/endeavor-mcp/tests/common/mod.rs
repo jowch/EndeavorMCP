@@ -102,6 +102,9 @@ pub fn state_dir(name: &str) -> PathBuf {
 pub fn install_helper(root: &Path) {
     let dir = root.join(endeavor_mcp::embedded::BUILD_VERSION);
     std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    exec::copy_executable(Path::new(env!("CARGO_BIN_EXE_endeavor")), &dir.join("endeavor"));
+    #[cfg(not(unix))]
     std::fs::copy(env!("CARGO_BIN_EXE_endeavor"), dir.join("endeavor")).unwrap();
     for (path, contents) in endeavor_mcp::embedded::RUNTIME_FILES {
         let file = dir.join(path);

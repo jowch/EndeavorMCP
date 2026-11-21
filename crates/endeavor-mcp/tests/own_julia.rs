@@ -51,7 +51,7 @@ fn home_with_bare_juliaup(name: &str) -> (PathBuf, PathBuf) {
     std::fs::create_dir_all(&bin).unwrap();
     for entry in std::fs::read_dir(given.parent().unwrap()).unwrap() {
         let entry = entry.unwrap();
-        std::fs::copy(entry.path(), bin.join(entry.file_name())).unwrap();
+        exec::copy_executable(&entry.path(), &bin.join(entry.file_name()));
     }
     std::fs::rename(bin.join("juliaup"), bin.join("juliaup.real")).unwrap();
     let juliaup = bin.join("juliaup");
