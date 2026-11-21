@@ -83,6 +83,8 @@ struct FakeNotebook {
     /// An R notebook's snapshot date, and the date of its ready preview of a move.
     package_date: Option<String>,
     previewed: Option<String>,
+    /// Ember's interrupt: a queued cell it drops is marked stale.
+    stale_on_interrupt: bool,
 }
 
 #[derive(Default)]
@@ -116,7 +118,7 @@ struct Engine {
 impl Engine {
     fn open(&self, id: &str, path: &str, cells: &[(&str, &str)]) {
         let cells = cells.iter().map(|(id, code)| FakeCell::new(id, code)).collect();
-        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), reruns_besides: Vec::new(), lazy: false, autorun: false, package_date: None, previewed: None });
+        self.notebooks.lock().unwrap().push(FakeNotebook { id: id.into(), path: path.into(), cells, safe_preview: false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), reruns_besides: Vec::new(), lazy: false, autorun: false, package_date: None, previewed: None, stale_on_interrupt: false });
     }
 
     fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeNotebook) -> T) -> T {
@@ -221,7 +223,7 @@ impl Engine {
                 let listed: Vec<Value> = cells.iter().map(|c| json!({ "cell_id": c.id, "code": c.code })).collect();
                 // A file named for it is in Ember's lazy mode.
                 let lazy = method == "open" && path.contains("lazy");
-                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), reruns_besides: Vec::new(), lazy, autorun: false, package_date: None, previewed: None });
+                notebooks.push(FakeNotebook { id: id.clone(), path: path.clone(), cells, safe_preview: params["run"] == false, exited: None, broken: false, packages: None, starting: false, runs_first: Vec::new(), reruns_besides: Vec::new(), lazy, autorun: false, package_date: None, previewed: None, stale_on_interrupt: false });
                 return Ok(json!({ "notebook_id": id, "path": path, "process_status": "starting", "cells": listed, "lazy": lazy }));
             }
             _ => {}
@@ -561,7 +563,9 @@ impl Engine {
                     return Ok(json!({ "interrupted": true, "pending": true }));
                 }
                 let busy = nb.cells.iter().any(|c| c.running);
+                let stale = nb.stale_on_interrupt;
                 for cell in nb.cells.iter_mut() {
+                    cell.stale |= stale && cell.queued;
                     cell.queued = false;
                     if cell.running && !cell.code.contains("stubborn()") {
                         (cell.running, cell.errored, cell.output, cell.prompt) = (false, true, "InterruptException".into(), None);
@@ -3686,6 +3690,16 @@ fn interrupt_notebook_stops_the_run_and_says_what_it_stopped() {
     assert_eq!(interrupts(), 1);
     let read = s.call("7", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
     assert_eq!((&read["running"], &read["errored"]), (&json!(false), &json!(true)));
+
+    // An engine that marks a dropped cell stale (Ember's): it is named, since it keeps the earlier run's output (#260).
+    s.engine.with(NB, |nb| {
+        (nb.cells[0].running, nb.cells[1].queued) = (true, true);
+        nb.stale_on_interrupt = true;
+    });
+    let stale = interrupt();
+    assert_eq!((&stale["dropped"], &stale["stale_cells"]), (&json!([Y]), &json!([Y])), "{stale}");
+    assert!(stale["message"].as_str().unwrap().contains("earlier run's output"), "{stale}");
+    s.engine.with(NB, |nb| nb.stale_on_interrupt = false);
 
     // A cell that doesn't stop within the call is named, with what to do.
     s.engine.with(NB, |nb| nb.cells[2].running = true);

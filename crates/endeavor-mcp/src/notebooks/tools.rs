@@ -1718,6 +1718,16 @@ impl Call<'_> {
             );
         } else if now.process_status != nb.process_status && now.process_status == "no_process" {
             result["message"] = json!("A cell didn't stop, so the notebook's process was ended. Its values are gone: the next run starts a new process.");
+        } else {
+            // An R notebook marks stale the cells the run didn't get to, a dependent of a stopped cell
+            // among them, and they keep the earlier run's output, which an agent would otherwise take for
+            // this run's (#260). Ember needn't have shown them queued, so this is every stale cell, as a
+            // lazy-mode run lists them.
+            let stale: Vec<&String> = now.order.iter().filter(|id| now.cells.get(*id).is_some_and(|c| c.stale && !c.running && !c.queued && !c.hidden && !c.off)).collect();
+            if !stale.is_empty() {
+                result["message"] = json!("The cells in `stale_cells` didn't run: they still show an earlier run's output and are marked stale. Run them when they should be current.");
+                result["stale_cells"] = json!(stale);
+            }
         }
         Ok(result)
     }
