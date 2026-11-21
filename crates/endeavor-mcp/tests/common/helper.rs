@@ -103,7 +103,7 @@ impl Helper {
     /// Ask for a stop, forced or not: the request's id.
     pub fn request_stop_as(&self, force: bool) -> u32 {
         let id = self.ids.fetch_add(1, Ordering::Relaxed);
-        self.send(ToHelper::Stop { id, force });
+        self.send(ToHelper::Stop { id, force, unless_shared: false });
         id
     }
 

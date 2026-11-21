@@ -737,7 +737,7 @@ fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
         .env("XDG_CACHE_HOME", work.join("cache"))
         .env("XDG_STATE_HOME", work.join("state-home"))
         .env("XDG_CONFIG_HOME", work.join("config"));
-    let helper = Helper::spawn(command);
+    let mut helper = Helper::spawn(command);
     helper.hello();
     helper.request_start(None, false);
     let token = step("the app's runtime starts without Julia", || loop {
@@ -753,7 +753,9 @@ fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
         socket.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
         write!(
             socket,
-            "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nX-Endeavor-Session: {client}-1\r\nX-Endeavor-Client: {client}\r\nContent-Length: {}\r\n\r\n{body}",
+            // The plugin's front says which process it is: this test's, which runs throughout (app #232).
+            "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nX-Endeavor-Session: {client}-1\r\nX-Endeavor-Client: {client}\r\n{}Content-Length: {}\r\n\r\n{body}",
+            if client == "plugin" { format!("X-Endeavor-Front-Pid: {}\r\n", std::process::id()) } else { String::new() },
             body.len()
         )
         .unwrap();
@@ -769,12 +771,30 @@ fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
         let (failed, text) = call("app", "open_notebook", json!({ "path": path }));
         assert!(failed && text.contains("not yet in the Endeavor app"), "{text}");
     });
-    step("the plugin's session opens it there", || {
+    let notebook = step("the plugin's session opens it there", || {
         let (failed, text) = call("plugin", "open_notebook", json!({ "path": path }));
         assert!(!failed, "{text}");
         let opened: Value = serde_json::from_str(&text).unwrap();
         assert!(opened["notebook_id"].is_string(), "{opened}");
         let (failed, text) = call("plugin", "get_cell_order", json!({ "notebook_id": opened["notebook_id"] }));
         assert!(!failed && text.contains("cell_ids"), "marimo answers through the app's core: {text}");
+        opened["notebook_id"].as_str().unwrap().to_owned()
+    });
+    step("the app quits with Keep running off, and the runtime stays for the plugin until it is idle", || {
+        let pid = recorded_pid(&state).unwrap();
+        helper.send(wire::ToHelper::Stop { id: 9, force: false, unless_shared: true });
+        helper.exits();
+        // SAFETY: signal 0 only checks that the process exists.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the runtime still runs");
+        let record: Value = serde_json::from_str(&std::fs::read_to_string(state.join("runtime.json")).unwrap()).unwrap();
+        assert_eq!((record["pid"].as_i64(), &record["exits_when_idle"]), (Some(i64::from(pid)), &json!(true)), "{record}");
+        let port = record["port"].as_u64().unwrap() as u16;
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "get_cell_order", "arguments": { "notebook_id": notebook } } }).to_string();
+        let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        write!(socket, "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nX-Endeavor-Session: plugin-1\r\nX-Endeavor-Client: plugin\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut reply = String::new();
+        socket.read_to_string(&mut reply).unwrap();
+        assert!(reply.contains("cell_ids"), "the plugin's notebook is still open: {reply}");
     });
 }

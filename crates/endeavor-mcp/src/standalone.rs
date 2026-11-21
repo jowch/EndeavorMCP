@@ -1431,6 +1431,8 @@ impl Relay {
         if self.options.skills_plugin {
             head.push_str("X-Endeavor-Skills: plugin\r\n");
         }
+        // This front's process, so the runtime can tell while it lives (`mcp::Front`, app #232).
+        head.push_str(&crate::mcp::Front::own().header());
         // A client that draws views (Claude's desktop app) serves all its conversations on this one
         // connection, so its session may work on several notebooks (`Notebooks::refusal`).
         if self.views.load(std::sync::atomic::Ordering::SeqCst) {

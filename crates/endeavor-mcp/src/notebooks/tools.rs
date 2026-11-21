@@ -127,7 +127,7 @@ impl Notebooks {
         if let Value::Object(fields) = &mut status {
             let hours = self.idle_limit_hours();
             fields.insert("idle_stop_hours".into(), if hours.is_finite() && hours > 0.0 { hours } else { 0.0 }.into());
-            fields.insert("exits_when_idle".into(), self.exits_when_idle.into());
+            fields.insert("exits_when_idle".into(), self.exits_when_idle.load(std::sync::atomic::Ordering::SeqCst).into());
         }
         Ok(status)
     }

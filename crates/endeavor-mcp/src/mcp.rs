@@ -69,7 +69,7 @@ pub(crate) fn current_name(name: &str) -> &str {
 /// the runtime, allowing Endeavor's own Julia to be downloaded when the runtime finds none as Julia
 /// is first needed, or its own R to be installed on a Mac when no R is found, where Julia is,
 /// starting it now (the app's Retry), and where R notebooks' setup is.
-const JULIA_CALLS: [&str; 7] = ["endeavor/set_folder", "endeavor/shutdown", "endeavor/allow_julia_install", "endeavor/allow_r_install", "endeavor/julia_status", "endeavor/start_julia", "endeavor/r_status"];
+const JULIA_CALLS: [&str; 8] = ["endeavor/set_folder", "endeavor/shutdown", "endeavor/allow_julia_install", "endeavor/allow_r_install", "endeavor/julia_status", "endeavor/start_julia", "endeavor/r_status", "endeavor/leave_to_plugin"];
 
 /// Whether a runtime offers a tool by this name, to some session, the old name of a renamed tool
 /// included (a past session's calls use it). The machine tools are the front's.
@@ -281,6 +281,49 @@ pub struct Caller {
     /// not a check: it stops an agent's own yes, since a model can't add headers to its client's
     /// requests, not a client configured to send one. No text an agent reads names them.
     pub consent: bool,
+    /// The front's own process (`X-Endeavor-Front-*`), which the runtime checks is still running to tell
+    /// whether the plugin is still in it when the app quits (`Notebooks::shared`, app #232).
+    pub front_process: Option<Front>,
+}
+
+/// A front's process on this computer: its pid, when it started and in which boot, as `pid_alive`
+/// takes them, so a later process given the same pid isn't taken for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Front {
+    pub pid: i32,
+    pub started: Option<u64>,
+    pub boot: Option<String>,
+}
+
+impl Front {
+    /// This process.
+    pub fn own() -> Front {
+        Front { pid: std::process::id() as i32, started: crate::own_start_time(), boot: crate::own_boot() }
+    }
+
+    /// The headers a front sends with each message.
+    pub fn header(&self) -> String {
+        let mut head = format!("X-Endeavor-Front-Pid: {}\r\n", self.pid);
+        if let Some(started) = self.started {
+            head.push_str(&format!("X-Endeavor-Front-Started: {started}\r\n"));
+        }
+        if let Some(boot) = self.boot.as_deref().and_then(clean_label) {
+            head.push_str(&format!("X-Endeavor-Front-Boot: {boot}\r\n"));
+        }
+        head
+    }
+
+    fn of(request: &Head) -> Option<Front> {
+        let pid = request.header("X-Endeavor-Front-Pid")?.trim().parse().ok().filter(|&pid: &i32| pid > 0)?;
+        let started = request.header("X-Endeavor-Front-Started").and_then(|t| t.trim().parse().ok());
+        let boot = request.header("X-Endeavor-Front-Boot").map(|b| b.trim().to_owned()).filter(|b| !b.is_empty());
+        Some(Front { pid, started, boot })
+    }
+
+    /// Whether that process still runs.
+    pub fn alive(&self) -> bool {
+        crate::pid_alive(self.pid, self.started, self.boot.as_deref())
+    }
 }
 
 /// `approve_install`'s description, where the agent's call is the user's yes: the agent asks in the
@@ -321,7 +364,7 @@ impl Caller {
             _ => app_runtime,
         };
         let consent = header("X-Endeavor-Consent") == "front" || header("X-Endeavor-Client") == "app";
-        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false, several, app, consent }
+        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false, several, app, consent, front_process: Front::of(request) }
     }
 
     /// No one asks the user before this caller's `approve_install`: not the app (its card), not a
@@ -636,7 +679,7 @@ impl Bridge {
                 return tool_error(&why, help && !says_what_to_do);
             }
         }
-        self.notebooks.note_call(&caller.owner);
+        self.notebooks.note_call(&caller.owner, caller.app, caller.front_process.as_ref());
         if caller.several {
             self.notebooks.allow_several(&caller.owner);
         }
@@ -1459,7 +1502,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (44, "83a03363ad0d42c5"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (45, "83a03363ad0d42c5"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1502,11 +1545,11 @@ mod tests {
         // caught here; that stays the author's to judge.
         let calls: Vec<String> = quoted_names(code(include_str!("mcp.rs")), "endeavor/").iter().map(|call| call["endeavor/".len()..].to_owned()).collect();
         let calls_then = [
-            "allow_julia_install", "allow_r_install", "answer_run", "file_info", "julia_status", "move_notebook", "new_notebook", "r_status", "recent_sessions", "restart_notebook", "restore_cells", "run_preview", "set_folder",
+            "allow_julia_install", "allow_r_install", "answer_run", "file_info", "julia_status", "leave_to_plugin", "move_notebook", "new_notebook", "r_status", "recent_sessions", "restart_notebook", "restore_cells", "run_preview", "set_folder",
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (44, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (45, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

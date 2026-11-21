@@ -456,7 +456,7 @@ impl Channel {
         leaving.fetch_add(1, Ordering::SeqCst);
         let id = self.request_id();
         let (answer, _registered) = self.register(id, Some(leaving.clone()), false);
-        if self.mux.send(&ToHelper::Stop { id, force }.frame()).is_err() {
+        if self.mux.send(&ToHelper::Stop { id, force, unless_shared: false }.frame()).is_err() {
             return Err(CLOSED.into());
         }
         let answered = match answer.recv_timeout(STOP_WAIT) {
@@ -511,8 +511,9 @@ impl Channel {
         (!self.left.load(Ordering::SeqCst)).then(|| Notice::Lost("The connection closed unexpectedly.".into()))
     }
 
-    /// The client is quitting: leave Julia running, or stop it. The helper does
-    /// the rest after the client has gone.
+    /// The client is quitting: leave Julia running, or stop it, unless the
+    /// plugin works in it too (`ToHelper::Stop`'s `unless_shared`, app #232). The
+    /// helper does the rest after the client has gone.
     pub fn quit(&self, keep_running: bool) {
         self.leave();
         self.left.store(true, Ordering::SeqCst);
@@ -521,7 +522,7 @@ impl Channel {
             return;
         }
         // A start that may be under way ends with its own answer; the stop's is dropped.
-        let _ = self.mux.send(&ToHelper::Stop { id: self.request_id(), force: false }.frame());
+        let _ = self.mux.send(&ToHelper::Stop { id: self.request_id(), force: false, unless_shared: true }.frame());
     }
 }
 

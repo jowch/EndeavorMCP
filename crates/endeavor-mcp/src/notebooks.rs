@@ -259,10 +259,19 @@ struct Seen {
     last_call: Option<f64>,
     /// When the record was made.
     since: f64,
+    /// Whether its last call came from the app (`mcp::Caller::app`), or from the plugin.
+    app: bool,
+    /// The front process it last called through, where the front said (`mcp::Front`).
+    front: Option<crate::mcp::Front>,
 }
 
 /// How long a session's record outlasts its last call.
 const SESSION_KEPT: f64 = 7.0 * 24.0 * 3600.0;
+
+/// How recently a plugin session whose front didn't say which process it is must have called to count
+/// as still in the runtime (`Notebooks::shared`): a front from before `mcp::Front`, or a client
+/// connected straight to `serve`.
+const SHARED_WITHOUT_FRONT: f64 = 30.0 * 60.0;
 
 impl State {
     /// A session's record, made now if it has none. Old records go when a new one is made.
@@ -270,7 +279,7 @@ impl State {
         if !self.seen.contains_key(owner) {
             self.forget_old(now);
         }
-        self.seen.entry(owner.to_owned()).or_insert(Seen { last_call: None, since: now })
+        self.seen.entry(owner.to_owned()).or_insert(Seen { last_call: None, since: now, app: false, front: None })
     }
 
     /// A session is bound or opens a notebook: its record is kept from now on, whether it was old or not.
@@ -325,7 +334,8 @@ pub struct Notebooks {
     /// The app build this runtime came from, which the app compares with its own.
     pub build: OnceLock<String>,
     /// Whether the runtime ends itself once no notebook has been open for the idle limit (`core::exit_when_idle`).
-    pub exits_when_idle: bool,
+    /// It can be switched on later, when the app quits and leaves the runtime to the plugin (`core::leave_to_plugin`).
+    pub exits_when_idle: std::sync::atomic::AtomicBool,
     /// Runs waiting for the user's answer.
     pub asks: Asks,
     /// Each agent session's notebook kind, when its client said it (`endeavor/set_session_folder`'s
@@ -641,7 +651,7 @@ impl Notebooks {
             publishing: Mutex::default(),
             events: Mutex::default(),
             build: OnceLock::new(),
-            exits_when_idle: false,
+            exits_when_idle: Default::default(),
             kinds: Mutex::default(),
             auto: Mutex::default(),
             openings: Mutex::default(),
@@ -1181,13 +1191,36 @@ impl Notebooks {
         Some(hasher.finish())
     }
 
-    pub fn note_call(&self, owner: &str) {
+    /// A session's tool call: from the app (`app`) or the plugin, through the front `front` where it said.
+    pub fn note_call(&self, owner: &str, app: bool, front: Option<&crate::mcp::Front>) {
         if owner.is_empty() {
             return;
         }
         let now = self.now();
         let mut state = self.state.lock().unwrap();
-        state.record(owner, now).last_call = Some(now);
+        let seen = state.record(owner, now);
+        seen.last_call = Some(now);
+        seen.app = app;
+        if front.is_some() {
+            seen.front = front.cloned();
+        }
+    }
+
+    /// Whether the plugin is in this runtime: a session of its works in a notebook that is open, and
+    /// its front still runs (`mcp::Front::alive`), or, for a front that didn't say which process it
+    /// is, it called within `SHARED_WITHOUT_FRONT` seconds (app #232). `alive` checks a front.
+    pub fn shared(&self, alive: &dyn Fn(&crate::mcp::Front) -> bool) -> bool {
+        let Ok(snapshots) = self.snapshots() else { return false };
+        let open: Vec<String> = snapshots.into_iter().map(|nb| canonical_path(&nb.path).unwrap_or(nb.path)).collect();
+        let now = self.now();
+        let state = self.state.lock().unwrap();
+        state.bindings.iter().filter(|(_, path)| open.contains(path)).filter_map(|(session, _)| state.seen.get(session)).any(|seen| {
+            !seen.app
+                && match &seen.front {
+                    Some(front) => alive(front),
+                    None => seen.last_call.is_some_and(|last| now - last <= SHARED_WITHOUT_FRONT),
+                }
+        })
     }
 
     /// The sessions other than `owner` that work in a notebook that is open and made a

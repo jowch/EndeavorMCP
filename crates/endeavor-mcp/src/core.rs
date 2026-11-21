@@ -51,7 +51,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// missing, doesn't count (`network`); nor do descriptions and changes inside the core. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 44;
+pub const INTERFACE: u32 = 45;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -208,10 +208,10 @@ pub fn main(argv: &[String]) -> ! {
     if let Some(hours) = idle_hours {
         bridge.notebooks.set_idle_limit(hours);
     }
-    Arc::get_mut(&mut bridge.notebooks).expect("nothing else holds the notebooks yet").exits_when_idle = exit_idle;
+    bridge.notebooks.exits_when_idle.store(exit_idle, std::sync::atomic::Ordering::SeqCst);
     let not_let_in = not_let_in(&open_command(&args.state_dir));
     let allow_r_install = Arc::new(std::sync::atomic::AtomicBool::new(args.install_r));
-    let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone(), r: OnceLock::new(), marimo: Default::default() });
+    let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone(), r: OnceLock::new(), marimo: Default::default(), state_dir: args.state_dir.clone() });
     #[cfg(unix)]
     pass_on_stop_signals(stop_signals, served.clone());
     let r = RStarter::new(&args, &engine_token, allow_r_install);
@@ -329,7 +329,7 @@ fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge, page_tok
     let boot = crate::own_boot();
     let mut state = json!({
         "launcher": launcher, "node": crate::hostname(), "job": job,
-        "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": bridge.token, "page_token": page_token, "exits_when_idle": bridge.notebooks.exits_when_idle,
+        "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": bridge.token, "page_token": page_token, "exits_when_idle": bridge.notebooks.exits_when_idle.load(std::sync::atomic::Ordering::SeqCst),
         "interface": INTERFACE, "network": crate::network_settings(),
     });
     if let Some(standalone) = &bridge.standalone {
@@ -1647,6 +1647,32 @@ fn warm_for(served: &Arc<Served>, folder: &str, kind: &str) {
     });
 }
 
+/// The app is quitting and would stop this runtime (`endeavor/leave_to_plugin`, app #232): if the plugin
+/// is in it (`Notebooks::shared`), it is left running for the plugin, and from now on ends itself once no
+/// notebook has been open for the idle limit, as a runtime the plugin starts does. So it ends even if
+/// the plugin goes without saying: its notebooks stop after the idle limit, then the runtime. Whether it
+/// was left; if not, the app stops it as before. `alive` checks a front's process.
+fn leave_to_plugin(served: &Arc<Served>, alive: &dyn Fn(&crate::mcp::Front) -> bool) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    if !served.bridge.notebooks.shared(alive) {
+        return false;
+    }
+    if !served.bridge.notebooks.exits_when_idle.swap(true, SeqCst) {
+        eprintln!("[ Info: The app quit while the plugin works in this runtime; leaving it running until it is idle");
+        let path = served.state_dir.join("runtime.json");
+        if let Some(mut state) = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            && state["pid"].as_u64() == Some(u64::from(std::process::id()))
+        {
+            state["exits_when_idle"] = true.into();
+            if let Err(e) = write_private(&path, state.to_string().as_bytes()) {
+                eprintln!("[ Warning: {e}");
+            }
+        }
+        exit_when_idle(served.clone());
+    }
+    true
+}
+
 /// End the runtime once no notebook has been open for the idle limit (none
 /// when it's 0): a runtime the stdio form or a server connection started in the
 /// background has no one to stop it.
@@ -1790,6 +1816,8 @@ struct Served {
     cookie: String,
     /// What a browser that hasn't been let in sees (`not_let_in`).
     not_let_in: String,
+    /// The state folder, whose `runtime.json` this core wrote (`record`).
+    state_dir: PathBuf,
 }
 
 impl Served {
@@ -1834,6 +1862,7 @@ impl Served {
             }
             "endeavor/allow_julia_install" => self.julia.install.store(true, std::sync::atomic::Ordering::SeqCst),
             "endeavor/allow_r_install" => self.allow_r_install.store(true, std::sync::atomic::Ordering::SeqCst),
+            "endeavor/leave_to_plugin" => result = json!({ "left": leave_to_plugin(self, &|front| front.alive()) }),
             _ => {}
         }
         json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }).to_string()
@@ -2730,7 +2759,15 @@ mod tests {
         let (stops, _) = std::sync::mpsc::channel();
         let argv = ["--state-dir", "/nonexistent", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent/runtime", "--depot", "/nonexistent/depot"].map(String::from);
         let julia = JuliaStarter::new(&parse_args(&argv).unwrap(), TOKEN, "process", stops.clone());
-        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), "e".into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default(), r: OnceLock::new(), marimo: Default::default() })
+        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), "e".into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default(), r: OnceLock::new(), marimo: Default::default(), state_dir: PathBuf::from("/nonexistent") })
+    }
+
+    #[test]
+    fn the_app_quitting_stops_a_runtime_the_plugin_is_not_in() {
+        // `Notebooks::shared` is tested with notebooks; with none open the runtime is the app's to stop (app #232).
+        let served = stand_in();
+        assert!(!leave_to_plugin(&served, &|_| true));
+        assert!(!served.bridge.notebooks.exits_when_idle.load(std::sync::atomic::Ordering::SeqCst), "it isn't switched to end when idle");
     }
 
     /// The runtime's port with a stand-in Ember on `ember` (none: not running), and its address.
