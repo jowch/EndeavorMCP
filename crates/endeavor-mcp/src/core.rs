@@ -1660,11 +1660,13 @@ fn leave_to_plugin(served: &Arc<Served>, alive: Arc<dyn Fn(&crate::mcp::Front) -
     let mut left = served.left.lock().unwrap();
     if left.is_none() {
         eprintln!("[ Info: The app quit while the plugin works in this runtime; leaving it running for the plugin");
-        let generation = served.left_generation.fetch_add(1, SeqCst) + 1;
         *left = Some(served.bridge.notebooks.exits_when_idle.swap(true, SeqCst));
         rewrite_exits_when_idle(served, true);
-        watch_left(served.clone(), generation, alive);
     }
+    // A new watch even if it was left already: one an earlier app left running (`end_when_idle`) and didn't
+    // get back yet has only the idle exit, which never ends it with the limit Never.
+    let generation = served.left_generation.fetch_add(1, SeqCst) + 1;
+    watch_left(served.clone(), generation, alive);
     true
 }
 

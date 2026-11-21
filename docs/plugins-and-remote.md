@@ -503,10 +503,11 @@ the app opens again and its helper reattaches, the helper calls
 of another build takes it for the plugin's own and stops it. Otherwise the
 runtime stops as before (app #232).
 
-With Keep running on, the app's quit is a Detach, and a killed app's input
-just ends. The app starts this computer's helper with
-`--exit-idle-after-client`, so in both cases the helper calls
-`endeavor/end_when_idle` before it exits. From then on the core ends once no
+The app starts this computer's helper with `--exit-idle-after-client`. When
+the app goes and its helper leaves the runtime running, the helper calls
+`endeavor/end_when_idle` before it exits. That is a quit with Keep running on
+(a Detach), and a killed app whose helper has nothing to stop: Keep running
+on, or Keep running off with a runtime the helper didn't start. From then on the core ends once no
 notebook has been open for the idle limit, as a runtime started in the
 background does, and it is marked as ending when idle in `runtime.json`.
 Without this, a runtime the app left running never ended. `keep_for_app` undoes it when the app is
