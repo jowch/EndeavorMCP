@@ -1776,6 +1776,21 @@ fn a_stop_signal_to_the_core_stops_julia() {
 }
 
 #[test]
+fn a_stop_signal_julia_goes_on_through_is_followed_by_a_shutdown_and_then_a_kill() {
+    // Julia with notebooks open didn't end on SIGTERM, so the core didn't either (#316).
+    let dir = state_dir("core-stop-deaf");
+    std::fs::write(dir.join("deaf"), "").unwrap();
+    let bridge = FakeBridge::start(&dir);
+    let mut core = Core::start_with_env(&dir, &bridge, &[("ENDEAVOR_TEST_STOP_GRACE_SECS", "0.5")]);
+    // SAFETY: plain syscall.
+    unsafe { libc::kill(core.process.id() as i32, libc::SIGTERM) };
+    assert_eq!(core.exits().signal(), Some(libc::SIGKILL), "it ends the way Julia did");
+    assert!(!pid_alive(core.julia_pid));
+    assert!(bridge.seen().iter().any(|s| String::from_utf8_lossy(&s.body).contains("endeavor/shutdown")), "it asked Julia to shut down first");
+    assert!(!dir.join("runtime.json").exists());
+}
+
+#[test]
 fn a_script_written_while_other_threads_start_processes_can_be_run_at_once() {
     let dir = state_dir("core-write-executable");
     let stop = std::sync::atomic::AtomicBool::new(false);

@@ -68,6 +68,8 @@ echo "booting"
 while [ -e "{dir}/hold" ]; do sleep 0.1; done
 printf '{{"launcher":"%s","node":"%s","pid":%s,"pluto_port":{pluto},"mcp_port":{mcp},"pluto_secret":"{PLUTO_SECRET}","job":"%s"}}' "$ENDEAVOR_LAUNCHER" "$(hostname)" $$ "$SLURM_JOB_ID" > "$ENDEAVOR_STATE.tmp"
 mv "$ENDEAVOR_STATE.tmp" "$ENDEAVOR_STATE"
+# A Julia that a stop signal doesn't end, as one with notebooks open can be (#316).
+[ -e "{dir}/deaf" ] && trap '' TERM INT HUP
 exec sleep 600
 "#,
         dir = dir.display(),
