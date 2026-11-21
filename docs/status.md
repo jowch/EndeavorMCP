@@ -408,7 +408,10 @@ Next:
   goes by the caller, so a plugin session that shares the app's runtime on this
   computer opens them, and an app session on the plugin's runtime doesn't (#358). In safe preview an
   edit is written with marimo's own save and no session, so nothing runs or installs, and when the
-  notebook goes live the cells marimo loads are given the ids the preview handed out (#351). Not on
+  notebook goes live the cells marimo loads are given the ids the preview handed out (#351). A file
+  written by hand is saved once in marimo's own form when it goes live (a heading's
+  `mo.md("...")` becomes triple-quoted), so marimo pairs its cells by code when the file changes
+  (#442); that save shows as a diff with no edit. Not on
   Windows. Known gaps: no tool moves
   the package date (#352), ids shift after a reload (#353), `set_input` and
   `view_cell_output` of HTML aren't there, and uv isn't installed for the user
