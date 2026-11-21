@@ -3984,3 +3984,13 @@ fn a_yes_covers_the_packages_the_user_saw_that_the_call_names() {
     assert_eq!(seen_packages(Some(&json!(["Example"])), &seen), json!([]));
     assert_eq!(seen_packages(Some(&json!("CSV")), &seen), seen, "not a list: ignored");
 }
+
+#[test]
+fn an_idle_limit_reads_in_hours_or_under_an_hour_in_minutes() {
+    assert_eq!(super::idle_span(48.0), "48 hours");
+    assert_eq!(super::idle_span(1.0), "1 hour");
+    assert_eq!(super::idle_span(2.5), "2 hours", "rounded as Julia rounds");
+    assert_eq!(super::idle_span(60.0 / 3600.0), "1 minute");
+    assert_eq!(super::idle_span(0.5), "30 minutes");
+    assert_eq!(super::idle_span(0.0001), "1 minute", "never 0");
+}
