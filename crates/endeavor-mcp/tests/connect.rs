@@ -1082,6 +1082,10 @@ fn the_helpers_check_says_a_start_is_under_way_beside_a_hung_runtime_and_not_aft
     let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("starting.lock")).unwrap();
     lock.lock().unwrap();
     assert_eq!(check(&helper, 2), RuntimeState::Starting, "its replacement is on the way");
+    // Unlocked, not only closed: a child another test spawns at this moment holds a copy of the
+    // descriptor until it execs, and a flock lasts until every copy is closed, but an unlock ends it for
+    // all of them (#212).
+    lock.unlock().unwrap();
     drop(lock);
     assert_eq!(check(&helper, 3), RuntimeState::NotRunning);
     assert!(runtime.alive());
