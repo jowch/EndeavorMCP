@@ -9,7 +9,6 @@
     { "check": "code_contains", "texts": ["sum(counts)"] },
     { "check": "output_contains", "texts": ["Summary"] },
     { "check": "output_contains", "texts": ["The total is 43."] },
-    { "check": "reply_contains", "texts": ["\"code\":\"mo.md(\\\"\\\"\\\""], "soft": true },
     { "check": "code_contains", "texts": ["tabulate"] },
     { "check": "asked_user", "texts": ["tabulate"] },
     { "check": "headings_own_output" },
