@@ -15,6 +15,12 @@ app = marimo.App()
 
 
 @app.cell
+def _(mo):
+    mo.md("## Setup")
+    return
+
+
+@app.cell
 def _():
     import marimo as mo
     return (mo,)
@@ -30,6 +36,18 @@ def _(mo):
 def _():
     counts = [12, 7, 9, 15]
     return (counts,)
+
+
+@app.cell
+def _(mo):
+    mo.md("## Data Checks")
+    return
+
+
+@app.cell
+def _(counts):
+    f"All counts positive: {min(counts) > 0}"
+    return
 
 
 @app.cell

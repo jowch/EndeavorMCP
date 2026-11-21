@@ -322,8 +322,9 @@ class Notebook:
         self.order, self.cells = [], {}
         for cid in manager.cell_ids():
             data = manager.get_cell_data(cid)
-            cell = old.get(cid) or new_cell(data.code, data.name)
-            cell["code"], cell["name"] = data.code, data.name
+            code = file_form(data.code)
+            cell = old.get(cid) or new_cell(code, data.name)
+            cell["code"], cell["name"] = code, data.name
             cell["hide_code"] = bool(data.config.hide_code)
             # The rest of the cell's config (disabled, column), for writing an edit back.
             cell["config"] = data.config.asdict()
@@ -377,13 +378,30 @@ class Notebook:
         # then never sees it, and its next save puts back what it had.
         self.watcher = f"endeavor-watch-{secrets.token_hex(6)}"
         self.ws = await websockets.connect(f"{url}?session_id={self.watcher}&kiosk=true&{query}", max_size=None)
+        # The watch's own kernel-ready, taken here and not in `follow`, where it would come after `reform` and put
+        # back the code as the file had it.
+        try:
+            while True:
+                first = json.loads(await asyncio.wait_for(self.ws.recv(), 30))
+                if first.get("op") == "kernel-ready":
+                    msg = {**first, "data": {**first["data"], "resumed": msg["data"].get("resumed")}}
+                    break
+        except asyncio.TimeoutError:
+            pass
         # Copies: kernel_ready reuses a cell's dict under the same id, and writes marimo's code into it.
         preview = [(c, dict(self.cells[c])) for c in self.order] if self.edited_in_preview else None
-        self.kernel_ready(msg["data"])
+        # A new session's cells come from the file as written, which may not be how marimo's file writes them
+        # (a hand-written `mo.md("## A")`). Its first save would then make the file and the session differ, and a
+        # change to the file under marimo (a package install) has marimo pair them by similar code, which can give
+        # headings each other's code (#442, as #431 for the agent's own cells). So they take the file's form now,
+        # before anything runs. A resumed session keeps its code: its cells may have run.
+        reformed = self.kernel_ready(msg["data"], reform=not msg["data"].get("resumed"))
         self.live = True
         self.watch = asyncio.create_task(self.follow())
         if preview:
             await self.rekey(preview)
+        if reformed:
+            await self.reform(reformed)
 
     async def rekey(self, preview):
         """Give marimo's session the cell ids safe preview handed out.
@@ -428,16 +446,33 @@ class Notebook:
             print(f"endeavor marimo: kept marimo's cell ids for {self.path}: {e}", file=sys.stderr)
             self.adapter.notify("topology_changed", notebook_id=self.id)
 
-    def kernel_ready(self, d):
+    async def reform(self, cells):
+        """Give marimo's session the code `kernel_ready` kept in file form for `cells`, and save, so the session and
+        the file agree. The meaning is the same (`file_form`), and nothing has run."""
+        changes = [{"type": "set-code", "cellId": c, "code": self.cells[c]["code"]} for c in cells if c in self.cells]
+        try:
+            await self.m.post("/api/document/transaction", self.watcher, {"changes": changes})
+            await self.adapter.save(self, self.watcher)
+        except Exception as e:  # noqa: BLE001 - the notebook is live either way; only the file's form differs
+            print(f"endeavor marimo: kept the file's form of {len(changes)} cells of {self.path}: {e}", file=sys.stderr)
+
+    def kernel_ready(self, d, reform=False):
+        """Take marimo's cells. With `reform`, each cell's code is kept in the form marimo's file gives it back
+        (`file_form`), and the cells whose code that changes are returned, for marimo's session to take too."""
         old = self.cells
         self.order, self.cells = [], {}
+        reformed = []
         for i, cid in enumerate(d["cell_ids"]):
-            cell = old.get(cid) or new_cell(d["codes"][i], d["names"][i])
-            cell["code"], cell["name"] = d["codes"][i], d["names"][i]
+            code = file_form(d["codes"][i]) if reform else d["codes"][i]
+            if code != d["codes"][i]:
+                reformed.append(cid)
+            cell = old.get(cid) or new_cell(code, d["names"][i])
+            cell["code"], cell["name"] = code, d["names"][i]
             config = (d.get("configs") or [{}] * len(d["cell_ids"]))[i] or {}
             cell["hide_code"] = bool(config.get("hide_code"))
             self.order.append(cid)
             self.cells[cid] = cell
+        return reformed
 
     async def follow(self):
         try:
@@ -536,20 +571,24 @@ class Notebook:
         if console:
             c["console"] += console if isinstance(console, list) else [console]
 
+    def error_data(self, cid):
+        """The errors marimo reported for the cell's last output, as a list."""
+        out = self.cells.get(cid, {}).get("output") or {}
+        return out.get("data") if isinstance(out.get("data"), list) else []
+
     def raised_by_awaiting(self, cid):
         """Whether the cell failed only because an ancestor did, and that ancestor waits for its package."""
-        out = self.cells[cid].get("output") or {}
-        raised = [e.get("raising_cell") for e in (out.get("data") if isinstance(out.get("data"), list) else [])]
+        raised = [e.get("raising_cell") for e in self.error_data(cid)]
         return bool(raised) and all(r in self.cells and self.cells[r].get("awaiting_install") for r in raised)
 
-    def missing_modules(self, cells):
-        """The modules the cells failed to import, which nobody tried to install yet."""
+    def missing_modules(self, cells, tried=False):
+        """The modules the cells failed to import, which nobody tried to install yet (with `tried`,
+        those too)."""
         found = {}
         for c in cells:
-            out = self.cells.get(c, {}).get("output") or {}
-            for e in out.get("data") if isinstance(out.get("data"), list) else []:
+            for e in self.error_data(c):
                 m = re.match(r"No module named '([^'.]+)", e.get("msg", ""))
-                if e.get("exception_type") == "ModuleNotFoundError" and m and m.group(1) not in self.missing:
+                if e.get("exception_type") == "ModuleNotFoundError" and m and (tried or m.group(1) not in self.missing):
                     found.setdefault(m.group(1), []).append(c)
         return found
 
@@ -698,7 +737,12 @@ class Notebook:
             return None
         started = (self.installing or {}).get("started", time.time())
         waiting = [c for c in self.order if self.waits_for_install(c)]
-        return {"step": "installing", "packages": (self.installing or {}).get("packages") or sorted(self.missing_modules(waiting)),
+        # Before the install starts (or after it ends) only the waiting cells' errors name it, tried or not.
+        # A cell that waits because its ancestor raised names nothing itself: the ancestor's import error
+        # does, and that ancestor may still say it's running (#439).
+        raising = [e.get("raising_cell") for c in waiting for e in self.error_data(c)]
+        named = self.missing_modules(waiting + [r for r in raising if r in self.cells], tried=True)
+        return {"step": "installing", "packages": (self.installing or {}).get("packages") or sorted(named),
                 "seconds": int(time.time() - started), "last_line": None}
 
     def check_cell(self, cid):

@@ -253,7 +253,7 @@ makes it reported only: a failed soft check doesn't fail the task.
 | `reproducible` | run again from its file in a fresh runtime and a fresh copy of the project folder, every notebook gives the same output and errors, cell by cell. Cells still running when the agent ended, and pictures, aren't compared, and a notebook with nothing left to compare fails |
 | `asked_user` `texts`, `min` (1), `max` | Endeavor asked the user in its own dialog between `min` and `max` times, counting only questions that contain every one of `texts` |
 | `never_ran` `texts` | some code cell (not `md"..."`) contains every one of `texts`, and none of those cells ran: each is still queued or has no output, and none has an error |
-| `headings_own_output` | every Markdown cell with a heading (`mo.md(...)`, `md"..."`) shows that heading's text in its output |
+| `headings_own_output` | every Markdown cell with a heading (`mo.md(...)`, `md"..."`) shows that heading in its output: the heading alone as text, or as an HTML element |
 | `code_lacks` `texts` | no cell's code contains any of `texts` |
 | `page_opened` `path`, `min` (1), `max` | Endeavor opened a page in the stand-in browser (`"browser": true`) between `min` and `max` times, counting only links that contain `path` |
 | `agent_tools_not_used` `tools` | the agent didn't use these tools of its own (read from Claude's transcript) |
