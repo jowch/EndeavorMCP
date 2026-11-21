@@ -524,6 +524,13 @@ class Notebook:
         elif t == "set-config" and cid in self.cells:
             if ch.get("hideCode") is not None:
                 self.cells[cid]["hide_code"] = bool(ch["hideCode"])
+            # The rest of the config is the adapter's copy that `save` writes back: a cell disabled or
+            # moved to another column on the page stays so after the next save (#425).
+            config = dict(self.cells[cid].get("config") or {})
+            for key, name in (("disabled", "disabled"), ("column", "column"), ("expandOutput", "expand_output")):
+                if key in ch:
+                    config[name] = ch[key] if key == "column" else bool(ch[key])
+            self.cells[cid]["config"] = config
         elif t == "delete-cell" and cid in self.cells:
             self.order.remove(cid)
             del self.cells[cid]
@@ -1352,7 +1359,9 @@ class Adapter:
         """The user's yes to the packages a notebook asks about (#355): they install, and the cells that
         waited run, under a run that `run_finished` reports the end of. `packages`, when given, are the
         PyPI names the user was shown: the yes covers only those (#418). A package added since keeps
-        asking, and the cells wait for it too; a yes that names none of what waits approves nothing."""
+        asking, and the cells wait for it too; a yes that names none of what waits approves nothing.
+        Like a Julia notebook's reply, it says whether the install and run were started (`accepted`)
+        and the notebook's `process_status` (#419)."""
         a = nb.asking
         if not a or not nb.live:
             raise argument_error("nothing_to_approve", "Nothing in this notebook waits for the user's OK")
@@ -1364,11 +1373,11 @@ class Adapter:
         left = [p for p in a["packages"] if p not in ok]
         cells = [c for c in a["cells"] if c in nb.cells]
         if not ok:
-            return {"approved": False, "packages": [], "asking": a["packages"], "cells": cells}
+            return {"approved": False, "accepted": False, "packages": [], "asking": a["packages"], "cells": cells, "process_status": nb.process_status()}
         nb.approved |= {m for m in a["modules"] if pypi_name(m) not in left}
         if left:
             a["packages"] = left
-            return {"approved": True, "packages": ok, "asking": left, "cells": cells}
+            return {"approved": True, "accepted": False, "packages": ok, "asking": left, "cells": cells, "process_status": nb.process_status()}
         nb.asking = None
         # Marked now: a read straight after the OK sees them wait for the install, not their import error.
         for c in cells:
@@ -1379,7 +1388,7 @@ class Adapter:
                 await self.start_run(nb, cells, watch=False)
 
         run = self.watch(nb, cells, True, install_and_run())
-        return {"approved": True, "packages": ok, "cells": cells, "run": run}
+        return {"approved": True, "accepted": True, "packages": ok, "cells": cells, "run": run, "process_status": nb.process_status()}
 
     async def shutdown(self, nb):
         safe_preview = not nb.allowed

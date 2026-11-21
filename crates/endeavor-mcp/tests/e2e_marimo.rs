@@ -194,6 +194,24 @@ async def main(url, cookie, want):
 asyncio.run(main(*sys.argv[1:]))
 "#;
 
+/// A stand-in for marimo's page that disables a cell: it takes the session as its editor and, once the
+/// kernel is ready, sends the config change marimo's page sends, then says what marimo answered.
+const PAGE_DISABLES: &str = r#"
+import asyncio, json, sys, urllib.request, websockets
+async def main(base, session, cookie, token, cell):
+    async with websockets.connect(f"ws://{base}/marimo/ws?session_id={session}&file={sys.argv[6]}", additional_headers={"Cookie": cookie}, max_size=None) as ws:
+        async for raw in ws:
+            if json.loads(raw).get("op") == "kernel-ready":
+                break
+        change = {"type": "set-config", "cellId": cell, "column": None, "disabled": True, "hideCode": False, "expandOutput": False}
+        request = urllib.request.Request(f"http://{base}/marimo/api/document/transaction", data=json.dumps({"changes": [change]}).encode(), method="POST",
+                                         headers={"Cookie": cookie, "Content-Type": "application/json", "Marimo-Session-Id": session, "Marimo-Server-Token": token})
+        with urllib.request.urlopen(request) as reply:
+            print(reply.status, flush=True)
+        await asyncio.sleep(1)
+asyncio.run(main(*sys.argv[1:6]))
+"#;
+
 #[test]
 #[ignore = "starts real marimo: cargo test -p endeavor-mcp --test e2e_marimo -- --ignored"]
 fn a_python_notebook_through_the_runtime() {
@@ -538,7 +556,7 @@ fn a_python_notebook_through_the_runtime() {
         assert!(!header(&folder.join(&name)).contains("boto3"), "nothing installed before the OK");
         // A yes to a question that named other packages approves nothing (#418).
         let stale = agent.ok("approve_install", json!({ "notebook_id": id, "packages": ["pandas"] }));
-        assert!(stale["approved"] == false && stale["asking"] == json!(["boto3"]), "{stale}");
+        assert!(stale["approved"] == false && stale["accepted"] == false && stale["asking"] == json!(["boto3"]) && stale["process_status"].is_string(), "{stale}");
         assert!(stale["message"].as_str().unwrap_or_default().contains("Nothing was approved"), "{stale}");
         assert!(until(&mut agent, "asking")["download"]["packages"] == json!([{ "package": "boto3" }]), "it still asks");
         // The notebook comes to need another package before the user's yes to boto3: the yes covers boto3
@@ -551,6 +569,8 @@ fn a_python_notebook_through_the_runtime() {
         }
         let approved = agent.ok("approve_install", json!({ "notebook_id": id, "packages": ["Boto3"] }));
         assert!(approved["approved"] == true && approved["packages"] == json!(["boto3"]) && approved["asking"] == json!(["endeavor_e2e_absent"]), "{approved}");
+        // Nothing installs or runs while another package waits, as a Julia notebook says it (#419).
+        assert!(approved["accepted"] == false && approved["process_status"].is_string(), "{approved}");
         assert!(approved["message"].as_str().unwrap_or_default().contains("needs their OK of its own"), "{approved}");
         assert!(until(&mut agent, "asking")["download"]["packages"] == json!([{ "package": "endeavor_e2e_absent" }]), "the other still asks");
         assert!(!header(&folder.join(&name)).contains("boto3"), "nothing installed while one waits");
@@ -627,6 +647,30 @@ fn a_python_notebook_through_the_runtime() {
         let _ = page.kill();
         let _ = page.wait();
         assert_eq!(got.as_deref(), Ok("got"), "the page saw the agent's edit");
+    });
+
+    step("a cell disabled on the page stays disabled after an agent's edit", || {
+        // The adapter's save writes each cell's config from its own copy, which a change on the page didn't
+        // update, so the next save enabled the cell again (#425).
+        let file = path.replace(' ', "%20");
+        let (_, head, _) = get(port, &format!("/marimo/?file={file}&token={pages}"), "");
+        let cookie = head.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap().split(';').next().unwrap().to_owned();
+        let (_, _, html) = get(port, &format!("/marimo/?file={file}"), &format!("Cookie: {cookie}\r\nSec-Fetch-Site: none\r\n"));
+        let token = html.split("serverToken").nth(1).and_then(|rest| rest.split('"').find(|part| part.len() > 8 && !part.contains([':', ',', ' ']))).unwrap_or_else(|| panic!("no server token in the page")).to_owned();
+        let page = Command::new("uv")
+            .args(["run", "--quiet", "--no-project", "--with", "websockets==15.0.1", "python", "-c", PAGE_DISABLES, &format!("localhost:{port}"), "page-disables", &cookie, &token, &order[1], &file])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&page.stdout).trim(), "200", "marimo took the change: {}", String::from_utf8_lossy(&page.stderr));
+        agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order[0] }));
+        agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": order[0], "code": "x = 6" }));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut saved = std::fs::read_to_string(&path).unwrap();
+        while !saved.contains("x = 6") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+            saved = std::fs::read_to_string(&path).unwrap();
+        }
+        assert!(saved.contains("x = 6") && saved.contains("@app.cell(disabled=True)\ndef _(x):"), "the agent's edit is saved and the cell stays disabled: {saved}");
     });
 
     step("stopping the runtime stops marimo", || {
