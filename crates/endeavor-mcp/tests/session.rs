@@ -298,37 +298,24 @@ fn closing_leaves_the_runtime_running_and_ends_everything_else() {
 }
 
 #[test]
-fn a_session_opened_on_a_closed_ones_port_keeps_the_agents_url_working() {
-    // As when a server's connection settings change: the app closes the session and opens another.
-    let place = Place::new("same-port");
+fn a_handed_over_port_goes_to_the_next_session_while_the_old_one_still_closes() {
+    // As when a server's connection settings change: the app closes the old session in a thread of
+    // its own, so it hands the port over first.
+    let place = Place::new("hand-over");
     let session = place.session();
     let runtime = ready(session.ensure(start(), LONG, false));
-    session.close();
+    // An agent's connection that stays open meanwhile.
+    let held = TcpStream::connect(("127.0.0.1", runtime.port)).unwrap();
     let mut config = place.config(true, None);
-    config.port = Some(runtime.port);
+    config.socket = Some(session.hand_over_port().expect("the socket"));
     let second = Session::new(config).expect("a session");
     assert_eq!(second.port(), runtime.port);
-    let again = ready(second.ensure(Want::Attach { install: false }, LONG, false));
-    assert_eq!((again.port, again.pid, again.mcp_url.as_str()), (runtime.port, runtime.pid, runtime.mcp_url.as_str()));
-    assert!(call(again.port, &again.token).contains(r#""result""#), "an agent's call reaches the runtime");
-}
-
-#[test]
-fn a_released_port_goes_to_the_next_session_while_the_old_one_still_closes() {
-    // The app closes the old session in a thread of its own, so it releases the port first.
-    let place = Place::new("release-port");
-    let session = place.session();
-    let runtime = ready(session.ensure(start(), LONG, false));
-    assert_eq!(session.release_port(), runtime.port);
-    let mut config = place.config(true, None);
-    config.port = Some(runtime.port);
-    let second = Session::new(config).expect("a session");
-    assert_eq!(second.port(), runtime.port, "the port was free at once");
     // The old session's close, after the new one has the port, leaves it alone.
     std::thread::spawn(move || session.close()).join().unwrap();
     let again = ready(second.ensure(Want::Attach { install: false }, LONG, false));
-    assert_eq!((again.port, again.pid), (runtime.port, runtime.pid));
+    assert_eq!((again.port, again.pid, again.mcp_url.as_str()), (runtime.port, runtime.pid, runtime.mcp_url.as_str()));
     assert!(call(again.port, &again.token).contains(r#""result""#), "an agent's call reaches the runtime");
+    drop(held);
 }
 
 #[test]

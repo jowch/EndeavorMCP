@@ -281,21 +281,27 @@ fn while_the_server_is_away_the_agent_can_still_ask_the_user_to_restart_it() {
 }
 
 #[test]
-fn a_closed_listeners_port_goes_to_the_next_one_and_a_taken_port_to_a_free_one() {
+fn a_stopped_listeners_socket_goes_to_the_next_one_with_the_connections_that_wait() {
     for _ in 0..20 {
         let first = away();
-        first.close();
-        // At once: close waits until the port is let go.
-        let second = Listener::on_port("lab-server", None, Messages::default(), Some(first.port())).unwrap();
+        // An agent's connection that stays open, as a keep-alive one does: a rebind of the port would fail on macOS.
+        let held = TcpStream::connect(("127.0.0.1", first.port())).unwrap();
+        let socket = first.hand_over().expect("the socket");
+        assert!(first.hand_over().is_none(), "handed over once");
+        // A connection that comes before the next listener takes it waits for it.
+        let mut early = TcpStream::connect(("127.0.0.1", first.port())).unwrap();
+        let second = Listener::on_socket("lab-server", None, Messages::default(), Some(socket)).unwrap();
         assert_eq!(second.port(), first.port(), "the agents' MCP URL reaches the new listener");
         let mux = Mux::new(std::io::sink());
         second.attach(mux.clone(), "secret".into(), true, false);
         second.forget(&mux);
+        let request = format!("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer secret\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{LIST}", LIST.len());
+        early.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        let _ = early.read_to_string(&mut response);
+        assert!(response.contains("reconnecting by itself"), "the waiting connection is answered: {response}");
         assert!(post(&second, "secret", LIST).contains("reconnecting by itself"), "the new listener answers");
-        // One whose port is still taken listens on another.
-        let third = Listener::on_port("lab-server", None, Messages::default(), Some(second.port())).unwrap();
-        assert_ne!(third.port(), second.port());
+        drop(held);
         second.close();
-        third.close();
     }
 }
