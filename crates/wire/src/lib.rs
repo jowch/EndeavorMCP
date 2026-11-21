@@ -274,8 +274,6 @@ pub enum ToApp {
     /// connected. The helper answers each `Stop` with one `Stopped` or one
     /// `NotStopped`, naming its id.
     NotStopped { id: u32, message: String },
-    /// Another client took over this runtime; the helper exits.
-    Replaced,
     /// The answer to `ToHelper::Files` with the same id.
     Files { id: u32, reply: files::Reply },
     /// The helper couldn't go on; it exits.
@@ -543,7 +541,6 @@ mod tests {
         assert_eq!(serde_json::to_string(&ToHelper::Stop { id: 3, force: false, unless_shared: true }).unwrap(), r#"{"type":"Stop","id":3,"unless_shared":true}"#);
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"Stop","id":3}"#).unwrap(), ToHelper::Stop { id: 3, force: false, unless_shared: false });
         assert_eq!(serde_json::to_string(&ToHelper::OwnWithClient { on: false }).unwrap(), r#"{"type":"OwnWithClient","on":false}"#);
-        assert_eq!(serde_json::from_str::<ToApp>(r#"{"type":"Replaced"}"#).unwrap(), ToApp::Replaced);
         let not_stopped = ToApp::NotStopped { id: 2, message: "Julia was not stopped.".into() };
         let Frame::Control(json) = not_stopped.frame() else { panic!() };
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&json).unwrap()["type"], "NotStopped");

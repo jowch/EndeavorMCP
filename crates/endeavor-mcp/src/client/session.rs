@@ -210,8 +210,6 @@ pub struct Status {
 /// Why a runtime the session had, or was starting, went away (`Status::gone`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Gone {
-    /// Another connection took it over; asking for it again would take it back.
-    Replaced,
     /// It stopped by itself, or was stopped from another connection: why, as the helper said it
     /// (empty when it didn't say).
     Died(String),
@@ -277,7 +275,7 @@ pub enum SessionEvent {
     Step(Event),
     /// Something that went wrong or waits on the user, in plain words: a lost connection, a start
     /// that failed or needs an install, a wait for the agreement to install the helper, a runtime
-    /// that stopped or that another connection took over.
+    /// that stopped.
     Trouble(String),
 }
 
@@ -1197,17 +1195,15 @@ fn wait_for(inbox: &Receiver<Msg>, time: Duration) -> bool {
     }
 }
 
-/// The runtime went away, for `why` (`gone` in words). A start it cut short failed, and so did a takeover by another connection (kept:
-/// attaching again would take it back and put the two at odds); a runtime that was up and ended is just not running,
-/// and asking for one again starts one.
+/// The runtime went away, for `why` (`gone` in words). A start it cut short failed; a runtime that was up and ended is
+/// just not running, and asking for one again starts one.
 fn gone(i: &mut Inner, why: String, gone: Gone) {
-    let kept = gone == Gone::Replaced;
     i.gone = Some(gone);
     let starting = i.starting();
     i.run = if starting { Run::Gone } else { Run::Idle };
     (i.wanted, i.job) = (None, None);
     i.step = Some(why.clone());
-    i.state = if starting || kept { State::Failed(why) } else { State::NothingRunning };
+    i.state = if starting { State::Failed(why) } else { State::NothingRunning };
 }
 
 /// Follow connection number `conn` until it ends. False when the session is closing.
@@ -1326,15 +1322,6 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                     let text = shared.with(|i| {
                         let text = format!("Julia on {} stopped. {reason}", i.name).trim_end().to_owned();
                         gone(i, text.clone(), Gone::Died(reason.trim().to_owned()));
-                        text
-                    });
-                    shared.trouble(text);
-                    shared.listener.disconnected();
-                }
-                Notice::Replaced => {
-                    let text = shared.with(|i| {
-                        let text = format!("Another connection took Julia on {} over.", i.name);
-                        gone(i, text.clone(), Gone::Replaced);
                         text
                     });
                     shared.trouble(text);

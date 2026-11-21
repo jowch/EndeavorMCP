@@ -171,7 +171,7 @@ asks to try again on the call after that (`Target::failed`); `use_machine` and
 `stop_machine` always ask; `list_notebooks` and `session_status` never do and
 never use up the report, and the status tool's result for a failure carries
 `error`. A runtime that has gone (its process ended, it exited when idle, another
-connection stopped it or took it over) is just not running: the next notebook call
+connection stopped it) is just not running: the next notebook call
 that needs one starts one on this computer and on a plain server, and a cluster
 asks for a job. A runtime that ended while the connection to its machine was down
 is different: that is a failure, kept with its reason, since nobody saw it end.

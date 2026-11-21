@@ -1411,7 +1411,7 @@ fn clients_that_come_during_a_start_whose_client_has_gone_wait_for_the_one_core_
     let mut quitting = held_start(&dir, &julia, &["--quit-with-client"]);
     quitting.stdin.0.lock().unwrap().take();
     quitting.exits();
-    let mut serve = endeavor(&dir, &["serve", "--julia", "/nonexistent/julia", "--depot", "/opt/depot:"]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let serve = endeavor(&dir, &["serve", "--julia", "/nonexistent/julia", "--depot", "/opt/depot:"]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
     std::thread::sleep(Duration::from_millis(700));
     // SAFETY: plain syscall, on the `serve` this test started.
     unsafe { libc::kill(serve.id() as i32, libc::SIGINT) };
