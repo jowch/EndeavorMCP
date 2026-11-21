@@ -589,3 +589,19 @@ fn the_bootstrap_script_settles_auto_as_the_helper_does() {
     let path = std::env::var("PATH").unwrap();
     assert_eq!(pick("auto", &path), if wire::slurm::has("sinfo") { "slurm" } else { "process" }, "on this computer's PATH the script and `has` agree");
 }
+
+/// A server's core is never started with `--own-r`: the core also reads it as "this is the user's own
+/// computer" and then lets Python notebooks start there (`core::MarimoStarter`), which a server's
+/// runtime isn't set up for (#354). Offering Endeavor's R on a server needs its own flag first (#423).
+#[test]
+fn a_servers_core_is_never_told_it_is_this_computer() {
+    for flags in 0..8u8 {
+        let script = bootstrap_script("v1", flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
+        assert!(!script.contains("--own-r") && !script.contains("--install-r"), "{script}");
+    }
+    // The script's R flag comes from the server's R setting, which is only ever `--r` or `--r-shell`.
+    for r in [None, Some(""), Some("/usr/bin/Rscript"), Some("~/R/bin/R"), Some("module load R"), Some("--own-r")] {
+        let server = crate::client::Server { r: r.map(str::to_owned), ..Default::default() };
+        assert!(["--r", "--r-shell"].contains(&server.r_args()[0].as_str()), "{r:?}");
+    }
+}
