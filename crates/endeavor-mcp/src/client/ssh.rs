@@ -90,8 +90,7 @@ impl Transport {
                 // ssh then stops at the first address that refuses (IPv6 `localhost`, say)
                 // instead of trying the next (#35). There, Windows' own connect gives up on
                 // each address that doesn't answer after about 21 s. What that doesn't cover
-                // is a server that takes the connection and then says nothing; a deadline of
-                // our own would have to stop while a sign-in prompt waits for the user.
+                // is a server that takes the connection and then says nothing (#462).
                 if !cfg!(windows) {
                     command.args(["-o", "ConnectTimeout=20"]);
                 }
