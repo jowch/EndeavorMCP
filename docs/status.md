@@ -443,7 +443,8 @@ Next:
   edits (`mutation.code_folded`; #174, interface 16). While an edited cell is
   still running, the edit's result gives its old output and error as
   `previous_output`, `previous_errored` and `previous_error`, and leaves it out
-  of `outputs.changed` (#190, interface 17). In Ember's lazy mode, a run's result warns `lazy_mode` and lists the
+  of `outputs.changed` (#190, interface 17). So does a staged edit's result,
+  whose cell hasn't run since (#435, interface 44). In Ember's lazy mode, a run's result warns `lazy_mode` and lists the
   notebook's stale cells as `stale_cells`, and `list_notebooks` and
   `open_notebook` show `on_cell_change` (#196, interface 19). A hand-written
   R notebook's short cell ids (`# %% id=B`, which Ember keeps) name its cells
