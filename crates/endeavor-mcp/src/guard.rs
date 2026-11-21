@@ -9,7 +9,7 @@
 //! to the agent's tools and answers it here, so it works whatever build the
 //! runtime is, and while the runtime is gone.
 
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
@@ -142,7 +142,9 @@ pub fn serve_guarded(
     let mut reader = BufReader::new(client.clone());
     let mut to_runtime = wire::Shared::new(upstream);
     let mut from_runtime = BufReader::new(to_runtime.clone());
-    while let Some(mut request) = Head::read(&mut reader)? {
+    while next_request(&mut reader, &client, &to_runtime)?
+        && let Some(mut request) = Head::read(&mut reader)?
+    {
         if request.method() != "POST" || request.path() != "/mcp" {
             request.write_to(&mut to_runtime)?;
             http::copy_body(&mut reader, &mut to_runtime, &mut request.request_body()?)?;
@@ -214,6 +216,45 @@ pub fn serve_guarded(
         }
     }
     Ok(())
+}
+
+/// How often a connection waiting for the agent's next request looks whether its runtime's end closed.
+const IDLE_CHECK: Duration = Duration::from_secs(1);
+
+/// Wait for the agent's next request on `reader`, `client`'s connection. False when the agent hung up,
+/// or when `upstream` closed meanwhile: its runtime stopped or restarted, so it would answer nothing. The
+/// connection then closes, as one relayed without the guard does, and the agent's next request comes
+/// through the listener again to the runtime of the moment, instead of failing unanswered (#292).
+fn next_request(reader: &mut BufReader<wire::Shared>, client: &TcpStream, upstream: &TcpStream) -> io::Result<bool> {
+    let before = client.read_timeout()?;
+    client.set_read_timeout(Some(IDLE_CHECK))?;
+    let waited = loop {
+        match reader.fill_buf() {
+            Ok(buffered) => break Ok(!buffered.is_empty()),
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                if closed(upstream) {
+                    break Ok(false);
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => break Err(e),
+        }
+    };
+    client.set_read_timeout(before)?;
+    waited
+}
+
+/// Whether the other end of `socket` closed it, as far as can be seen without reading from it.
+fn closed(socket: &TcpStream) -> bool {
+    if socket.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let closed = match socket.peek(&mut [0]) {
+        Ok(n) => n == 0,
+        Err(e) => !matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted),
+    };
+    let _ = socket.set_nonblocking(false);
+    closed
 }
 
 /// Pass on the runtime's answer to a tool call, unless `instead` gives a result in place of the
@@ -294,6 +335,38 @@ mod tests {
         let head = Head::read(&mut reader).unwrap().unwrap();
         let body = http::read_body(&mut reader, head.response_body("POST").unwrap()).unwrap();
         format!("{} {}", head.status(), String::from_utf8(body).unwrap())
+    }
+
+    #[test]
+    fn an_idle_connection_whose_runtime_went_closes_so_the_next_request_finds_the_new_one() {
+        // A runtime that answers one request and then ends, as one that stops or restarts.
+        let runtime = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = runtime.local_addr().unwrap().port();
+        let (end_tx, end) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let (socket, _) = runtime.accept().unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut socket = socket;
+            let request = Head::read(&mut reader).unwrap().unwrap();
+            http::read_body(&mut reader, request.request_body().unwrap()).unwrap();
+            http::respond(&mut socket, "200 OK", None, b"first", true).unwrap();
+            end.recv().unwrap();
+        });
+        let front = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(front.local_addr().unwrap()).unwrap();
+        let (accepted, _) = front.accept().unwrap();
+        let upstream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (done_tx, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || done_tx.send(serve_guarded(accepted, upstream, &|_, _, _| None, None, None, None).is_ok()).unwrap());
+        let read = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_cell","arguments":{}}}"#;
+        assert_eq!(post(&mut client, "/mcp", "7", read), "200 first");
+        // Idle past a check while the runtime is still there: the connection stays.
+        std::thread::sleep(IDLE_CHECK + Duration::from_millis(300));
+        assert!(done.try_recv().is_err(), "still open while its runtime is");
+        end_tx.send(()).unwrap();
+        assert_eq!(done.recv_timeout(IDLE_CHECK * 3), Ok(true), "the guard lets the connection go");
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(io::Read::read(&mut client, &mut [0; 16]).unwrap(), 0, "the agent sees it close while idle, before it sends anything");
     }
 
     #[test]
