@@ -471,6 +471,7 @@ fn download_own(progress: &mut dyn FnMut(String)) -> Result<OwnJulia, String> {
 /// use it first.
 pub fn remove_own() -> Result<(), String> {
     if let Some(dir) = download_dir().filter(|dir| dir.exists()) {
+        not_in_use(&dir)?;
         std::fs::remove_dir_all(&dir).map_err(|e| format!("Couldn't remove {}: {e}", dir.display()))?;
     }
     if let Some(mark) = added_mark().filter(|mark| mark.exists()) {
@@ -483,12 +484,54 @@ pub fn remove_own() -> Result<(), String> {
                         "juliaup uses Julia {JULIA_VERSION} as its default, so it stays. To remove it, make another Julia juliaup's default first (`juliaup add release`, then `juliaup default release`), then remove it again."
                     ));
                 }
+                // juliaup keeps one folder per Julia version for all its channels: when another channel
+                // (`release`, say) is the same Julia, removing this one leaves the files, and a REPL of
+                // the person's on that channel mustn't hold Remove up.
+                if !another_channel_has(&listed, &channel.julia)
+                    && let Some(dir) = channel.julia.parent().and_then(Path::parent)
+                {
+                    not_in_use(dir)?;
+                }
                 crate::juliaup::remove(&juliaup, JULIA_VERSION)?;
             }
         }
         let _ = std::fs::remove_file(mark);
     }
     Ok(())
+}
+
+/// Refuse while a process here runs a program from the Julia in `dir` (Julia, or a worker it started):
+/// a runtime the app doesn't know about, started with `endeavor serve` or by the plugin, may run it,
+/// and its notebooks break once it is gone (#117). The app stops its own runtime first, so its Julia
+/// gets a few seconds to end.
+fn not_in_use(dir: &Path) -> Result<(), String> {
+    let until = std::time::Instant::now() + IN_USE_WAIT;
+    while running_from(dir, crate::old_builds::processes().as_deref().unwrap_or_default()) {
+        if std::time::Instant::now() >= until {
+            return Err(format!(
+                "Julia {JULIA_VERSION} is still running here, maybe for notebooks started with `endeavor serve` or the Endeavor plugin. Stop them (`endeavor stop`), and quit any other Julia {JULIA_VERSION}, then remove it again."
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Ok(())
+}
+
+/// Whether a channel in juliaup's `listed` channels other than Endeavor's (`JULIA_VERSION`) runs `julia`.
+fn another_channel_has(listed: &str, julia: &Path) -> bool {
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(listed.trim()) else { return false };
+    let others = config["OtherChannels"].as_array().into_iter().flatten();
+    std::iter::once(&config["DefaultChannel"]).chain(others).any(|c| c["Name"] != JULIA_VERSION && c["File"].as_str().is_some_and(|file| Path::new(file) == julia))
+}
+
+/// How long `not_in_use` waits for a Julia that is ending.
+const IN_USE_WAIT: Duration = Duration::from_secs(5);
+
+/// Whether one of the processes' `texts` (`old_builds::processes`: a command line, and on Linux each
+/// argument and the binary on a line of its own) runs a program from `dir`.
+fn running_from(dir: &Path, texts: &[String]) -> bool {
+    let prefix = format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR);
+    texts.iter().any(|text| text.lines().any(|line| line.starts_with(&prefix)))
 }
 
 /// Whether Endeavor added juliaup's channel for its Julia.
@@ -642,6 +685,47 @@ fn sha256_of(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Unix paths; on Windows `processes` lists nothing, so the check never fires.
+    #[cfg(unix)]
+    #[test]
+    fn a_julia_is_in_use_while_a_process_runs_a_program_from_its_folder() {
+        let dir = Path::new("/home/ada/.cache/endeavor/julia-1.12.6");
+        let texts = |lines: &[&str]| vec![lines.join("\n")];
+        assert!(running_from(dir, &texts(&["/home/ada/.cache/endeavor/julia-1.12.6/bin/julia", "--project=/x"])));
+        assert!(running_from(dir, &texts(&["/usr/bin/sh", "/home/ada/.cache/endeavor/julia-1.12.6/libexec/julia/worker"])));
+        assert!(!running_from(dir, &texts(&["/home/ada/.cache/endeavor/julia-1.12.6.juliaup"])), "a name that only starts the same");
+        assert!(!running_from(dir, &texts(&["/usr/bin/julia", "--version"])));
+        assert!(!running_from(dir, &[]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_running_program_from_the_folder_is_seen_and_one_that_ended_is_not() {
+        let dir = std::env::temp_dir().join(format!("endeavor-julia-in-use-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let sleep = ["/bin/sleep", "/usr/bin/sleep"].into_iter().map(Path::new).find(|p| p.exists()).expect("sleep");
+        crate::test_exec::copy_executable(sleep, &dir.join("bin/julia"));
+        let mut julia = std::process::Command::new(dir.join("bin/julia")).arg("30").spawn().unwrap();
+        assert!(running_from(&dir, &crate::old_builds::processes().unwrap()));
+        assert!(not_in_use(&dir).is_err_and(|why| why.contains("endeavor stop")));
+        julia.kill().unwrap();
+        julia.wait().unwrap();
+        assert_eq!(not_in_use(&dir), Ok(()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_julia_another_juliaup_channel_also_runs_isnt_ours_to_hold_remove_for() {
+        let file = "/home/ada/.julia/juliaup/julia-1.12.6+0.x64.linux.gnu/bin/julia";
+        let julia = Path::new(file);
+        let listed = |release: &str| serde_json::json!({ "DefaultChannel": { "Name": "release", "File": release }, "OtherChannels": [{ "Name": JULIA_VERSION, "File": file }] }).to_string();
+        assert!(another_channel_has(&listed(file), julia), "release is the same Julia");
+        assert!(!another_channel_has(&listed("/home/ada/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/bin/julia"), julia));
+        let alone = serde_json::json!({ "DefaultChannel": null, "OtherChannels": [{ "Name": JULIA_VERSION, "File": file }] }).to_string();
+        assert!(!another_channel_has(&alone, julia), "its own channel doesn't count");
+        assert!(!another_channel_has("not json", julia));
+    }
 
     #[test]
     fn the_added_mark_goes_once_juliaup_lists_no_channel_for_the_julia() {
