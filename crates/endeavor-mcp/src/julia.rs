@@ -136,7 +136,8 @@ fn found(source: &Source, download: bool, endeavors: &std::cell::Cell<bool>, pro
         }
         Source::Shell(line) => {
             let (path, err, ended_early) = login_shell_julia(Some(line));
-            if ended_early {
+            // Ended well with no path: the lookup didn't run, or `julia` is a shell function or alias.
+            if ended_early && line.contains('#') {
                 return Err(format!("Running `{line}` in a login shell ended before it looked for julia, because a `#` in it comments out the rest. Take the comment out.").into());
             }
             let path = path.ok_or_else(|| {
