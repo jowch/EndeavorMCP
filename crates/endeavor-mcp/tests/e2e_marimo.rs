@@ -727,17 +727,20 @@ fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
     let _cleanup = Cleanup { state: state.clone(), children: Vec::new() };
     std::fs::write(folder.join("growth.py"), GROWTH).unwrap();
     let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime").canonicalize().unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
-    command
-        .args(["connect", "--state-dir"])
-        .arg(&state)
-        .args(["--julia", work.join("no julia here").to_str().unwrap(), "--julia-when-needed", "--runtime"])
-        .arg(&runtime)
-        .args(["--depot", &format!("{}:", work.join("depot").display()), "--own-r", "--any-node", "--quit-with-client"])
-        .env("XDG_CACHE_HOME", work.join("cache"))
-        .env("XDG_STATE_HOME", work.join("state-home"))
-        .env("XDG_CONFIG_HOME", work.join("config"));
-    let mut helper = Helper::spawn(command);
+    let connect = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+        command
+            .args(["connect", "--state-dir"])
+            .arg(&state)
+            .args(["--julia", work.join("no julia here").to_str().unwrap(), "--julia-when-needed", "--runtime"])
+            .arg(&runtime)
+            .args(["--depot", &format!("{}:", work.join("depot").display()), "--own-r", "--any-node", "--quit-with-client"])
+            .env("XDG_CACHE_HOME", work.join("cache"))
+            .env("XDG_STATE_HOME", work.join("state-home"))
+            .env("XDG_CONFIG_HOME", work.join("config"));
+        command
+    };
+    let mut helper = Helper::spawn(connect());
     helper.hello();
     helper.request_start(None, false);
     let token = step("the app's runtime starts without Julia", || loop {
@@ -796,5 +799,23 @@ fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
         let mut reply = String::new();
         socket.read_to_string(&mut reply).unwrap();
         assert!(reply.contains("cell_ids"), "the plugin's notebook is still open: {reply}");
+    });
+    step("the app opens again and takes the runtime back, so no front takes it for the plugin's own", || {
+        let pid = recorded_pid(&state).unwrap();
+        let again = Helper::spawn(connect());
+        again.hello();
+        again.request_start(None, false);
+        loop {
+            match again.next_within(Duration::from_secs(120)) {
+                wire::ToApp::Ready { reattached, pid: now, .. } => {
+                    assert!(reattached && now == pid as u32, "the same runtime: {now}");
+                    break;
+                }
+                wire::ToApp::Found { .. } | wire::ToApp::Progress { .. } => {}
+                other => panic!("expected Ready, got {other:?}"),
+            }
+        }
+        let record: Value = serde_json::from_str(&std::fs::read_to_string(state.join("runtime.json")).unwrap()).unwrap();
+        assert_eq!(record["exits_when_idle"], json!(false), "{record}");
     });
 }

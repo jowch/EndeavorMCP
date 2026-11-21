@@ -491,12 +491,17 @@ is in the runtime (`endeavor/leave_to_plugin`): a plugin session works in a
 notebook that is open, and its front still runs. Each front says which
 process it is (`X-Endeavor-Front-Pid`, `-Started`, `-Boot`). A front that
 doesn't say counts if it called in the last 30 minutes. If the plugin is in
-it, the core switches itself to end once no notebook has been open for the
-idle limit, as a runtime the plugin starts does, and records that in
-`runtime.json`. The helper then exits as after Detach. So the plugin keeps
-its notebooks, and the runtime still ends if the plugin goes without
-saying: its notebooks stop after the idle limit, and then the runtime does.
-Otherwise the runtime stops as before (app #232).
+it, the core marks itself as ending when idle, as a runtime the plugin
+starts is, and records that in
+`runtime.json`. The helper then exits as after Detach, and the plugin keeps
+its notebooks. The core watches a runtime it was left: it ends once the
+plugin has been out of it for 10 minutes, whatever the idle limit, so it
+doesn't outlive a plugin that goes without saying. With no notebook open it
+still ends after the idle limit, and "Never" counts as 48 hours there. When
+the app opens again and its helper reattaches, the helper calls
+`endeavor/keep_for_app`: the runtime goes back to how it started, so no front
+of another build takes it for the plugin's own and stops it. Otherwise the
+runtime stops as before (app #232).
 
 **Cancelling a test.** The app's Test connection (`client::test`) starts its
 helper with `--own-with-client`: when the helper's input ends without a Stop

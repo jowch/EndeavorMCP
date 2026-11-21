@@ -156,8 +156,11 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   answers the app's agents as the plugin's.
   Quitting the app with Keep running off leaves a runtime that both use running
   while a plugin session works in an open notebook and its front still runs.
-  The runtime then ends itself once idle, as one the plugin starts does (app
-  #232, interface 45, `docs/plugins-and-remote.md`).
+  It ends 10 minutes after the plugin is out of it, and the app takes it back
+  when it opens again (app #232, interface 45, `docs/plugins-and-remote.md`).
+  Until the plugins' pinned build moves past this change, their fronts don't
+  say which process they are, so for them the only rule is "called in the
+  last 30 minutes".
   `close_notebook` ends a session's own notebook's process when the user asks,
   as the app's Stop notebook does, so a sitting no longer needs `endeavor stop`
   (interface 37). Not yet: a notebook on a machine, which still opens in a browser
