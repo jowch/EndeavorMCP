@@ -57,8 +57,6 @@ pub struct Runtime {
 pub enum Notice {
     /// Julia exited; the helper is still connected, so it can start again.
     Died(String),
-    /// Another client took the runtime over.
-    Replaced,
     /// The helper failed or the connection to it closed.
     Lost(String),
 }
@@ -408,7 +406,6 @@ impl Channel {
                 }
                 Ok(ToApp::StartCancelled { .. }) => return Err(failed("Endeavor was stopped while it started.".into())),
                 Ok(ToApp::NotRunning { .. }) => return Err(StartError::NotRunning),
-                Ok(ToApp::Replaced) => return Err(failed("Another connection took Endeavor over while it was starting.".into())),
                 Ok(_) => {}
                 Err(_) => return Err(failed(CLOSED.into())),
             }
@@ -417,7 +414,6 @@ impl Channel {
             let heard = loop {
                 match events.recv() {
                     Ok(ToApp::Died { status, log_tail }) => break Notice::Died(died_reason(&status, &log_tail)),
-                    Ok(ToApp::Replaced) => break Notice::Replaced,
                     Ok(ToApp::Error { message }) => break Notice::Lost(message),
                     Ok(_) => continue,
                     // The helper ended: `closed` tells of that.
