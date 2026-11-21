@@ -256,7 +256,8 @@ def file_form(code):
     the file changes under it (a package added to its header) pairs cells by similar code, and can give one
     heading's code to another (L1 on Haiku, 11-20). marimo writes a markdown string's value into a plain
     `\"\"\"`, so a backslash in it (LaTeX's `\\alpha`) would become an escape (#433): such a cell takes a raw
-    `r\"\"\"`, which marimo keeps, and is kept as sent only when that can't hold its value either."""
+    `r\"\"\"`, which marimo keeps, and is kept as sent only when that can't hold its value either. A cell kept
+    as sent can still change in the file, since marimo's save writes it its own way (#449)."""
     try:
         kept = _marimo_writes(code)
         if kept == code or _meaning(kept) == _meaning(code):
