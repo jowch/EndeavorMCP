@@ -256,9 +256,9 @@ package `endeavor-mcp`; it was `endeavor-remote` until the rename.
   https://github.com/jowch/EndeavorMCP endeavor-mcp` builds it (tried from a
   local clone of the branch).
 - **`endeavor update`** replaces the binary with the build `main`'s
-  `release-key` pins, checked against the SHA-256 pinned there (or, when
-  `main` can't be read, the newest build `LATEST` names, checked against the
-  release's SHA-256 file) and renamed over the running binary. It leaves the
+  `release-key` pins, checked against the SHA-256 pinned there (or, with
+  `ENDEAVOR_PIN_URL=none`, the newest build `LATEST` names, checked against
+  the release's SHA-256 file) and renamed over the running binary. It leaves the
   app's copies and cargo installs alone, and says when a running Julia came
   from the older build (serve.md, "Update it").
 

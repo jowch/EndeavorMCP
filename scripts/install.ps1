@@ -5,10 +5,10 @@
 #
 # It reads release-key from main, the same place this script comes from. When
 # that holds checksums, it installs the build it names and checks it against
-# them: the build the plugins run, checked the way they check it. Otherwise
-# (main can't be read, or its pin is from before checksums were written) it
-# reads LATEST from the release, downloads endeavor-<key>.sha256 and checks
-# against that, saying so when main couldn't be read. It downloads
+# them: the build the plugins run, checked the way they check it. If main
+# can't be read or pins no checksums, nothing is installed. With
+# $env:ENDEAVOR_PIN_URL = 'none' it reads LATEST from the release instead and
+# checks against endeavor-<key>.sha256 from there. It downloads
 # endeavor-<key>-windows-x86_64.exe and puts it in $Dir as
 # endeavor.exe, replacing one that is there (a copy that is running is renamed
 # to endeavor.exe.old-<pid>, which the next install or `endeavor update` removes
@@ -21,7 +21,7 @@
 # functions or preferences in your session.
 # $env:ENDEAVOR_RELEASE_URL replaces the release's address (for tests; a
 # file:// address or a folder works), and $env:ENDEAVOR_PIN_URL the address of
-# main's release-key; with only the first set, no pin is read. The release's
+# main's release-key ('none': no pin); with only the first set, no pin is read. The release's
 # checksum file comes from the same release as the binary, so a check against
 # it catches a damaged download and not a tampered release.
 # From an https address, a redirect is followed only to https. PowerShell 7
@@ -39,7 +39,7 @@
     $release = $env:ENDEAVOR_RELEASE_URL
     if (-not $release) { $release = 'https://github.com/jowch/EndeavorMCP/releases/download/helpers' }
     $release = $release.TrimEnd('/', '\')
-    $pinUrl = if ($null -ne $env:ENDEAVOR_PIN_URL) { $env:ENDEAVOR_PIN_URL } elseif ($env:ENDEAVOR_RELEASE_URL) { '' } else { 'https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/release-key' }
+    $pinUrl = if ($env:ENDEAVOR_PIN_URL -eq 'none') { '' } elseif ($null -ne $env:ENDEAVOR_PIN_URL) { $env:ENDEAVOR_PIN_URL } elseif ($env:ENDEAVOR_RELEASE_URL) { '' } else { 'https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/release-key' }
 
     if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
         throw "install.ps1 is for Windows. On macOS and Linux use scripts/install.sh."
@@ -142,17 +142,18 @@
         $pinned = $false
         if ($pinUrl) {
             $pinFile = Join-Path $tmp 'release-key'
-            $pin = $null
+            $skip = "Nothing was installed. To install the release's newest build checked only against the release's own checksum file, run `$env:ENDEAVOR_PIN_URL = 'none' first, then run it again."
             try { Get-Url $pinUrl $pinFile; $pin = @(Get-Content -LiteralPath $pinFile) } catch {
-                Write-Warning "Couldn't read the build main pins ($($_.Exception.Message)), so the download is checked only against the release's own checksum file."
+                throw "Couldn't read the build main pins ($($_.Exception.Message)), so the download can't be checked against it. $skip"
             }
-            if ($pin -and "$($pin[0])".Trim() -match '^[0-9a-fA-F]+$' -and ($pin | Where-Object { $_ -match '^[0-9a-fA-F]{64}\s' })) {
-                $key = "$($pin[0])".Trim()
-                $pinned = $true
-                $name = "endeavor-$key-$platform.exe"
-                $want = Find-Sum $pin $name
-                if (-not $want) { throw "The checksums in $pinUrl list no binary of build $key for $platform." }
+            if (-not ($pin -and "$($pin[0])".Trim() -match '^[0-9a-fA-F]+$' -and ($pin | Where-Object { $_ -match '^[0-9a-fA-F]{64}\s' }))) {
+                throw "$pinUrl doesn't pin a build with checksums. $skip"
             }
+            $key = "$($pin[0])".Trim()
+            $pinned = $true
+            $name = "endeavor-$key-$platform.exe"
+            $want = Find-Sum $pin $name
+            if (-not $want) { throw "The checksums in $pinUrl list no binary of build $key for $platform." }
         }
         if (-not $pinned) {
             Get-Release 'LATEST' (Join-Path $tmp 'LATEST')

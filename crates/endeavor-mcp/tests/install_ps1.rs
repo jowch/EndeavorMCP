@@ -81,6 +81,13 @@ fn install(release: &str, dir: &Path, pin: Option<&str>) -> (bool, String) {
     (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
 }
 
+/// Whether `said` holds `text`. Windows PowerShell wraps an error's message at the console's width,
+/// so both are compared with their whitespace taken out.
+fn says(said: &str, text: &str) -> bool {
+    let bare = |s: &str| s.split_whitespace().collect::<String>();
+    bare(said).contains(&bare(text))
+}
+
 #[test]
 fn windows_powershell_follows_the_releases_redirects_by_hand_and_checks_the_download() {
     if std::env::var_os("CI").is_none() {
@@ -105,27 +112,32 @@ fn windows_powershell_follows_the_releases_redirects_by_hand_and_checks_the_down
 
     let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, None);
     assert!(ok, "{said}");
-    assert!(said.contains(&format!("Installed endeavor (build {KEY}, windows-x86_64)")), "{said}");
+    assert!(says(&said, &format!("Installed endeavor (build {KEY}, windows-x86_64)")), "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), exe);
 
     // A release that answers 404 says which file it couldn't get, and installs nothing over the binary there.
     let (ok, said) = install(&format!("http://127.0.0.1:{port}/missing"), &dir, None);
-    assert!(!ok && said.contains(&format!("Couldn't download http://127.0.0.1:{port}/missing/LATEST")) && said.contains("404"), "{said}");
+    assert!(!ok && says(&said, &format!("Couldn't download http://127.0.0.1:{port}/missing/LATEST")) && says(&said, "404"), "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), exe);
 
     // Main pins a build: that one is installed, checked against main's checksum.
     let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, Some(&format!("http://127.0.0.1:{port}/rel/pin-older")));
     assert!(ok, "{said}");
-    assert!(said.contains(&format!("Installed endeavor (build {pinned}, windows-x86_64)")), "{said}");
+    assert!(says(&said, &format!("Installed endeavor (build {pinned}, windows-x86_64)")), "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), pinned_exe);
 
     // The release's binary and checksum file agree, but main pins another checksum: refused.
     let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, Some(&format!("http://127.0.0.1:{port}/rel/pin-other-sum")));
-    assert!(!ok && said.contains("doesn't match the checksum main pins"), "{said}");
+    assert!(!ok && says(&said, "doesn't match the checksum main pins"), "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), pinned_exe);
 
-    // Main can't be read: LATEST, checked against the release's checksum file, with a warning.
+    // Main can't be read: nothing is installed, and the message says how to skip the pin.
     let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, Some(&format!("http://127.0.0.1:{port}/no-such-pin")));
-    assert!(ok && said.contains("Couldn't read the build main pins"), "{said}");
+    assert!(!ok && says(&said, "Couldn't read the build main pins") && says(&said, "ENDEAVOR_PIN_URL = 'none'"), "{said}");
+    assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), pinned_exe);
+
+    // With the pin skipped: LATEST, checked against the release's checksum file.
+    let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, Some("none"));
+    assert!(ok, "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), exe);
 }

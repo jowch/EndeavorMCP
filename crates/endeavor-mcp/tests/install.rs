@@ -224,27 +224,34 @@ fn run_by_hand_it_installs_the_build_main_pins_checked_against_mains_checksums()
     assert!(stdout.contains(&format!("Installed endeavor (build {pinned}, ")), "{stdout}");
     assert_eq!(std::fs::read(bin.join("endeavor")).unwrap(), NEW);
 
-    // --key with another build than main's: main's checksums aren't for it, so only the release's are checked.
+    // --key with another build than main's: main's checksums aren't for it, so only the release's are checked, and it says so.
     let (ok, _, stderr) = place.run(&["--dir", bin.to_str().unwrap(), "--key", KEY], &[pin]);
     assert!(ok, "{stderr}");
+    assert!(stderr.contains(&format!("main pins build {pinned}, not {KEY}, so build {KEY} is checked only against the release's own checksum file")), "{stderr}");
     assert_eq!(std::fs::read(bin.join("endeavor")).unwrap(), tampered);
 }
 
 #[test]
-fn a_pin_that_cant_be_read_falls_back_to_latest_and_says_so() {
+fn a_pin_that_cant_be_read_or_holds_no_checksums_installs_nothing_unless_skipped() {
     let place = Place::new("main-pin-missing");
     place.release(&sha(NEW));
     let bin = place.dir.join("bin");
     let missing = ("ENDEAVOR_PIN_URL", format!("file://{}", place.dir.join("no-such-file").display()));
     let (ok, _, stderr) = place.run(&["--dir", bin.to_str().unwrap()], &[missing]);
-    assert!(ok, "{stderr}");
-    assert!(stderr.contains("couldn't read the build main pins") && stderr.contains("checked only against the release's own checksum file"), "{stderr}");
-    assert_eq!(std::fs::read(bin.join("endeavor")).unwrap(), NEW);
+    assert!(!ok && stderr.contains("couldn't read the build main pins") && stderr.contains("Nothing was installed") && stderr.contains("ENDEAVOR_PIN_URL=none"), "{stderr}");
+    assert!(!bin.join("endeavor").exists());
 
-    // A pin from before checksums were written (the key alone) isn't used.
-    std::fs::write(place.dir.join("old-pin"), "00000000aaaa\n").unwrap();
-    let old = ("ENDEAVOR_PIN_URL", format!("file://{}", place.dir.join("old-pin").display()));
-    let (ok, stdout, stderr) = place.run(&["--dir", bin.to_str().unwrap()], &[old]);
+    // A pin from before checksums were written (the key alone), or a page that isn't a pin.
+    for (name, text) in [("old-pin", "00000000aaaa\n"), ("html", "<html>blocked</html>\n")] {
+        std::fs::write(place.dir.join(name), text).unwrap();
+        let pin = ("ENDEAVOR_PIN_URL", format!("file://{}", place.dir.join(name).display()));
+        let (ok, _, stderr) = place.run(&["--dir", bin.to_str().unwrap()], &[pin]);
+        assert!(!ok && stderr.contains("doesn't pin a build with checksums") && stderr.contains("ENDEAVOR_PIN_URL=none"), "{stderr}");
+        assert!(!bin.join("endeavor").exists());
+    }
+
+    // ENDEAVOR_PIN_URL=none: LATEST, checked against the release's checksum file.
+    let (ok, stdout, stderr) = place.run(&["--dir", bin.to_str().unwrap()], &[("ENDEAVOR_PIN_URL", "none".into())]);
     assert!(ok, "{stderr}");
     assert!(stdout.contains(&format!("Installed endeavor (build {KEY}, ")), "{stdout}");
 }

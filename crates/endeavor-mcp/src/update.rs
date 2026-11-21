@@ -1,8 +1,9 @@
 //! `endeavor --version`, and `endeavor update`: replace this binary with the
 //! build main's `scripts/release-key` pins, checked against the checksums
 //! there, the build the plugins run. When main can't be read, or its pin has
-//! no checksums, it is the newest build on the Helpers release, the one its
-//! `LATEST` file names, checked against the release's own checksum file.
+//! no checksums, nothing changes, unless `ENDEAVOR_PIN_URL=none` says to take
+//! the newest build on the Helpers release, the one its `LATEST` file names,
+//! checked against the release's own checksum file.
 //!
 //! The release has binaries for Linux, macOS and Windows (`release::platform_name`).
 //! A copy the Endeavor app installed, or one cargo installed, is left to the
@@ -132,12 +133,11 @@ fn update(here: &Here) -> Result<String, String> {
 
     clear_asides(exe, cfg!(windows));
     let release = here.release.trim_end_matches('/');
-    let pin = match here.pin.as_deref().map(read_pin) {
-        Some(Ok(pin)) => pin,
-        Some(Err(e)) => {
-            eprintln!("Couldn't read the build main pins ({e}), so the download is checked only against the release's own checksum file.");
-            None
-        }
+    let skip = format!("{} is unchanged. To update to the release's newest build checked only against the release's own checksum file, run it again with {}=none.", exe.display(), release::PIN_ENV);
+    let pin = match here.pin.as_deref().map(|url| (url, read_pin(url))) {
+        Some((_, Ok(Some(pin)))) => Some(pin),
+        Some((url, Ok(None))) => return Err(format!("{url} doesn't pin a build with checksums. {skip}")),
+        Some((_, Err(e))) => return Err(format!("Couldn't read the build main pins ({e}), so the download can't be checked against it. {skip}")),
         None => None,
     };
     let pinned = pin.is_some();

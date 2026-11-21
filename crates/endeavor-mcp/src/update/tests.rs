@@ -151,15 +151,20 @@ fn the_build_main_pins_is_installed_checked_against_mains_checksum() {
 }
 
 #[test]
-fn a_pin_that_cant_be_read_or_has_no_checksums_falls_back_to_latest() {
-    let dir = scratch("pin-fallback");
+fn a_pin_that_cant_be_read_or_has_no_checksums_changes_nothing() {
+    let dir = scratch("pin-unread");
     let release = release(&sha(NEW));
     let mut here = here(&dir, release.clone());
     here.pin = Some(format!("{release}/no-such-pin"));
-    assert_eq!(update(&here).unwrap(), format!("Updated {} to the newest build ({KEY}).", here.exe.display()));
+    let error = update(&here).unwrap_err();
+    assert!(error.starts_with("Couldn't read the build main pins") && error.contains("is unchanged") && error.ends_with("run it again with ENDEAVOR_PIN_URL=none."), "{error}");
     // LATEST's file serves as a pin from before checksums were written: the key alone.
-    std::fs::write(&here.exe, "old").unwrap();
     here.pin = Some(format!("{release}/LATEST"));
+    let error = update(&here).unwrap_err();
+    assert!(error.contains("doesn't pin a build with checksums") && error.contains("ENDEAVOR_PIN_URL=none"), "{error}");
+    assert_eq!(std::fs::read(&here.exe).unwrap(), b"old");
+    // No pin (ENDEAVOR_PIN_URL=none): LATEST, checked against the release's checksum file.
+    here.pin = None;
     assert_eq!(update(&here).unwrap(), format!("Updated {} to the newest build ({KEY}).", here.exe.display()));
     let _ = std::fs::remove_dir_all(&dir);
 }

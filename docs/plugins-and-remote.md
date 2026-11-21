@@ -815,8 +815,9 @@ The plugin's entry is `endeavor mcp`, found on the `PATH`.
 - Two install scripts, `scripts/install.sh` (`sh`, macOS and Linux) and
   `scripts/install.ps1` (PowerShell 5.1, Windows): pick the platform, read
   `main`'s `scripts/release-key` and take the build it pins and its SHA-256
-  (or, when that can't be read or holds no checksums, read `LATEST` from the
-  release and download `endeavor-<key>.sha256`), download
+  (refusing when that can't be read or holds no checksums; with
+  `ENDEAVOR_PIN_URL=none`, read `LATEST` from the release and download
+  `endeavor-<key>.sha256`), download
   `endeavor-<key>-<platform>` (`.exe` on Windows), check the SHA-256, and put
   `endeavor` in `~/.local/bin` (`%LOCALAPPDATA%\Endeavor\bin`), or in the
   folder given by `--dir` / `-Dir` or `ENDEAVOR_INSTALL_DIR`. An existing
@@ -824,8 +825,10 @@ The plugin's entry is `endeavor mcp`, found on the `PATH`.
   `install.sh` prints the `PATH` line to add and edits no file;
   `install.ps1` adds the folder to the user `PATH` and says so. No `sudo`
   and no administrator rights. `ENDEAVOR_RELEASE_URL` replaces the release's
-  address and `ENDEAVOR_PIN_URL` main's `release-key`, for tests; with only
-  the first set, no pin is read.
+  address and `ENDEAVOR_PIN_URL` main's `release-key` (`none`: no pin), for
+  tests; with only the first set, no pin is read. With `--key` for a build
+  `main` doesn't pin, `install.sh` says it is checked only against the
+  release's checksum file.
 - The Helpers workflow builds `linux-x86_64`, `linux-aarch64`,
   `darwin-x86_64`, `darwin-aarch64` and `windows-x86_64`, and every build gets
   the release's key (`scripts/helpers.sh --key`) in `ENDEAVOR_RELEASE_KEY`.
@@ -1115,8 +1118,11 @@ agents).
   `release-key` pins for each platform, so a release changed after the pin
   can't give them a different binary (#98). The install scripts run by hand
   and `endeavor update` take the build `main` pins and check it the same way
-  (#422); when `main` can't be read they fall back to `LATEST` and the
-  release's own checksum file, and say so.
+  (#422). When `main` can't be read or pins no checksums they install
+  nothing, and say that `ENDEAVOR_PIN_URL=none` takes `LATEST` checked
+  against the release's own checksum file. They fail closed because a proxy
+  or filter that blocks `main` would otherwise turn the check off, and the
+  scripts come from that same host.
 - A server's helper is checked against pinned checksums too when there are
   some for its build. `build.rs` embeds `scripts/release-key` as
   `embedded::PINNED_SUMS` when its key is the build's own: a build of the pin

@@ -49,7 +49,9 @@ fn main() {
     // (the one Endeavor's Cargo.lock usually pins) carries the sums of the
     // release's binaries for its own key. `release` checks a server's helper against them.
     let pin = manifest.join("../../scripts/release-key");
-    println!("cargo:rerun-if-changed={}", pin.display());
+    if pin.exists() {
+        println!("cargo:rerun-if-changed={}", pin.display());
+    }
     let pinned = std::fs::read_to_string(&pin).ok().filter(|text| {
         let mut lines = text.lines().map(str::trim);
         key.as_deref().is_some_and(|key| lines.next() == Some(key)) && lines.any(|line| line.split_whitespace().next().is_some_and(|sum| sum.len() == 64 && sum.chars().all(|c| c.is_ascii_hexdigit())))

@@ -29,20 +29,23 @@
 # same place this script comes from, and when that holds checksums it installs
 # the build it names (not LATEST's) and checks it against them: the build the
 # plugins run, checked the way they check it. With --key, main's checksums are
-# used when main pins that build. If release-key can't be read, it falls back
-# to LATEST and says so.
+# used when main pins that build; for another build it says so. If
+# release-key can't be read or holds no checksums, nothing is installed:
+# ENDEAVOR_PIN_URL=none skips the pin.
 #
 # ENDEAVOR_RELEASE_URL replaces the release's address (for tests and
 # development; file:// works), and ENDEAVOR_PIN_URL the address of main's
-# release-key; with only the first set, no pin is read. Without checksums from
-# a pin, the checksum file comes from the same release as the binary, so the
-# check catches a damaged download and not a tampered release.
+# release-key (none or empty: no pin); with only the first set, no pin is
+# read. Without checksums from a pin, the checksum file comes from the same
+# release as the binary, so the check catches a damaged download and not a
+# tampered release.
 set -eu
 
 release=${ENDEAVOR_RELEASE_URL:-https://github.com/jowch/EndeavorMCP/releases/download/helpers}
 release=${release%/}
 if [ -n "${ENDEAVOR_PIN_URL+set}" ]; then
   pin_url=$ENDEAVOR_PIN_URL
+  [ "$pin_url" != none ] || pin_url=
 elif [ -n "${ENDEAVOR_RELEASE_URL:-}" ]; then
   pin_url=
 else
@@ -250,18 +253,19 @@ set_newest() {
 pinner="the plugin"
 sums_from=$sums
 if [ -z "$into" ] && [ -z "$sums" ] && [ -n "$pin_url" ]; then
-  if fetch "$pin_url" "$tmp/release-key"; then
-    pinned_key=$(head -n 1 "$tmp/release-key" | tr -d ' \t\r\n')
-    if is_key "$pinned_key" && grep -Eq '^[0-9a-fA-F]{64} [ *]' "$tmp/release-key"; then
-      if [ -z "$key" ] || [ "$key" = "$pinned_key" ]; then
-        key=$pinned_key
-        sums=$tmp/release-key
-        pinner=main
-        sums_from=$pin_url
-      fi
-    fi
+  skip="Nothing was installed. To install the release's newest build checked only against the release's own checksum file, run it again with ENDEAVOR_PIN_URL=none."
+  fetch "$pin_url" "$tmp/release-key" || fail "couldn't read the build main pins from $pin_url, so the download can't be checked against it. $skip"
+  pinned_key=$(head -n 1 "$tmp/release-key" | tr -d ' \t\r\n')
+  if ! is_key "$pinned_key" || ! grep -Eq '^[0-9a-fA-F]{64} [ *]' "$tmp/release-key"; then
+    fail "$pin_url doesn't pin a build with checksums. $skip"
+  fi
+  if [ -z "$key" ] || [ "$key" = "$pinned_key" ]; then
+    key=$pinned_key
+    sums=$tmp/release-key
+    pinner=main
+    sums_from=$pin_url
   else
-    echo "install.sh: couldn't read the build main pins from $pin_url, so the download is checked only against the release's own checksum file." >&2
+    echo "install.sh: main pins build $pinned_key, not $key, so build $key is checked only against the release's own checksum file." >&2
   fi
 fi
 

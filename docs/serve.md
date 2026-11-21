@@ -41,8 +41,9 @@ changes none itself; the Windows script adds the folder to your user `PATH`
 and says so. It needs no administrator rights and no `sudo`. Because the
 checksum comes from `main` and not from the release, a release changed after
 the pin is caught, not only a damaged download. If `main` can't be read, the
-script installs the newest build (`LATEST`) checked against the release's own
-checksum file, and says so.
+script installs nothing and says so. To install the newest build (`LATEST`)
+checked only against the release's own checksum file, set
+`ENDEAVOR_PIN_URL=none` first (`$env:ENDEAVOR_PIN_URL = 'none'` on Windows).
 
 To build from source instead, install Rust 1.89 or newer, then run:
 
@@ -97,8 +98,9 @@ endeavor update
 
 It downloads the build `main` pins, checks it against the SHA-256 pinned with
 it, and puts it in place of the binary you ran. If `main` can't be read, it
-takes the newest build that `LATEST` names, checked against the release's own
-SHA-256 file, and says so. If you
+changes nothing and says so; `ENDEAVOR_PIN_URL=none endeavor update` takes the
+newest build that `LATEST` names instead, checked against the release's own
+SHA-256 file. If you
 already have the newest build, it says so. It needs curl or wget, and write
 access to the binary's folder. On Windows the running `endeavor.exe` can't be
 overwritten, so the old one is renamed `endeavor.exe.old`, and the next

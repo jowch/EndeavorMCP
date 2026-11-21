@@ -29,7 +29,7 @@ pub(crate) fn base_url() -> String {
 }
 
 /// Main's release-key, where the Helpers pin job writes the build the plugins
-/// run and its checksums. `ENDEAVOR_PIN_URL` replaces it (empty: none); with
+/// run and its checksums. `ENDEAVOR_PIN_URL` replaces it (`none` or empty: none); with
 /// only `ENDEAVOR_RELEASE_URL` set, none is read, since main doesn't pin that release's builds.
 const PIN: &str = "https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/release-key";
 pub(crate) const PIN_ENV: &str = "ENDEAVOR_PIN_URL";
@@ -37,7 +37,7 @@ pub(crate) const PIN_ENV: &str = "ENDEAVOR_PIN_URL";
 /// Where main's pin is read from, if anywhere.
 pub(crate) fn pin_url() -> Option<String> {
     match std::env::var(PIN_ENV) {
-        Ok(url) => Some(url).filter(|url| !url.is_empty()),
+        Ok(url) => Some(url).filter(|url| !url.is_empty() && url != "none"),
         Err(_) if std::env::var(RELEASE_ENV).is_ok_and(|v| !v.is_empty()) => None,
         Err(_) => Some(PIN.into()),
     }
