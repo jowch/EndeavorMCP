@@ -85,7 +85,17 @@ impl Transport {
                 // A keepalive every 10 s of silence, and ssh quits after two go
                 // unanswered: a dead link ends the helper's channel within
                 // about 30 s, even while nothing else is sent.
-                command.args(["-T", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2", "-o", "ConnectTimeout=20", "-o", "ForwardX11=no"]);
+                command.args(["-T", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2"]);
+                // A host that doesn't answer is given up on after 20 s. Not on Windows: its
+                // ssh then stops at the first address that refuses (IPv6 `localhost`, say)
+                // instead of trying the next (#35). There, Windows' own connect gives up on
+                // each address that doesn't answer after about 21 s. What that doesn't cover
+                // is a server that takes the connection and then says nothing; a deadline of
+                // our own would have to stop while a sign-in prompt waits for the user.
+                if !cfg!(windows) {
+                    command.args(["-o", "ConnectTimeout=20"]);
+                }
+                command.args(["-o", "ForwardX11=no"]);
                 // Windows' ssh has no connection sharing: a ControlMaster line in a
                 // config copied from a Mac would make the connect fail there.
                 if cfg!(windows) {

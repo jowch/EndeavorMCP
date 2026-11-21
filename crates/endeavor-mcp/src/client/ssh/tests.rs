@@ -48,7 +48,12 @@ fn the_ssh_is_windows_own_when_there_is_one() {
 #[test]
 fn ssh_gets_its_usual_arguments_and_the_script_last() {
     let command = Transport::Ssh { host: "jc@lab".into(), port: Some(2222) }.command("echo hi", &Auth::Batch).unwrap();
-    let mut expected = vec!["-T", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2", "-o", "ConnectTimeout=20", "-o", "ForwardX11=no"];
+    let mut expected = vec!["-T", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2"];
+    // Not on Windows, whose ssh then gives up on the first address that refuses (#35).
+    if !cfg!(windows) {
+        expected.extend(["-o", "ConnectTimeout=20"]);
+    }
+    expected.extend(["-o", "ForwardX11=no"]);
     if cfg!(windows) {
         expected.extend(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
     }
