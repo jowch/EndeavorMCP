@@ -311,6 +311,10 @@ pub struct Config {
     pub julia_when_needed: bool,
     /// Hears the session's events. The default writes each `Trouble` to stderr and drops the steps.
     pub on_event: OnEvent,
+    /// The listener's port: a closed session's (`Session::port`), so the agents that have it in
+    /// their MCP URL reach this session, as when a server's connection settings change. None, the
+    /// default, or a port something else took since: a free one.
+    pub port: Option<u16>,
 }
 
 impl Config {
@@ -322,7 +326,7 @@ impl Config {
                 eprintln!("{text}");
             }
         });
-        Config { server, transport, root: String::new(), state: String::new(), depot: String::new(), allow_install: false, messages: Messages::default(), helper: Box::new(helper), launcher: None, auth: Auth::Batch, exit_idle: true, julia_when_needed: false, on_event }
+        Config { server, transport, root: String::new(), state: String::new(), depot: String::new(), allow_install: false, messages: Messages::default(), helper: Box::new(helper), launcher: None, auth: Auth::Batch, exit_idle: true, julia_when_needed: false, on_event, port: None }
     }
 }
 
@@ -440,7 +444,7 @@ impl Session {
     /// asked of the runtime until `ensure`.
     pub fn new(config: Config) -> Result<Session, String> {
         let name = config.server.display_name();
-        let listener = Listener::new(&name, None, config.messages)?;
+        let listener = Listener::on_port(&name, None, config.messages, config.port)?;
         let (inbox, messages) = mpsc::channel();
         let inner = Inner {
             id: config.server.id.clone(),
@@ -587,7 +591,8 @@ impl Session {
         self.shared.request_install();
     }
 
-    /// The listener's port on this computer, the same for the session's whole life.
+    /// The listener's port on this computer, the same for the session's whole life. Once the session
+    /// is closed, a new one can have it (`Config::port`).
     pub fn port(&self) -> u16 {
         self.shared.listener.port()
     }

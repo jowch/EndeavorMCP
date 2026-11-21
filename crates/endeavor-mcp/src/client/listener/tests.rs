@@ -279,3 +279,23 @@ fn while_the_server_is_away_the_agent_can_still_ask_the_user_to_restart_it() {
     let other = post(&listener, "secret", LIST);
     assert!(other.contains("reconnecting by itself"), "other calls still say why: {other}");
 }
+
+#[test]
+fn a_closed_listeners_port_goes_to_the_next_one_and_a_taken_port_to_a_free_one() {
+    for _ in 0..20 {
+        let first = away();
+        first.close();
+        // At once: close waits until the port is let go.
+        let second = Listener::on_port("lab-server", None, Messages::default(), Some(first.port())).unwrap();
+        assert_eq!(second.port(), first.port(), "the agents' MCP URL reaches the new listener");
+        let mux = Mux::new(std::io::sink());
+        second.attach(mux.clone(), "secret".into(), true, false);
+        second.forget(&mux);
+        assert!(post(&second, "secret", LIST).contains("reconnecting by itself"), "the new listener answers");
+        // One whose port is still taken listens on another.
+        let third = Listener::on_port("lab-server", None, Messages::default(), Some(second.port())).unwrap();
+        assert_ne!(third.port(), second.port());
+        second.close();
+        third.close();
+    }
+}

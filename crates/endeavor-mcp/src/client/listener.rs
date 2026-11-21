@@ -64,7 +64,12 @@ pub struct Listener {
     /// How the client asks the user to restart the runtime when the agent calls `request_restart` (`set_restart`).
     restart: OnceLock<Box<AskRestart>>,
     messages: Messages,
+    /// Told once the accept loop has let go of the port (`close`).
+    released: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
 }
+
+/// How long `close` waits for the port to be let go.
+const RELEASE: Duration = Duration::from_secs(2);
 
 /// Where a listener's connections go.
 enum Upstream {
@@ -93,7 +98,18 @@ impl Listener {
 
     /// A listener with `refuse` (if any) and its own wording for the messages it gives.
     pub fn new(name: &str, refuse: Option<Refuse>, messages: Messages) -> Result<Arc<Listener>, String> {
-        let socket = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        Listener::on_port(name, refuse, messages, None)
+    }
+
+    /// As `new`, on `port` when it can be had: that of a closed listener, so the agents that have
+    /// it in their MCP URL reach this one. When it can't (something else took it), or with None, on
+    /// a free port; `port()` says which.
+    pub fn on_port(name: &str, refuse: Option<Refuse>, messages: Messages, port: Option<u16>) -> Result<Arc<Listener>, String> {
+        let socket = match port.and_then(|port| TcpListener::bind(("127.0.0.1", port)).ok()) {
+            Some(socket) => socket,
+            None => TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?,
+        };
+        let (release, released) = std::sync::mpsc::channel();
         let listener = Arc::new(Listener {
             port: socket.local_addr().map_err(|e| e.to_string())?.port(),
             name: name.to_owned(),
@@ -104,9 +120,13 @@ impl Listener {
             snapshot: OnceLock::new(),
             restart: OnceLock::new(),
             messages,
+            released: Mutex::new(Some(released)),
         });
         let accepting = listener.clone();
         std::thread::spawn(move || {
+            // Locals drop in reverse: the socket first, which lets go of the port, then the word that it did.
+            let _release = Release(release);
+            let socket = socket;
             // A failed accept (no file descriptors left, a connection reset before it was taken) doesn't end the listener.
             let mut backoff = Backoff::default();
             for connection in socket.incoming() {
@@ -271,7 +291,8 @@ impl Listener {
         self.port
     }
 
-    /// Stop taking connections and close the port. A connection already relayed goes on until its ends close.
+    /// Stop taking connections and close the port, waiting (a moment at most) until it is let go.
+    /// A connection already relayed goes on until its ends close.
     pub fn close(&self) {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
@@ -280,6 +301,10 @@ impl Listener {
         self.changed.notify_all();
         // The accept loop is woken by a connection of its own.
         let _ = TcpStream::connect(("127.0.0.1", self.port));
+        // Once this returns, the port can be had again (`on_port`).
+        if let Some(released) = self.released.lock().unwrap().take() {
+            let _ = released.recv_timeout(RELEASE);
+        }
     }
 
     /// The MCP URL the agent's config carries; the same for the listener's whole life.
@@ -290,6 +315,15 @@ impl Listener {
     /// Pluto's start page: the core trades `token` (the pages' token) in the URL for a cookie, and drops it from the URL.
     pub(super) fn page_url(&self, token: &str) -> String {
         format!("http://127.0.0.1:{}/?token={token}", self.port)
+    }
+}
+
+/// Says that the accept loop ended when it is dropped, after the socket it held.
+struct Release(std::sync::mpsc::Sender<()>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
     }
 }
 

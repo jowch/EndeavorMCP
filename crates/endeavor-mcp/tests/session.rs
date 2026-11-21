@@ -298,6 +298,22 @@ fn closing_leaves_the_runtime_running_and_ends_everything_else() {
 }
 
 #[test]
+fn a_session_opened_on_a_closed_ones_port_keeps_the_agents_url_working() {
+    // As when a server's connection settings change: the app closes the session and opens another.
+    let place = Place::new("same-port");
+    let session = place.session();
+    let runtime = ready(session.ensure(start(), LONG, false));
+    session.close();
+    let mut config = place.config(true, None);
+    config.port = Some(runtime.port);
+    let second = Session::new(config).expect("a session");
+    assert_eq!(second.port(), runtime.port);
+    let again = ready(second.ensure(Want::Attach { install: false }, LONG, false));
+    assert_eq!((again.port, again.pid, again.mcp_url.as_str()), (runtime.port, runtime.pid, runtime.mcp_url.as_str()));
+    assert!(call(again.port, &again.token).contains(r#""result""#), "an agent's call reaches the runtime");
+}
+
+#[test]
 fn a_dropped_session_ends_its_thread_helper_and_port_and_stops_nothing() {
     let place = Place::new("drop");
     let session = place.session();
