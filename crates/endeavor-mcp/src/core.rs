@@ -451,6 +451,10 @@ struct JuliaStarter {
     changed: std::sync::Condvar,
     /// Julia's pid while it runs, else 0.
     pid: std::sync::atomic::AtomicI32,
+    /// When that Julia started (`winproc::start_time`), else 0: on Windows a pid alone may name
+    /// another process once Julia has gone, so it is killed only through this (#464).
+    #[cfg(windows)]
+    started: std::sync::atomic::AtomicU64,
     /// The core is stopping: Julia ending now ends it, even mid-start.
     stopping: std::sync::atomic::AtomicBool,
     stops: std::sync::mpsc::Sender<Stop>,
@@ -474,6 +478,8 @@ impl JuliaStarter {
             now: std::sync::Mutex::new(JuliaNow { phase: Phase::Idle, moved: std::time::Instant::now(), began: std::time::Instant::now(), said: false, exited: None, started: None }),
             changed: std::sync::Condvar::new(),
             pid: 0.into(),
+            #[cfg(windows)]
+            started: 0.into(),
             stopping: false.into(),
             stops,
         }
@@ -656,6 +662,8 @@ impl JuliaStarter {
         // To end it if it stalls, once the watcher below has it.
         #[cfg(windows)]
         let started = crate::winproc::start_time(std::os::windows::io::AsRawHandle::as_raw_handle(&child));
+        #[cfg(windows)]
+        self.started.store(started.unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
         self.pid.store(pid, std::sync::atomic::Ordering::SeqCst);
         // A stop that came before the pid was stored found nothing to end.
         if self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1930,8 +1938,7 @@ fn pass_on_stop_signals(set: libc::sigset_t, served: Arc<Served>) {
 }
 
 /// How long Julia has to end after a stop signal, and again after the shutdown that follows, before the
-/// next step (`unless_julia_ends`).
-#[cfg(unix)]
+/// next step (`unless_julia_ends`, `kill_unless_shut_down`).
 fn stop_grace() -> std::time::Duration {
     #[cfg(debug_assertions)]
     if let Some(secs) = std::env::var("ENDEAVOR_TEST_STOP_GRACE_SECS").ok().and_then(|s| s.parse().ok()) {
@@ -1958,14 +1965,21 @@ fn unless_julia_ends(served: Arc<Served>, pid: i32) {
 }
 
 /// After a shutdown asked of Julia (`pid`): if it still runs after `stop_grace`, kill it; the core ends with it.
-#[cfg(unix)]
 fn kill_unless_shut_down(served: &Served, pid: i32) {
     std::thread::sleep(stop_grace());
     if served.julia.pid.load(std::sync::atomic::Ordering::SeqCst) == pid {
         eprintln!("[ Warning: Julia didn't shut down; killing it");
+        #[cfg(unix)]
         // SAFETY: plain syscall. The pid is Julia's until the wait thread reaps it and stores 0; a reuse in
         // that brief window is the only way this could hit another process.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        unsafe {
+            libc::kill(pid, libc::SIGKILL)
+        };
+        // Only the process that started when this Julia did.
+        #[cfg(windows)]
+        if let Some(process) = crate::winproc::Process::open(pid, Some(served.julia.started.load(std::sync::atomic::Ordering::SeqCst)).filter(|&t| t != 0)) {
+            process.terminate();
+        }
     }
 }
 
@@ -2015,13 +2029,10 @@ impl Served {
     }
 
     /// `shutdown`, for a runtime that ends on its own (idle, or left and no longer wanted), which no one
-    /// waits on: if Julia still runs `stop_grace` later, kill it (#458). Not on Windows yet, where
-    /// Julia's start time isn't kept past its start, and a pid alone may name another process by then.
+    /// waits on: if Julia still runs `stop_grace` later, kill it (#458, #464).
     fn end_on_its_own(self: &Arc<Self>) {
-        #[cfg(unix)]
         let pid = self.julia.pid.load(std::sync::atomic::Ordering::SeqCst);
         self.shutdown();
-        #[cfg(unix)]
         if pid > 0 {
             let served = self.clone();
             std::thread::spawn(move || kill_unless_shut_down(&served, pid));
