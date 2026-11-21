@@ -153,10 +153,15 @@ jobs:
       # R and most of Ember's packages from Ubuntu's archive. The first R
       # notebook builds what's missing (RcppMsgPack) and Ember itself from
       # r-universe's source package, as it would for a user.
+      # A stalled package mirror once hung `apt-get update` until the job's
+      # 45-minute limit, with no test run (#235). The step's limit and apt's
+      # network timeouts make it fail in minutes instead, and say so.
       - name: R
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends r-base-core r-base-dev r-cran-commonmark r-cran-httpuv r-cran-jsonlite r-cran-curl r-cran-later r-cran-processx r-cran-promises r-cran-renv
+          apt="-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3"
+          sudo apt-get $apt update
+          sudo apt-get $apt install -y --no-install-recommends r-base-core r-base-dev r-cran-commonmark r-cran-httpuv r-cran-jsonlite r-cran-curl r-cran-later r-cran-processx r-cran-promises r-cran-renv
       # The Julia depot, and the folder Ember installs into (paths.rs ember_folder).
       # A build's library is only there when its install finished, so a restored
       # one is whole; the test updates it to Ember's latest build.
