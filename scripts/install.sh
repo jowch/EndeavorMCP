@@ -1,11 +1,12 @@
 #!/bin/sh
-# Install the newest endeavor from the Helpers release on GitHub, for Linux and
-# macOS (Windows: scripts/install.ps1).
+# Install endeavor from the Helpers release on GitHub, for Linux and macOS
+# (Windows: scripts/install.ps1).
 #
 #   curl -fsSL https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --dir /some/folder
 #
-# It reads LATEST from the release (or takes the build from --key), downloads
+# It reads LATEST from the release (or takes the build from --key, or from
+# main's pin, below), downloads
 # endeavor-<key>-<platform> and endeavor-<key>.sha256, checks the SHA-256, and
 # puts the binary in DIR as `endeavor` (`endeavor.exe` under Git Bash on
 # Windows), replacing one that is there. DIR is --dir, else
@@ -24,14 +25,32 @@
 # download. A FILE with no checksums in it (a pin from before they were
 # written) counts as none.
 #
+# Run by hand (no --into) with no --sums, it reads release-key from main, the
+# same place this script comes from, and when that holds checksums it installs
+# the build it names (not LATEST's) and checks it against them: the build the
+# plugins run, checked the way they check it. With --key, main's checksums are
+# used when main pins that build; for another build it says so. If
+# release-key can't be read or holds no checksums, nothing is installed:
+# ENDEAVOR_PIN_URL=none skips the pin.
+#
 # ENDEAVOR_RELEASE_URL replaces the release's address (for tests and
-# development; file:// works). Without --sums, the checksum file comes from
-# the same release as the binary, so the check catches a damaged download and
-# not a tampered release.
+# development; file:// works), and ENDEAVOR_PIN_URL the address of main's
+# release-key (none or empty: no pin); with only the first set, no pin is
+# read. Without checksums from a pin, the checksum file comes from the same
+# release as the binary, so the check catches a damaged download and not a
+# tampered release.
 set -eu
 
 release=${ENDEAVOR_RELEASE_URL:-https://github.com/jowch/EndeavorMCP/releases/download/helpers}
 release=${release%/}
+if [ -n "${ENDEAVOR_PIN_URL+set}" ]; then
+  pin_url=$ENDEAVOR_PIN_URL
+  [ "$pin_url" != none ] || pin_url=
+elif [ -n "${ENDEAVOR_RELEASE_URL:-}" ]; then
+  pin_url=
+else
+  pin_url=https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/release-key
+fi
 dir=${ENDEAVOR_INSTALL_DIR:-}
 into=
 key=
@@ -230,6 +249,26 @@ set_newest() {
   printf '%s\n' "$key" >"$into/.newest.$$" && mv -f "$into/.newest.$$" "$into/.newest" || fail "couldn't write $into/.newest."
 }
 
+# Who pins the checksums in $sums, and where they came from, for the errors.
+pinner="the plugin"
+sums_from=$sums
+if [ -z "$into" ] && [ -z "$sums" ] && [ -n "$pin_url" ]; then
+  skip="Nothing was installed. To install the release's newest build checked only against the release's own checksum file, run it again with ENDEAVOR_PIN_URL=none."
+  fetch "$pin_url" "$tmp/release-key" || fail "couldn't read the build main pins from $pin_url, so the download can't be checked against it. $skip"
+  pinned_key=$(head -n 1 "$tmp/release-key" | tr -d ' \t\r\n')
+  if ! is_key "$pinned_key" || ! grep -Eq '^[0-9a-fA-F]{64} [ *]' "$tmp/release-key"; then
+    fail "$pin_url doesn't pin a build with checksums. $skip"
+  fi
+  if [ -z "$key" ] || [ "$key" = "$pinned_key" ]; then
+    key=$pinned_key
+    sums=$tmp/release-key
+    pinner=main
+    sums_from=$pin_url
+  else
+    echo "install.sh: main pins build $pinned_key, not $key, so build $key is checked only against the release's own checksum file." >&2
+  fi
+fi
+
 newest=
 if [ -z "$key" ]; then
   key=$(fetch "$release/LATEST") || fail "couldn't download $release/LATEST."
@@ -277,7 +316,7 @@ pinned=
 if [ -n "$sums" ] && grep -Eq '^[0-9a-fA-F]{64} [ *]' "$sums"; then
   pinned=1
   want=$(sum_of "$sums")
-  [ -n "$want" ] || fail "the checksums in $sums list no binary of build $key for $platform."
+  [ -n "$want" ] || fail "the checksums in $sums_from list no binary of build $key for $platform."
 else
   if ! fetch "$release/endeavor-$key.sha256" "$tmp/sums"; then
     if [ -z "$newest" ] && fetch "$release/LATEST" >/dev/null 2>&1; then
@@ -298,7 +337,7 @@ fi
 have=$(sha256 "$tmp/$exe")
 if [ "$have" != "$want" ]; then
   if [ -n "$pinned" ]; then
-    fail "the download from $release/$name doesn't match the checksum the plugin pins (SHA-256 $have, expected $want). It was deleted; nothing was installed."
+    fail "the download from $release/$name doesn't match the checksum $pinner pins (SHA-256 $have, expected $want). It was deleted; nothing was installed."
   fi
   fail "the download from $release/$name doesn't match its checksum (SHA-256 $have, expected $want). It was deleted; nothing was installed."
 fi

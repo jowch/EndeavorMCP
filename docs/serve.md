@@ -28,19 +28,22 @@ On Windows, in PowerShell (this script has never been run, see
 irm https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/install.ps1 | iex
 ```
 
-The script finds the newest build on the
-[Helpers release](https://github.com/jowch/EndeavorMCP/releases/tag/helpers),
-checks its SHA-256, and installs it as `endeavor` in `~/.local/bin`
+The script installs the build this repository's `main` pins, the one the
+plugins run, from the
+[Helpers release](https://github.com/jowch/EndeavorMCP/releases/tag/helpers).
+It checks the download against the SHA-256 pinned beside that build in
+`scripts/release-key`, read from `main` like the script itself, and installs it as `endeavor` in `~/.local/bin`
 (`%LOCALAPPDATA%\Endeavor\bin` on Windows), replacing a copy that is there.
 Pick another folder with `--dir` (`sh -s -- --dir FOLDER`) or by setting
 `ENDEAVOR_INSTALL_DIR` first. If the folder isn't on your `PATH`, the Linux
 and macOS script prints the line to add to your shell's startup file, and
 changes none itself; the Windows script adds the folder to your user `PATH`
-and says so. It needs no administrator rights and no `sudo`. It trusts the
-release the way `curl | sh` always does: the checksum file comes from the
-same release as the binary, so the check catches a damaged download and not a
-tampered release. (The plugins check theirs against checksums pinned in this
-repository instead.)
+and says so. It needs no administrator rights and no `sudo`. Because the
+checksum comes from `main` and not from the release, a release changed after
+the pin is caught, not only a damaged download. If `main` can't be read, the
+script installs nothing and says so. To install the newest build (`LATEST`)
+checked only against the release's own checksum file, set
+`ENDEAVOR_PIN_URL=none` first (`$env:ENDEAVOR_PIN_URL = 'none'` on Windows).
 
 To build from source instead, install Rust 1.89 or newer, then run:
 
@@ -93,8 +96,11 @@ With a binary from the Helpers release (on Linux, macOS or Windows), run:
 endeavor update
 ```
 
-It downloads the newest build that `LATEST` names, checks it against the
-release's SHA-256 file, and puts it in place of the binary you ran. If you
+It downloads the build `main` pins, checks it against the SHA-256 pinned with
+it, and puts it in place of the binary you ran. If `main` can't be read, it
+changes nothing and says so; `ENDEAVOR_PIN_URL=none endeavor update` takes the
+newest build that `LATEST` names instead, checked against the release's own
+SHA-256 file. If you
 already have the newest build, it says so. It needs curl or wget, and write
 access to the binary's folder. On Windows the running `endeavor.exe` can't be
 overwritten, so the old one is renamed `endeavor.exe.old`, and the next

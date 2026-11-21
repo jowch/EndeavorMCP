@@ -72,7 +72,7 @@ fn here(dir: &Path, release: String) -> Here {
     std::fs::create_dir_all(&bin).unwrap();
     let exe = bin.join("endeavor");
     std::fs::write(&exe, "old").unwrap();
-    Here { exe, platform: Some("linux-x86_64"), server_root: dir.join("home/.cache/endeavor"), cargo_home: dir.join("home/.cargo"), plugin_bin: dir.join("home/.local/share/endeavor/bin"), release, state_dir: dir.join("state") }
+    Here { exe, platform: Some("linux-x86_64"), server_root: dir.join("home/.cache/endeavor"), cargo_home: dir.join("home/.cargo"), plugin_bin: dir.join("home/.local/share/endeavor/bin"), release, pin: None, state_dir: dir.join("state") }
 }
 
 fn leftovers(dir: &Path) -> Vec<String> {
@@ -114,6 +114,58 @@ fn a_release_without_this_platform_or_unreachable_says_so() {
     here.release = serve(HashMap::new());
     assert!(update(&here).unwrap_err().starts_with("Couldn't download http://127.0.0.1:"));
     assert_eq!(std::fs::read(&here.exe).unwrap(), b"old");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_build_main_pins_is_installed_checked_against_mains_checksum() {
+    let dir = scratch("pinned");
+    // The release was tampered with: LATEST's binary and the checksum file agree, and main pins another build with its real checksum.
+    let pinned = "00000000aaaa";
+    let tampered: &[u8] = b"#!/bin/sh\necho tampered\n";
+    let pin = |sum: &str| format!("{pinned}\n{}  endeavor-{pinned}-linux-aarch64\n{sum}  endeavor-{pinned}-linux-x86_64\n", sha(b"other")).into_bytes();
+    let release = serve(HashMap::from([
+        ("LATEST".to_owned(), format!("{KEY}\n").into_bytes()),
+        (format!("endeavor-{KEY}.sha256"), format!("{}  endeavor-{KEY}-linux-x86_64\n", sha(tampered)).into_bytes()),
+        (format!("endeavor-{KEY}-linux-x86_64"), tampered.to_vec()),
+        (format!("endeavor-{pinned}-linux-x86_64"), tampered.to_vec()),
+        ("real-pin".to_owned(), pin(&sha(NEW))),
+    ]));
+    let mut here = here(&dir, release.clone());
+    here.pin = Some(format!("{release}/real-pin"));
+    let error = update(&here).unwrap_err();
+    assert!(error.contains("doesn't match the checksum main pins") && error.contains("is unchanged"), "{error}");
+    assert_eq!(std::fs::read(&here.exe).unwrap(), b"old");
+
+    // The pinned build, not LATEST's, and no checksum file on the release for it.
+    let release = serve(HashMap::from([
+        ("LATEST".to_owned(), format!("{KEY}\n").into_bytes()),
+        (format!("endeavor-{pinned}-linux-x86_64"), NEW.to_vec()),
+        ("real-pin".to_owned(), pin(&sha(NEW))),
+    ]));
+    here.release = release.clone();
+    here.pin = Some(format!("{release}/real-pin"));
+    assert_eq!(update(&here).unwrap(), format!("Updated {} to the newest build ({pinned}).", here.exe.display()));
+    assert_eq!(std::fs::read(&here.exe).unwrap(), NEW);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pin_that_cant_be_read_or_has_no_checksums_changes_nothing() {
+    let dir = scratch("pin-unread");
+    let release = release(&sha(NEW));
+    let mut here = here(&dir, release.clone());
+    here.pin = Some(format!("{release}/no-such-pin"));
+    let error = update(&here).unwrap_err();
+    assert!(error.starts_with("Couldn't read the build main pins") && error.contains("is unchanged") && error.ends_with("run it again with ENDEAVOR_PIN_URL=none."), "{error}");
+    // LATEST's file serves as a pin from before checksums were written: the key alone.
+    here.pin = Some(format!("{release}/LATEST"));
+    let error = update(&here).unwrap_err();
+    assert!(error.contains("doesn't pin a build with checksums") && error.contains("ENDEAVOR_PIN_URL=none"), "{error}");
+    assert_eq!(std::fs::read(&here.exe).unwrap(), b"old");
+    // No pin (ENDEAVOR_PIN_URL=none): LATEST, checked against the release's checksum file.
+    here.pin = None;
+    assert_eq!(update(&here).unwrap(), format!("Updated {} to the newest build ({KEY}).", here.exe.display()));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

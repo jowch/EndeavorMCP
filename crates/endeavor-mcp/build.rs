@@ -44,5 +44,18 @@ fn main() {
         assert!(key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "ENDEAVOR_RELEASE_KEY is not a key: {key:?}");
     }
     out.push_str(&format!("pub const RELEASE_KEY: Option<&str> = {key:?};\n"));
+    // scripts/release-key, when it pins this build with checksums: the Helpers
+    // pin job writes them on main after the build, so a build of the pin commit
+    // (the one Endeavor's Cargo.lock usually pins) carries the sums of the
+    // release's binaries for its own key. `release` checks a server's helper against them.
+    let pin = manifest.join("../../scripts/release-key");
+    if pin.exists() {
+        println!("cargo:rerun-if-changed={}", pin.display());
+    }
+    let pinned = std::fs::read_to_string(&pin).ok().filter(|text| {
+        let mut lines = text.lines().map(str::trim);
+        key.as_deref().is_some_and(|key| lines.next() == Some(key)) && lines.any(|line| line.split_whitespace().next().is_some_and(|sum| sum.len() == 64 && sum.chars().all(|c| c.is_ascii_hexdigit())))
+    });
+    out.push_str(&format!("pub const PINNED_SUMS: Option<&str> = {pinned:?};\n"));
     std::fs::write(PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("embedded.rs"), out).unwrap();
 }

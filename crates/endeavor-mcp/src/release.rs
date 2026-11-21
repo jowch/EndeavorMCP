@@ -2,8 +2,12 @@
 //! checking SHA-256, the platform names its files use, and the helper for a
 //! server whose platform isn't this computer's. `update` and `endeavor mcp` use it.
 //!
-//! The checksum file comes from the same release as the binary, so a check
-//! catches a corrupt or cut-short download and not a release that was
+//! A download is checked against checksums pinned outside the release when
+//! there are some for its build: the ones this binary carries (build.rs), or
+//! the ones in main's `scripts/release-key`, which the Helpers pin job writes
+//! (`pinned_sums`, `read_pin`). Those catch a release changed after the pin.
+//! Otherwise the checksum file comes from the same release as the binary, so a
+//! check catches a corrupt or cut-short download and not a release that was
 //! tampered with.
 
 use std::fs::{File, OpenOptions};
@@ -22,6 +26,47 @@ pub(crate) const RELEASE_ENV: &str = "ENDEAVOR_RELEASE_URL";
 /// The release's address without a trailing slash.
 pub(crate) fn base_url() -> String {
     std::env::var(RELEASE_ENV).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| RELEASE.into()).trim_end_matches('/').to_owned()
+}
+
+/// Main's release-key, where the Helpers pin job writes the build the plugins
+/// run and its checksums. `ENDEAVOR_PIN_URL` replaces it (`none` or empty: none); with
+/// only `ENDEAVOR_RELEASE_URL` set, none is read, since main doesn't pin that release's builds.
+const PIN: &str = "https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/release-key";
+pub(crate) const PIN_ENV: &str = "ENDEAVOR_PIN_URL";
+
+/// Where main's pin is read from, if anywhere.
+pub(crate) fn pin_url() -> Option<String> {
+    match std::env::var(PIN_ENV) {
+        Ok(url) => Some(url).filter(|url| !url.is_empty() && url != "none"),
+        Err(_) if std::env::var(RELEASE_ENV).is_ok_and(|v| !v.is_empty()) => None,
+        Err(_) => Some(PIN.into()),
+    }
+}
+
+/// The build a release-key's `text` pins, when it holds checksums too: one
+/// from before the pin job wrote them holds the key alone, and isn't a pin of checksums.
+pub(crate) fn pinned_key(text: &str) -> Option<&str> {
+    let mut lines = text.lines().map(str::trim);
+    let key = lines.next().filter(|key| !key.is_empty() && key.chars().all(|c| c.is_ascii_hexdigit()))?;
+    let is_sum = |line: &str| line.split_whitespace().next().is_some_and(|sum| sum.len() == 64 && sum.chars().all(|c| c.is_ascii_hexdigit()));
+    lines.any(is_sum).then_some(key)
+}
+
+/// Main's release-key from `url`, when it pins a build with checksums: the build and the text.
+pub(crate) fn read_pin(url: &str) -> Result<Option<(String, String)>, String> {
+    let text = String::from_utf8_lossy(&download(url, None)?).into_owned();
+    Ok(pinned_key(&text).map(str::to_owned).map(|key| (key, text)))
+}
+
+/// The checksums pinned for build `key`: the ones this binary carries, else
+/// main's (from `pin`) when main pins `key`. None when neither pins it, or main can't be read.
+fn pinned_sums(key: &str, pin: Option<&str>) -> Option<String> {
+    if let Some(text) = embedded::PINNED_SUMS
+        && pinned_key(text) == Some(key)
+    {
+        return Some(text.to_owned());
+    }
+    read_pin(pin?).ok().flatten().filter(|(pinned, _)| pinned == key).map(|(_, text)| text)
 }
 
 /// The release's name for a platform given as `uname` words after `client`'s
@@ -159,7 +204,7 @@ pub(crate) fn redirect_not_https(url: &str, headers: &str) -> Option<String> {
 /// The helper to send to a server of platform `os` and `arch`, as `client`
 /// names them, fetched from the release this build belongs to.
 pub(crate) fn helper_for(os: &str, arch: &str, cache: &Path) -> Result<PathBuf, String> {
-    fetch_helper(os, arch, embedded::RELEASE_KEY, &base_url(), cache, &removed_build)
+    fetch_helper(os, arch, embedded::RELEASE_KEY, &base_url(), pin_url().as_deref(), cache, &removed_build)
 }
 
 /// What a plugin or installed binary says when the release no longer has its build `key`.
@@ -173,28 +218,29 @@ fn removed_build(key: &str, os: &str, arch: &str) -> String {
 /// used again without the network. `removed(key, os, arch)` is what to say
 /// when the release no longer has that build.
 pub fn release_helper(os: &str, arch: &str, key: &str, cache: &Path, removed: &dyn Fn(&str, &str, &str) -> String) -> Result<PathBuf, String> {
-    fetch_helper(os, arch, Some(key), &base_url(), cache, removed)
+    fetch_helper(os, arch, Some(key), &base_url(), pin_url().as_deref(), cache, removed)
 }
 
 /// The longest another process's download is waited for.
 const LOCK_WAIT: Duration = Duration::from_secs(1200);
 
-/// `endeavor-<key>-<platform>` from `release`, checked against that key's
-/// checksum file and kept as `cache/<key>/<platform>/endeavor`. A kept file is
+/// `endeavor-<key>-<platform>` from `release`, checked against the checksums
+/// pinned for `key` (`pinned_sums`, main's read from `pin`) or, when there are
+/// none, against that key's checksum file on the release, and kept as `cache/<key>/<platform>/endeavor`. A kept file is
 /// used again once its checksum, recorded beside it, still matches. One
 /// process at a time checks or fetches (a lock file in that folder), a kept
 /// file is only ever replaced by renaming a checked download over it, and the
 /// folders of other keys in `cache` are removed afterwards. When the release
 /// no longer holds `key`, the error is `removed(key, os, arch)`: what to say
 /// to a user whose build is that old.
-pub(crate) fn fetch_helper(os: &str, arch: &str, key: Option<&str>, release: &str, cache: &Path, removed: &dyn Fn(&str, &str, &str) -> String) -> Result<PathBuf, String> {
+pub(crate) fn fetch_helper(os: &str, arch: &str, key: Option<&str>, release: &str, pin: Option<&str>, cache: &Path, removed: &dyn Fn(&str, &str, &str) -> String) -> Result<PathBuf, String> {
     let platform = platform_name(os, arch).filter(|_| os != "windows").ok_or_else(|| client::no_helper(os, arch))?;
     let key = key.ok_or_else(|| format!("A helper for {os} {arch} servers needs a release build of Endeavor, installed with the install script, and this build has none."))?;
     let dir = cache.join(key).join(platform);
     make_private_dir(&dir)?;
     let _lock = lock(&dir)?;
     let kept = dir.join("endeavor");
-    let helper = if is_good(&dir) { kept } else { fetch(os, arch, key, platform, release.trim_end_matches('/'), &dir, removed)? };
+    let helper = if is_good(&dir) { kept } else { fetch(os, arch, key, platform, release.trim_end_matches('/'), pin, &dir, removed)? };
     prune(cache, key);
     Ok(helper)
 }
@@ -204,7 +250,8 @@ fn is_good(dir: &Path) -> bool {
     matches!((std::fs::read_to_string(dir.join("endeavor.sha256")), sha256_of(&dir.join("endeavor"))), (Ok(want), Ok(have)) if want.trim() == have)
 }
 
-fn fetch(os: &str, arch: &str, key: &str, platform: &str, release: &str, dir: &Path, removed: &dyn Fn(&str, &str, &str) -> String) -> Result<PathBuf, String> {
+#[allow(clippy::too_many_arguments)]
+fn fetch(os: &str, arch: &str, key: &str, platform: &str, release: &str, pin: Option<&str>, dir: &Path, removed: &dyn Fn(&str, &str, &str) -> String) -> Result<PathBuf, String> {
     let (kept, recorded) = (dir.join("endeavor"), dir.join("endeavor.sha256"));
     // Left by a process that was killed; the lock says none is running.
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -213,14 +260,23 @@ fn fetch(os: &str, arch: &str, key: &str, platform: &str, release: &str, dir: &P
         }
     }
     let name = asset_name(key, platform);
-    let sums = download(&format!("{release}/endeavor-{key}.sha256"), None).map_err(|e| if was_removed(release, key) { removed(key, os, arch) } else { format!("Couldn't get the helper for {os} {arch} servers from the release: {e}") })?;
-    let want = checksum_for(&String::from_utf8_lossy(&sums), &name).ok_or_else(|| format!("The release has no helper for {os} {arch} servers in build {key} ({name} isn't in its checksum file)."))?;
+    let missing = |e: String| if was_removed(release, key) { removed(key, os, arch) } else { format!("Couldn't get the helper for {os} {arch} servers from the release: {e}") };
+    let pinned = pinned_sums(key, pin);
+    let want = match &pinned {
+        Some(sums) => checksum_for(sums, &name).ok_or_else(|| format!("The checksums pinned for build {key} list no helper for {os} {arch} servers ({name})."))?,
+        None => {
+            let sums = download(&format!("{release}/endeavor-{key}.sha256"), None).map_err(missing)?;
+            checksum_for(&String::from_utf8_lossy(&sums), &name).ok_or_else(|| format!("The release has no helper for {os} {arch} servers in build {key} ({name} isn't in its checksum file)."))?
+        }
+    };
+    let against = if pinned.is_some() { format!("the checksum pinned for build {key}") } else { "its checksum".to_owned() };
     let pid = std::process::id();
     let (part, part_sum) = (dir.join(format!("endeavor.part.{pid}")), dir.join(format!("endeavor.sha256.part.{pid}")));
-    let fetched = download(&format!("{release}/{name}"), Some(&part)).map_err(|e| format!("Couldn't get the helper for {os} {arch} servers from the release: {e}")).and_then(|_| {
+    // With pinned checksums, the release's checksum file wasn't read, so a build it no longer holds shows here.
+    let fetched = download(&format!("{release}/{name}"), Some(&part)).map_err(|e| if pinned.is_some() { missing(e) } else { format!("Couldn't get the helper for {os} {arch} servers from the release: {e}") }).and_then(|_| {
         let got = sha256_of(&part)?;
         if got != want {
-            return Err(format!("The helper for {os} {arch} servers downloaded from {release}/{name} doesn't match its checksum (SHA-256 {got}, expected {want}). It was deleted."));
+            return Err(format!("The helper for {os} {arch} servers downloaded from {release}/{name} doesn't match {against} (SHA-256 {got}, expected {want}). It was deleted."));
         }
         make_private(&part)?;
         std::fs::write(&part_sum, &want).map_err(|e| format!("Couldn't write {}: {e}", part_sum.display()))?;
