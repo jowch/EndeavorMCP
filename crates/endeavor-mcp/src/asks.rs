@@ -182,7 +182,7 @@ impl Asks {
             }
             // Checked without the lock: it's a system call on the socket.
             drop(state);
-            if gone() {
+            if crate::mcp::waiting_on(crate::mcp::Waits::ANSWER, gone) {
                 let mut state = self.state.lock().unwrap();
                 state.waiting.retain(|w| w.id != id);
                 return Outcome::Gone;

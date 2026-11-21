@@ -17,7 +17,7 @@
 //! then a call that changes the notebook waits for the user's answer too,
 //! whatever the policy says about runs.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{self, BufReader, Write};
 use std::net::TcpStream;
@@ -1112,6 +1112,31 @@ fn new_session_id() -> Option<String> {
 /// How often a held call's stream says it's still waiting.
 const KEEP_WAITING: Duration = Duration::from_secs(15);
 
+/// What a held call's stream says it waits on (#159): a call is told it waits for the user only while
+/// it does. Set around a wait by `waiting_on`; the hang-up check (`Held::waiting`) runs on the thread
+/// that waits, as it is a plain `Fn` the wait calls.
+pub(crate) struct Waits(&'static str);
+
+impl Waits {
+    /// Anything without its own words, such as a notebook's engine that is still starting.
+    pub(crate) const WORKING: Waits = Waits("Still working on the call");
+    pub(crate) const ANSWER: Waits = Waits("Waiting for the user's answer");
+    pub(crate) const CELLS: Waits = Waits("Waiting for the cells to finish");
+    pub(crate) const STOP: Waits = Waits("Waiting for the cells to stop");
+}
+
+thread_local! {
+    static WAITING_ON: Cell<&'static str> = const { Cell::new(Waits::WORKING.0) };
+}
+
+/// Call `check` (a call's hang-up check) saying the call waits on `what`.
+pub(crate) fn waiting_on(what: Waits, check: &dyn Fn() -> bool) -> bool {
+    let before = WAITING_ON.replace(what.0);
+    let gone = check();
+    WAITING_ON.set(before);
+    gone
+}
+
 /// The response to a request whose reply may wait on the user. Once a call
 /// waits, its response begins at once as an event stream, which Streamable
 /// HTTP allows for a client that accepts one, says every `KEEP_WAITING` that
@@ -1161,12 +1186,13 @@ impl Held {
             write!(out, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n{close}\r\n")?;
         }
         let count = sent.map_or(0, |(count, _)| count) + 1;
+        let what = WAITING_ON.get();
         let event = match &self.progress_token {
             Some(token) => {
-                let params = json!({ "progressToken": token, "progress": count, "message": "Waiting for the user's answer" });
+                let params = json!({ "progressToken": token, "progress": count, "message": what });
                 format!("event: message\ndata: {}\n\n", to_json(&json!({ "jsonrpc": "2.0", "method": "notifications/progress", "params": params })))
             }
-            None => ": waiting for the user's answer\n\n".to_owned(),
+            None => format!(": {}\n\n", what.to_lowercase()),
         };
         *sent = Some((count, Instant::now()));
         http::write_chunk(&mut out, event.as_bytes())
@@ -1440,6 +1466,18 @@ mod tests {
         assert!(!super::acts("read_cell", &cell) && !super::acts("open_notebook", &json!({ "path": "a.jl" })));
         assert!(super::acts("edit_cell", &cell) && super::acts("execute_cell", &cell));
         assert!(super::acts("open_notebook", &json!({ "path": "a.jl", "run_notebook": true })));
+    }
+
+    #[test]
+    fn a_held_call_says_it_waits_for_the_user_only_while_it_does() {
+        let now = || WAITING_ON.get();
+        assert_eq!(now(), "Still working on the call", "a wait with no words of its own, such as an engine starting");
+        let inner = waiting_on(Waits::CELLS, &|| {
+            assert_eq!(now(), "Waiting for the cells to finish");
+            waiting_on(Waits::ANSWER, &|| now() == "Waiting for the user's answer")
+        });
+        assert!(inner, "a question asked during a run says so while it is asked");
+        assert_eq!(now(), "Still working on the call", "and the words go back after the wait");
     }
 
     #[test]
