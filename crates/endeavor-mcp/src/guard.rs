@@ -102,7 +102,7 @@ pub(crate) fn restart_call(message: &Value, session: &str, restart: (&AskRestart
     let result = if reason.is_empty() {
         tool_error("ArgumentError: invalid_argument::Give a `reason`: one short sentence for the user on why a restart would help.", false)
     } else {
-        restart_result(ask(session, reason, gone, Instant::now() + RESTART_WAIT), place)
+        restart_result(ask(session, reason, &|| crate::mcp::waiting_on(crate::mcp::Waits::ANSWER, gone), Instant::now() + RESTART_WAIT), place)
     };
     Some(json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }))
 }

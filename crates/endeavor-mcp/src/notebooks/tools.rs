@@ -826,7 +826,7 @@ impl Call<'_> {
                 break;
             }
             std::thread::sleep(Duration::from_millis(500));
-            if (self.gone)() {
+            if crate::mcp::waiting_on(crate::mcp::Waits::CELLS, self.gone) {
                 return Err(argument_error("client_gone::The caller hung up during the wait"));
             }
             nb = self.nbs.snapshot(&nb.id)?;
@@ -862,7 +862,7 @@ impl Call<'_> {
         while waits(&nb) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(500));
             // Nobody will see this read, so it doesn't count as one.
-            if (self.gone)() {
+            if crate::mcp::waiting_on(crate::mcp::Waits::CELLS, self.gone) {
                 return Err(argument_error("client_gone::The caller hung up during the wait"));
             }
             nb = self.nbs.snapshot(&nb.id)?;
@@ -1699,7 +1699,7 @@ impl Call<'_> {
         let deadline = Instant::now() + self.wait_left().min(Duration::from_secs_f64(INTERRUPT_WAIT_SECONDS));
         while !pending && running.iter().chain(&queued).any(|id| busy(&now, id)) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(250));
-            if (self.gone)() {
+            if crate::mcp::waiting_on(crate::mcp::Waits::STOP, self.gone) {
                 return Err(argument_error("client_gone::The caller hung up during the wait"));
             }
             now = self.nbs.snapshot(&nb.id)?;
