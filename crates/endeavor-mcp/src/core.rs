@@ -1458,7 +1458,8 @@ struct MarimoStarter {
     state: PathBuf,
     /// The engines' key, which the adapter's bridge takes: not the MCP bearer token.
     token: String,
-    /// The core runs on the user's own computer (`--own-r`, which the app passes only there).
+    /// The core runs on the user's own computer (`--own-r`, which the app passes only there; a test
+    /// checks a server's bootstrap never does, `a_servers_core_is_never_told_it_is_this_computer`).
     this_computer: bool,
     #[cfg(unix)]
     mask: Option<libc::sigset_t>,
