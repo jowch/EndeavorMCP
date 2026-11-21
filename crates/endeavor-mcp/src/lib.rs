@@ -468,6 +468,9 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
                     Ok(now) => {
                         *routes.write().unwrap() = now.route();
                         keep_runtime();
+                        if now.reattached {
+                            now.take_back();
+                        }
                         let _ = mux.send(&now.ready(id, now.reattached).frame());
                         attached = Some(now);
                     }
@@ -479,7 +482,15 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
                     }
                 }
             }
-            Event::App(ToHelper::Stop { id, force }) => {
+            // The app quits and the plugin works in the runtime: it is left to the plugin (app #232).
+            Event::App(ToHelper::Stop { unless_shared: true, .. })
+                if attached.as_ref().is_some_and(|a| matches!(a.how, How::Process(..)) && a.left_to_plugin()) =>
+            {
+                parts.discard();
+                keep_runtime();
+                std::process::exit(0)
+            }
+            Event::App(ToHelper::Stop { id, force, .. }) => {
                 let stopped = match attached.take() {
                     Some(runtime) => runtime.stop(args, &routes, &mut inbox, standalone::stop_lock_limit()).map_err(|failed| {
                         let (runtime, why) = *failed;
@@ -594,6 +605,23 @@ enum How {
 }
 
 impl Attached {
+    /// Whether the runtime, asked as the app quits, stays for the plugin working in it
+    /// (`core::leave_to_plugin`). One that doesn't answer is stopped, as before.
+    fn left_to_plugin(&self) -> bool {
+        let How::Process(_, port) = &self.how else { return false };
+        bridge_rpc(*port, &self.state.token, "endeavor/leave_to_plugin", json!({})).is_ok_and(|reply| reply["result"]["left"] == true)
+    }
+
+    /// The app has this runtime again: one an earlier quit left to the plugin goes back to the lifetime it
+    /// started with (`core::keep_for_app`), so no front takes it for the plugin's own. A runtime of an
+    /// older build ignores the call.
+    fn take_back(&self) {
+        let How::Process(_, port) = &self.how else { return };
+        if let Err(e) = bridge_rpc(*port, &self.state.token, "endeavor/keep_for_app", json!({})) {
+            eprintln!("[ Warning: Couldn't take the runtime back from the plugin: {e}");
+        }
+    }
+
     fn ready(&self, id: u32, reattached: bool) -> ToApp {
         let state = &self.state;
         ToApp::Ready {
@@ -712,7 +740,7 @@ impl Inbox {
                 let _ = mux.send(&ToApp::StartFailed { id, message: "Endeavor is already starting.".into() }.frame());
                 Heard::Quiet
             }
-            Event::App(ToHelper::Stop { id, force }) => Heard::Stop(id, force),
+            Event::App(ToHelper::Stop { id, force, .. }) => Heard::Stop(id, force),
             Event::App(ToHelper::Detach) => Heard::Detach,
             Event::Eof => Heard::Eof,
             _ => Heard::Event,

@@ -28,8 +28,8 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -51,7 +51,7 @@ use crate::{USAGE, bridge_call, owner_only, remove_state};
 /// missing, doesn't count (`network`); nor do descriptions and changes inside the core. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
 /// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
 /// in what a call or the events stream returns.
-pub const INTERFACE: u32 = 44;
+pub const INTERFACE: u32 = 45;
 
 /// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
@@ -208,10 +208,10 @@ pub fn main(argv: &[String]) -> ! {
     if let Some(hours) = idle_hours {
         bridge.notebooks.set_idle_limit(hours);
     }
-    Arc::get_mut(&mut bridge.notebooks).expect("nothing else holds the notebooks yet").exits_when_idle = exit_idle;
+    bridge.notebooks.exits_when_idle.store(exit_idle, std::sync::atomic::Ordering::SeqCst);
     let not_let_in = not_let_in(&open_command(&args.state_dir));
     let allow_r_install = Arc::new(std::sync::atomic::AtomicBool::new(args.install_r));
-    let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone(), r: OnceLock::new(), marimo: Default::default() });
+    let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone(), r: OnceLock::new(), marimo: Default::default(), state_dir: args.state_dir.clone(), left: Default::default(), left_generation: Default::default() });
     #[cfg(unix)]
     pass_on_stop_signals(stop_signals, served.clone());
     let r = RStarter::new(&args, &engine_token, allow_r_install);
@@ -329,7 +329,7 @@ fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge, page_tok
     let boot = crate::own_boot();
     let mut state = json!({
         "launcher": launcher, "node": crate::hostname(), "job": job,
-        "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": bridge.token, "page_token": page_token, "exits_when_idle": bridge.notebooks.exits_when_idle,
+        "pid": std::process::id(), "started": started, "boot": boot, "port": port, "token": bridge.token, "page_token": page_token, "exits_when_idle": bridge.notebooks.exits_when_idle.load(std::sync::atomic::Ordering::SeqCst),
         "interface": INTERFACE, "network": crate::network_settings(),
     });
     if let Some(standalone) = &bridge.standalone {
@@ -1647,6 +1647,123 @@ fn warm_for(served: &Arc<Served>, folder: &str, kind: &str) {
     });
 }
 
+/// The app is quitting and would stop this runtime (`endeavor/leave_to_plugin`, app #232): if the plugin
+/// is in it (`Notebooks::shared`), it is left running for the plugin, marked as ending when idle so the
+/// plugin's fronts treat it as theirs, and watched (`watch_left`): it ends once the plugin has been out of
+/// it for `LEFT_GRACE`, whatever the idle limit. Whether it was left; if not, the app stops it as before.
+/// `alive` checks a front's process.
+fn leave_to_plugin(served: &Arc<Served>, alive: Arc<dyn Fn(&crate::mcp::Front) -> bool + Send + Sync>) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    if !served.bridge.notebooks.shared(&*alive) {
+        return false;
+    }
+    let mut left = served.left.lock().unwrap();
+    if left.is_none() {
+        eprintln!("[ Info: The app quit while the plugin works in this runtime; leaving it running for the plugin");
+        let generation = served.left_generation.fetch_add(1, SeqCst) + 1;
+        *left = Some(served.bridge.notebooks.exits_when_idle.swap(true, SeqCst));
+        rewrite_exits_when_idle(served, true);
+        watch_left(served.clone(), generation, alive);
+    }
+    true
+}
+
+/// The app has the runtime again (`endeavor/keep_for_app`, its helper reattached): one left to the plugin
+/// goes back to the lifetime it started with, and its watch ends, so no front of another build stops it
+/// as the plugin's own (`standalone::target`). Nothing for a runtime that wasn't left.
+fn keep_for_app(served: &Served) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut left = served.left.lock().unwrap();
+    let Some(before) = left.take() else { return };
+    eprintln!("[ Info: The app is back; the runtime is the app's again");
+    served.left_generation.fetch_add(1, SeqCst);
+    served.bridge.notebooks.exits_when_idle.store(before, SeqCst);
+    rewrite_exits_when_idle(served, before);
+}
+
+/// Set `exits_when_idle` in `runtime.json`, if the record there is still this core's.
+fn rewrite_exits_when_idle(served: &Served, value: bool) {
+    let path = served.state_dir.join("runtime.json");
+    if let Some(mut state) = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        && state["pid"].as_u64() == Some(u64::from(std::process::id()))
+    {
+        state["exits_when_idle"] = value.into();
+        if let Err(e) = write_private(&path, state.to_string().as_bytes()) {
+            eprintln!("[ Warning: {e}");
+        }
+    }
+}
+
+/// How long a runtime left to the plugin keeps running once the plugin is out of it: long enough for
+/// Claude Code to restart and open its notebook again, short enough not to matter as a leak.
+const LEFT_GRACE: Duration = Duration::from_secs(10 * 60);
+
+/// The idle limit a runtime left to the plugin keeps when the app's is none ("Never"): the user asked for
+/// it to stop with the app, so it doesn't run forever for a plugin that keeps a notebook open and idle.
+const LEFT_IDLE_HOURS: f64 = 48.0;
+
+fn left_grace() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(secs) = std::env::var("ENDEAVOR_TEST_LEFT_GRACE_SECS").ok().and_then(|s| s.parse().ok()) {
+        return Duration::from_secs_f64(secs);
+    }
+    LEFT_GRACE
+}
+
+/// When a runtime left to the plugin ends (`LeftWatch::tick`).
+struct LeftWatch {
+    grace: Duration,
+    out_since: Instant,
+    empty_since: Instant,
+}
+
+impl LeftWatch {
+    fn new(grace: Duration, now: Instant) -> Self {
+        LeftWatch { grace, out_since: now, empty_since: now }
+    }
+
+    /// Why to end now, if it should: the plugin has been out of the runtime for the grace, or no notebook
+    /// has been open for the idle limit (`LEFT_IDLE_HOURS` when the limit is none).
+    fn tick(&mut self, now: Instant, shared: bool, open: Option<usize>, hours: f64) -> Option<String> {
+        if shared {
+            self.out_since = now;
+        } else if now.duration_since(self.out_since) >= self.grace {
+            return Some(format!("The plugin has been out of this runtime for {} minutes", self.grace.as_secs() / 60));
+        }
+        let hours = if hours <= 0.0 { LEFT_IDLE_HOURS } else { hours };
+        if open != Some(0) {
+            self.empty_since = now;
+        } else if now.duration_since(self.empty_since).as_secs_f64() >= hours * 3600.0 {
+            return Some(format!("No notebook open for {hours} hours"));
+        }
+        None
+    }
+}
+
+/// Watch a runtime left to the plugin until it ends, or the app takes it back (`generation` moves on).
+fn watch_left(served: Arc<Served>, generation: u64, alive: Arc<dyn Fn(&crate::mcp::Front) -> bool + Send + Sync>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let check = crate::notebooks::idle_check().min(Duration::from_secs(60));
+    std::thread::spawn(move || {
+        let notebooks = &served.bridge.notebooks;
+        let mut watch = LeftWatch::new(left_grace(), Instant::now());
+        loop {
+            std::thread::sleep(check);
+            if served.left_generation.load(SeqCst) != generation {
+                return;
+            }
+            if let Some(why) = watch.tick(Instant::now(), notebooks.shared(&*alive), notebooks.open_count(), notebooks.idle_limit_hours()) {
+                if served.left_generation.load(SeqCst) != generation {
+                    return;
+                }
+                eprintln!("[ Info: {why}; stopping");
+                served.shutdown();
+                return;
+            }
+        }
+    });
+}
+
 /// End the runtime once no notebook has been open for the idle limit (none
 /// when it's 0): a runtime the stdio form or a server connection started in the
 /// background has no one to stop it.
@@ -1790,6 +1907,13 @@ struct Served {
     cookie: String,
     /// What a browser that hasn't been let in sees (`not_let_in`).
     not_let_in: String,
+    /// The state folder, whose `runtime.json` this core wrote (`record`).
+    state_dir: PathBuf,
+    /// While the app's quit has left this runtime to the plugin (`leave_to_plugin`), whether it ended
+    /// when idle before.
+    left: Mutex<Option<bool>>,
+    /// Moves on each leave and each take-back, so a stale watch (`watch_left`) stops.
+    left_generation: std::sync::atomic::AtomicU64,
 }
 
 impl Served {
@@ -1834,6 +1958,8 @@ impl Served {
             }
             "endeavor/allow_julia_install" => self.julia.install.store(true, std::sync::atomic::Ordering::SeqCst),
             "endeavor/allow_r_install" => self.allow_r_install.store(true, std::sync::atomic::Ordering::SeqCst),
+            "endeavor/leave_to_plugin" => result = json!({ "left": leave_to_plugin(self, Arc::new(|front: &crate::mcp::Front| front.alive())) }),
+            "endeavor/keep_for_app" => keep_for_app(self),
             _ => {}
         }
         json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }).to_string()
@@ -2730,7 +2856,55 @@ mod tests {
         let (stops, _) = std::sync::mpsc::channel();
         let argv = ["--state-dir", "/nonexistent", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent/runtime", "--depot", "/nonexistent/depot"].map(String::from);
         let julia = JuliaStarter::new(&parse_args(&argv).unwrap(), TOKEN, "process", stops.clone());
-        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), "e".into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default(), r: OnceLock::new(), marimo: Default::default() })
+        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), "e".into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default(), r: OnceLock::new(), marimo: Default::default(), state_dir: PathBuf::from("/nonexistent"), left: Default::default(), left_generation: Default::default() })
+    }
+
+    #[test]
+    fn the_app_quitting_stops_a_runtime_the_plugin_is_not_in() {
+        // `Notebooks::shared` is tested with notebooks; with none open the runtime is the app's to stop (app #232).
+        let served = stand_in();
+        assert!(!leave_to_plugin(&served, Arc::new(|_: &crate::mcp::Front| true)));
+        assert!(!served.bridge.notebooks.exits_when_idle.load(std::sync::atomic::Ordering::SeqCst), "it isn't switched to end when idle");
+        assert!(served.left.lock().unwrap().is_none(), "nor watched");
+    }
+
+    #[test]
+    fn the_app_taking_a_runtime_back_restores_how_it_ends() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let served = stand_in();
+        keep_for_app(&served);
+        assert!(!served.bridge.notebooks.exits_when_idle.load(SeqCst), "one that wasn't left is as it was");
+        // As `leave_to_plugin` leaves it, for a runtime the app started.
+        *served.left.lock().unwrap() = Some(false);
+        served.bridge.notebooks.exits_when_idle.store(true, SeqCst);
+        let generation = served.left_generation.load(SeqCst);
+        keep_for_app(&served);
+        assert!(!served.bridge.notebooks.exits_when_idle.load(SeqCst), "no front of another build can take it for the plugin's");
+        assert!(served.left.lock().unwrap().is_none());
+        assert_ne!(served.left_generation.load(SeqCst), generation, "its watch stops");
+        // One the plugin started keeps ending when idle.
+        *served.left.lock().unwrap() = Some(true);
+        keep_for_app(&served);
+        assert!(served.bridge.notebooks.exits_when_idle.load(SeqCst));
+    }
+
+    #[test]
+    fn a_runtime_left_to_the_plugin_ends_once_the_plugin_is_out_of_it_whatever_the_idle_limit() {
+        let start = Instant::now();
+        let at = |minutes: u64| start + Duration::from_secs(minutes * 60);
+        let mut watch = LeftWatch::new(LEFT_GRACE, start);
+        assert_eq!(watch.tick(at(5), true, Some(1), 0.0), None, "the plugin is in it");
+        assert_eq!(watch.tick(at(14), false, Some(1), 0.0), None, "out for 9 minutes");
+        assert_eq!(watch.tick(at(15), true, Some(1), 0.0), None, "back: a Claude Code restart that opened its notebook again");
+        assert_eq!(watch.tick(at(24), false, Some(1), 0.0), None);
+        assert!(watch.tick(at(25), false, Some(1), 0.0).is_some_and(|why| why.contains("10 minutes")), "out for 10 minutes, with the limit Never");
+        // A plugin that stays in with no notebook open: hard to be, since `shared` needs one; the idle limit
+        // still ends it, and Never counts as 48 hours.
+        let mut watch = LeftWatch::new(LEFT_GRACE, start);
+        assert_eq!(watch.tick(at(47 * 60), true, Some(0), 0.0), None);
+        assert!(watch.tick(at(48 * 60), true, Some(0), 0.0).is_some_and(|why| why.contains("48 hours")));
+        let mut watch = LeftWatch::new(LEFT_GRACE, start);
+        assert!(watch.tick(at(60), true, Some(0), 1.0).is_some_and(|why| why.contains("1 hours")), "the app's limit when it has one");
     }
 
     /// The runtime's port with a stand-in Ember on `ember` (none: not running), and its address.

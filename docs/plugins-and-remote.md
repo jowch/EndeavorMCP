@@ -485,9 +485,23 @@ runtime already running from it is found and not started twice.
 end of the helper's input closes without a Stop or Detach, which happens
 when the app crashes. It stops the runtime for every client, as Stop does, so
 it is only for an app on the same computer. An ordinary quit is the app's
-own Stop or Detach. Not built: the app only detaches when it quits (there
-is no list of other sessions to decide by); the idle limit ends its
-notebooks.
+own Stop or Detach. With Keep running off, its Stop says the app is
+quitting (`unless_shared`). The helper then asks the core whether the plugin
+is in the runtime (`endeavor/leave_to_plugin`): a plugin session works in a
+notebook that is open, and its front still runs. Each front says which
+process it is (`X-Endeavor-Front-Pid`, `-Started`, `-Boot`). A front that
+doesn't say counts if it called in the last 30 minutes. If the plugin is in
+it, the core marks itself as ending when idle, as a runtime the plugin
+starts is, and records that in
+`runtime.json`. The helper then exits as after Detach, and the plugin keeps
+its notebooks. The core watches a runtime it was left: it ends once the
+plugin has been out of it for 10 minutes, whatever the idle limit, so it
+doesn't outlive a plugin that goes without saying. With no notebook open it
+still ends after the idle limit, and "Never" counts as 48 hours there. When
+the app opens again and its helper reattaches, the helper calls
+`endeavor/keep_for_app`: the runtime goes back to how it started, so no front
+of another build takes it for the plugin's own and stops it. Otherwise the
+runtime stops as before (app #232).
 
 **Cancelling a test.** The app's Test connection (`client::test`) starts its
 helper with `--own-with-client`: when the helper's input ends without a Stop

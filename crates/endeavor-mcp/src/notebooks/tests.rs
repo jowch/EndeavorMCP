@@ -2828,7 +2828,7 @@ fn a_session_bound_again_after_its_record_went_stale_is_not_dropped() {
     s.seconds(8.0 * 24.0 * 3600.0);
     // `a`'s record is a week old and not yet cleared when the app binds it, or it opens its notebook, again.
     s.notebooks.bind("a", &paths[0]);
-    s.notebooks.note_call("d");
+    s.notebooks.note_call("d", false, None);
     assert_eq!(s.notebooks.bound("a").as_ref(), Some(&paths[0]));
     assert!(s.notebooks.state.lock().unwrap().seen.contains_key("a"));
     // `c` was not, so its record and then its binding went with it.
@@ -2837,7 +2837,7 @@ fn a_session_bound_again_after_its_record_went_stale_is_not_dropped() {
 
     s.seconds(8.0 * 24.0 * 3600.0);
     s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap();
-    s.notebooks.note_call("e");
+    s.notebooks.note_call("e", false, None);
     assert_eq!(s.notebooks.bound("a").as_ref(), Some(&paths[0]), "opening an open notebook again keeps the session too");
 }
 
@@ -2851,12 +2851,12 @@ fn recent_sessions_are_the_other_sessions_that_called_within_the_time_given() {
     assert_eq!(recent("a", 900.0), json!({ "count": 0, "active_seconds_ago": null }), "a session with no call is not active");
 
     s.call("b", "open_notebook", json!({ "path": &paths[0] })).unwrap();
-    s.notebooks.note_call("b");
+    s.notebooks.note_call("b", false, None);
     s.seconds(125.7);
     assert_eq!(recent("a", 900.0), json!({ "count": 1, "active_seconds_ago": 125 }));
     assert_eq!(recent("b", 900.0)["count"], 0, "a session is not another to itself");
 
-    s.notebooks.note_call("c");
+    s.notebooks.note_call("c", false, None);
     s.seconds(10.0);
     assert_eq!(recent("a", 900.0), json!({ "count": 2, "active_seconds_ago": 10 }));
     assert_eq!(recent("a", 60.0), json!({ "count": 1, "active_seconds_ago": 10 }), "b called longer ago than that");
@@ -2865,28 +2865,65 @@ fn recent_sessions_are_the_other_sessions_that_called_within_the_time_given() {
     // A session the app bound has made no call; one that is bound to no notebook doesn't count however lately it called;
     // nor does one whose notebook has closed.
     s.notebooks.bind("app", &paths[0]);
-    s.notebooks.note_call("unbound");
+    s.notebooks.note_call("unbound", false, None);
     assert_eq!(recent("a", 900.0)["count"], 2);
     s.engine.notebooks.lock().unwrap().retain(|nb| nb.path != paths[1]);
     assert_eq!(recent("a", 900.0), json!({ "count": 1, "active_seconds_ago": 135 }), "c's notebook is closed, and b called 135 s ago");
     assert!(s.notebooks.state.lock().unwrap().seen.contains_key("unbound"));
     s.call("c", "open_notebook", json!({ "path": &paths[1] })).unwrap();
-    s.notebooks.note_call("c");
+    s.notebooks.note_call("c", false, None);
 
     // Clearing a binding keeps the record of the last call, which goes a week after it.
     s.notebooks.bind("b", "");
     assert!(s.notebooks.state.lock().unwrap().seen.contains_key("b"));
     assert_eq!(recent("a", 900.0)["count"], 1, "b works in no notebook now");
-    s.notebooks.note_call("");
+    s.notebooks.note_call("", false, None);
     assert!(!s.notebooks.state.lock().unwrap().seen.contains_key(""), "a call with no session isn't recorded");
     assert_eq!(s.notebooks.state.lock().unwrap().seen.len(), 5, "a, b, c, unbound and the app's bound session");
 
     // A week after its last call, or after it was bound if it made none, a session is forgotten.
     s.seconds(6.0 * 24.0 * 3600.0);
-    s.notebooks.note_call("a");
+    s.notebooks.note_call("a", false, None);
     s.seconds(2.0 * 24.0 * 3600.0);
     assert_eq!(recent("c", 1.0e9), json!({ "count": 1, "active_seconds_ago": 172800 }));
     assert_eq!(s.notebooks.state.lock().unwrap().seen.len(), 1, "c and the app's session went 8 days ago, a 2");
+}
+
+#[test]
+fn the_plugin_is_in_the_runtime_while_its_front_runs_and_a_notebook_it_works_in_is_open() {
+    // The app quits and would stop the runtime: it is left running only if the plugin is in it (app #232).
+    let s = setup();
+    let paths = temp_notebooks("shared", 2);
+    let front = |pid| crate::mcp::Front { pid, started: Some(1), boot: None };
+    let running = std::sync::Mutex::new(vec![7]);
+    let alive = |f: &crate::mcp::Front| running.lock().unwrap().contains(&f.pid);
+    assert!(!s.notebooks.shared(&alive), "no session at all");
+
+    // The app's own sessions don't count, however lately they called.
+    s.call("app", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    s.notebooks.note_call("app", true, None);
+    assert!(!s.notebooks.shared(&alive));
+
+    // A plugin session counts while its front runs, and only while a notebook it works in is open.
+    s.call("p", "open_notebook", json!({ "path": &paths[1] })).unwrap();
+    assert!(!s.notebooks.shared(&alive), "bound, but it has made no call");
+    s.notebooks.note_call("p", false, Some(&front(7)));
+    assert!(s.notebooks.shared(&alive));
+    s.seconds(3.0 * 24.0 * 3600.0);
+    assert!(s.notebooks.shared(&alive), "a running front counts however long ago it called");
+    running.lock().unwrap().clear();
+    assert!(!s.notebooks.shared(&alive), "its front has gone");
+    running.lock().unwrap().push(7);
+    s.engine.notebooks.lock().unwrap().retain(|nb| nb.path != paths[1]);
+    assert!(!s.notebooks.shared(&alive), "its notebook closed");
+
+    // A front that doesn't say which process it is counts for a while after its last call.
+    s.call("q", "open_notebook", json!({ "path": &paths[0] })).unwrap();
+    s.notebooks.note_call("q", false, None);
+    s.seconds(29.0 * 60.0);
+    assert!(s.notebooks.shared(&alive));
+    s.seconds(2.0 * 60.0);
+    assert!(!s.notebooks.shared(&alive), "it called over half an hour ago");
 }
 
 #[test]

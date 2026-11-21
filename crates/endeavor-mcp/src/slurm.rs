@@ -85,7 +85,7 @@ impl Running {
     /// The caller holds the start lock.
     pub fn stop(self, inbox: &mut Inbox) {
         let generation = self.link.generation;
-        if self.link.send(&ToHelper::Stop { id: 0, force: false }).is_ok() {
+        if self.link.send(&ToHelper::Stop { id: 0, force: false, unless_shared: false }).is_ok() {
             let deadline = Instant::now() + Duration::from_secs(20);
             while let Some(left) = deadline.checked_duration_since(Instant::now()) {
                 match inbox.rx.recv_timeout(left) {
