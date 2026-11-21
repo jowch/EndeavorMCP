@@ -1725,7 +1725,7 @@ impl Call<'_> {
             // lazy-mode run lists them.
             let stale: Vec<&String> = now.order.iter().filter(|id| now.cells.get(*id).is_some_and(|c| c.stale && !c.running && !c.queued && !c.hidden && !c.off)).collect();
             if !stale.is_empty() {
-                result["message"] = json!("The cells in `stale_cells` didn't run: they still show an earlier run's output and are marked stale. Run them when they should be current.");
+                result["message"] = json!("The cells in `stale_cells` are stale: they show an earlier run's output, not this one's. Run them when they should be current.");
                 result["stale_cells"] = json!(stale);
             }
         }
