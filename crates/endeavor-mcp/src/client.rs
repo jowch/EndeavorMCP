@@ -18,7 +18,7 @@ pub use listener::{Listener, Messages, Refuse};
 pub use session::{Config, FoundInfo, Gone, HelloInfo, HelperFor, InstallInfo, JobInfo, OnEvent, Outcome, QueueInfo, RuntimeInfo, Session, SessionEvent, State, Status, Want};
 pub use machines::{Cluster, IdleStop, Launcher, MachinesFile, Server, ssh_config_hosts, valid_id};
 pub use ssh::no_window;
-pub use ssh::{Auth, Cancel, ConnectError, Event, NeedsInstall, Options, Running, Transport, bootstrap_script, connect, no_helper, start, test, this_platform, valid_host};
+pub use ssh::{Auth, Cancel, ConnectError, Event, NeedsInstall, Options, Running, SIGN_IN_GAVE_UP, Transport, bootstrap_script, connect, no_helper, start, test, this_platform, valid_host};
 
 /// A folder of a unit test's own under `target/tmp`, emptied.
 #[cfg(test)]
