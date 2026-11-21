@@ -866,6 +866,22 @@ fn an_edit_whose_cell_is_still_running_gives_the_old_output_as_previous() {
 }
 
 #[test]
+fn a_staged_edit_gives_the_old_run_as_previous() {
+    // A staged edit hasn't run, so the error it would show is the old code's, which an agent
+    // can read as the new code's (#435).
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "x = 1")]);
+    s.engine.with(NB, |nb| (nb.cells[0].output, nb.cells[0].errored) = ("boom".into(), true));
+    s.read("", NB, X);
+    let receipt = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "x = 2" })).unwrap();
+    assert_eq!((&receipt["stale"], &receipt["previous_output"], receipt.get("output")), (&json!(true), &json!("boom"), None), "{receipt}");
+    assert_eq!((&receipt["previous_errored"], &receipt["previous_error"], receipt.get("errored"), receipt.get("error")), (&json!(true), &json!({ "msg": "boom" }), None, None), "the old error isn't the edit's: {receipt}");
+    // read_cell still gives the cell as it is, marked stale.
+    let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    assert_eq!((&read["errored"], &read["stale"], read.get("previous_errored")), (&json!(true), &json!(true), None), "{read}");
+}
+
+#[test]
 fn a_run_in_lazy_mode_says_so_and_names_the_stale_cells() {
     // Ember's lazy mode marks a run's dependents stale instead of rerunning
     // them; the agent is told, not left to find them (#196).
