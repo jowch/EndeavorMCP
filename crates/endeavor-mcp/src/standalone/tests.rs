@@ -834,3 +834,24 @@ fn approve_install_asks_when_the_runtime_cant_be_looked_at() {
     calling.join().unwrap();
     assert!(!seen.lock().unwrap().iter().any(|(_, body)| body.contains("approve_install")));
 }
+
+#[test]
+fn a_staging_folder_an_unpack_left_goes_after_a_day() {
+    let cache = scratch("staging");
+    let files: &[(&str, &[u8])] = &[("runtime/boot.jl", b"boot")];
+    unpack(&cache, "0.1.0-aaaa", files).unwrap();
+    // Left by unpacks that crashed before their rename (#365): one a while ago, one perhaps still going.
+    for name in ["0.1.0-bbbb.part.1234.0", "0.1.0-cccc.part.5678.0"] {
+        std::fs::create_dir_all(cache.join(name).join("runtime")).unwrap();
+    }
+    let mut old = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    old.read(true);
+    // A folder opens on Windows only with FILE_FLAG_BACKUP_SEMANTICS.
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(old.write(true), 0x0200_0000);
+    old.open(cache.join("0.1.0-bbbb.part.1234.0")).unwrap().set_modified(SystemTime::now() - Duration::from_secs(2 * 24 * 3600)).unwrap();
+    remove_unused(&cache, "0.1.0-aaaa");
+    assert_eq!(names(&cache), ["0.1.0-aaaa", "0.1.0-cccc.part.5678.0"]);
+    std::fs::remove_dir_all(&cache).unwrap();
+}

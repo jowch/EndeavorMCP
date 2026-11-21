@@ -33,7 +33,7 @@ pub(crate) const KEEP_UNUSED: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// How long a folder an install left half-written (`<name>.part.<pid>`) is kept: its install may
 /// still be going on.
-const KEEP_PART: Duration = Duration::from_secs(24 * 3600);
+pub(crate) const KEEP_PART: Duration = Duration::from_secs(24 * 3600);
 
 /// Which of the two folders a binary runs from.
 #[derive(Clone, Debug, PartialEq)]

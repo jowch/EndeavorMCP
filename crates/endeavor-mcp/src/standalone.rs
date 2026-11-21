@@ -302,7 +302,8 @@ const KEEP_UNUSED: Duration = Duration::from_secs(24 * 3600);
 const LEASE_TOUCH: Duration = Duration::from_secs(3600);
 
 /// Remove the folders in `cache` other than `keep`'s that no one holds a
-/// `Lease` on and no one has unpacked or used for `KEEP_UNUSED`. A folder
+/// `Lease` on and no one has unpacked or used for `KEEP_UNUSED`, and staging
+/// folders an unpack left more than `KEEP_PART` ago. A folder
 /// with no `IN_USE` is left alone: a build from before leases unpacked it,
 /// and a runtime it started may still run from it.
 fn remove_unused(cache: &Path, keep: &str) {
@@ -314,7 +315,19 @@ fn remove_unused(cache: &Path, keep: &str) {
             let _ = std::fs::remove_dir_all(&path);
             continue;
         }
-        if name == keep || name.contains(".part.") || !path.is_dir() {
+        if !path.is_dir() {
+            continue;
+        }
+        if name.contains(".part.") {
+            // A staging folder whose unpack was cut short before its rename (#365); one this young may
+            // still be filling.
+            let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+            if age.is_some_and(|age| age > crate::old_builds::KEEP_PART) {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+            continue;
+        }
+        if name == keep {
             continue;
         }
         let Ok(marker) = std::fs::OpenOptions::new().read(true).write(true).open(path.join(IN_USE)) else { continue };
