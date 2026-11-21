@@ -3,7 +3,7 @@
 # Pluto's, is the one its `save_notebook(notebook, path::String)` calls: the content is written
 # beside the file and renamed over it, so the file is either the old notebook or the new one. The
 # file's permissions are kept, and a notebook opened through a symlink keeps its link: the file it
-# points to is the one replaced. Where that can't be done (a folder the notebook can't be written
+# points to is the one replaced. A file with hard links is written in place, so its names stay one file. Where that can't be done (a folder the notebook can't be written
 # beside, a rename Windows refuses while another program has the file open), it is written in place
 # as Pluto does.
 
@@ -12,6 +12,11 @@ const SAVES = Threads.Atomic{Int}(0)
 function Pluto.write_buffered(fn::Function, path::String)
     content = sprint(fn)
     target = islink(path) && isfile(path) ? realpath(path) : path
+    # A rename would split a hard link from the file's other names.
+    if isfile(target) && stat(target).nlink > 1
+        write(target, content)
+        return nothing
+    end
     staged = joinpath(dirname(target), "." * basename(target) * ".saving." * string(getpid()) * "." * string(Threads.atomic_add!(SAVES, 1)))
     try
         write(staged, content)

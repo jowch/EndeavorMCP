@@ -404,12 +404,21 @@ end
         link = joinpath(dir, "link.jl")
         symlink(real, link)
         nb.cells[1].code = "x = 2"
+        before = stat(real).inode
         Pluto.save_notebook(nb, link)
+        @test stat(real).inode != before
         @test islink(link)
         @test occursin("x = 2", read(real, String))
         @test filemode(real) & 0o777 == 0o640
         @test sort(readdir(dir)) == ["link.jl", "real.jl"]
         @test Pluto.load_notebook_nobackup(real).cells[1].code == "x = 2"
+        # A file with a hard link is written in place, so both names still show the saved notebook.
+        hard = joinpath(dir, "hard.jl")
+        hardlink(real, hard)
+        nb.cells[1].code = "x = 3"
+        Pluto.save_notebook(nb, real)
+        @test stat(real).inode == stat(hard).inode
+        @test occursin("x = 3", read(hard, String))
     end
 
     @testset "validation parses as Pluto does" begin
