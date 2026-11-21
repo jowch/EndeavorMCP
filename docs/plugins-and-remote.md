@@ -514,7 +514,10 @@ idle in `runtime.json`, and `keep_for_app` undoes it when the app is back.
 This replaces the app's Keep running setting and covers the plugin too, since
 its open notebooks keep the runtime up like the app's; the Stop with
 `unless_shared` above is what older apps send. A server's helper is started
-without the flag, and a server's runtime keeps running (app #274).
+without the flag, and a server's runtime keeps running (app #274). A runtime
+of a build before this (interface 46) can't end once idle, so for one of those
+the helper does what the app's quit used to: it leaves it to the plugin if
+the plugin is in it, and otherwise stops it.
 
 **Cancelling a test.** The app's Test connection (`client::test`) starts its
 helper with `--own-with-client`: when the helper's input ends without a Stop

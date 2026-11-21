@@ -529,13 +529,9 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
             Event::App(ToHelper::Detach) => {
                 parts.discard();
                 keep_runtime();
-                left_running(args, attached.as_ref());
-                std::process::exit(0)
+                left_running(args, attached, &routes, &mut inbox)
             }
-            Event::Eof => {
-                left_running(args, attached.as_ref());
-                std::process::exit(0)
-            }
+            Event::Eof => left_running(args, attached, &routes, &mut inbox),
             Event::App(ToHelper::OwnWithClient { on }) => own_with_client(args, on),
             // Answered as they arrive (relay_stdin).
             Event::App(ToHelper::Files { .. }) => {}
@@ -562,15 +558,29 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
     }
 }
 
-/// The app went and leaves the runtime running: with `--exit-idle-after-client`, one here ends once idle.
-fn left_running(args: &Args, attached: Option<&Attached>) {
+/// The app went and leaves the runtime running, and this helper exits. With `--exit-idle-after-client`, one
+/// here ends once idle (`core::end_when_idle`). A runtime of an older build, whose core can't, would then
+/// never end: it is left to the plugin if the plugin works in it, else stopped, as the app's quit used to.
+fn left_running(args: &Args, attached: Option<Attached>, routes: &Routes, inbox: &mut Inbox) -> ! {
     if args.exit_idle_after_client
         && let Some(attached) = attached
-        && let Err(e) = attached.end_when_idle()
+        && matches!(attached.how, How::Process(..))
     {
-        eprintln!("endeavor: couldn't have the runtime end when idle: {e}");
+        if attached.state.interface.is_none_or(|interface| interface < END_WHEN_IDLE_SINCE) {
+            if !attached.left_to_plugin()
+                && let Err(failed) = attached.stop(args, routes, inbox, standalone::start_lock_limit())
+            {
+                eprintln!("endeavor: {}", failed.1);
+            }
+        } else if let Err(e) = attached.end_when_idle() {
+            eprintln!("endeavor: couldn't have the runtime end when idle: {e}");
+        }
     }
+    std::process::exit(0)
 }
+
+/// The first `core::INTERFACE` whose core has `endeavor/end_when_idle`.
+const END_WHEN_IDLE_SINCE: u32 = 46;
 
 /// The state folder as `connect` would pick it now: `named` when `--state-dir` was given (or on a cluster),
 /// else the plugin's folder, or the app's older one while a runtime there is alive (`Args::unnamed`).

@@ -1505,6 +1505,21 @@ fn detaching_leaves_the_runtime_and_quit_with_client_stops_it_on_eof() {
     helper.exits();
     assert!(!runtime.alive(), "the app going away stops it with --quit-with-client");
     assert!(!dir.join("runtime.json").exists());
+
+    // A runtime of a build before `endeavor/end_when_idle` (this fake says no interface) couldn't end once
+    // idle, so with --exit-idle-after-client the app going stops it, as a quit used to (app #274).
+    let runtime = FakeRuntime::start(&dir, "labbox3");
+    let mut helper = Helper::start(&dir, &["--any-node", "--exit-idle-after-client"]);
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
+    helper.send(ToHelper::Detach);
+    helper.exits();
+    assert!(!runtime.alive() && !dir.join("runtime.json").exists(), "a Detach stops an older runtime");
+    let runtime = FakeRuntime::start(&dir, "labbox3");
+    let mut helper = Helper::start(&dir, &["--any-node", "--exit-idle-after-client"]);
+    assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
+    helper.stdin.0.lock().unwrap().take();
+    helper.exits();
+    assert!(!runtime.alive() && !dir.join("runtime.json").exists(), "so does the end of input");
 }
 
 #[test]
