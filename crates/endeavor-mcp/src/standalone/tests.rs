@@ -75,6 +75,11 @@ fn flags_set_what_they_name() {
     let shell = parse(&["mcp", "--julia-shell", "module load julia", "--skills", "plugin", "--folder", "/abs"].map(String::from), &env());
     let Ok(Command::Mcp(o)) = shell else { panic!() };
     assert_eq!((o.julia, o.skills_plugin, o.folder), (julia::Source::Shell("module load julia".into()), true, Some(PathBuf::from("/abs"))));
+    let Ok(Command::Serve(o)) = parsed("serve --cache /scratch/unpack") else { panic!() };
+    assert_eq!(o.cache, PathBuf::from("/scratch/unpack"), "the runtime is unpacked where --cache says (#126)");
+    let Ok(Command::Mcp(o)) = parse(&["mcp", "--cache", "unpack"].map(String::from), &env()) else { panic!() };
+    assert_eq!(o.cache, PathBuf::from("/home/ada/project/unpack"), "a relative one is under the folder it was given in");
+    assert!(parse(&["stop", "--cache", "/c"].map(String::from), &env()).is_err(), "stop unpacks nothing");
     let Ok(Command::Serve(o)) = parsed("serve --r /opt/R/bin/Rscript") else { panic!() };
     assert_eq!(o.r, crate::r::Source::Path("/opt/R/bin/Rscript".into()));
     let Ok(Command::Mcp(o)) = parse(&["mcp", "--r-shell", "module load R"].map(String::from), &env()) else { panic!() };
@@ -841,7 +846,8 @@ fn a_staging_folder_an_unpack_left_goes_after_a_day() {
     let files: &[(&str, &[u8])] = &[("runtime/boot.jl", b"boot")];
     unpack(&cache, "0.1.0-aaaa", files).unwrap();
     // Left by unpacks that crashed before their rename (#365): one a while ago, one perhaps still going.
-    for name in ["0.1.0-bbbb.part.1234.0", "0.1.0-cccc.part.5678.0"] {
+    // And a user's own folders, in a cache that `--cache` put among them (#126).
+    for name in ["0.1.0-bbbb.part.1234.0", "0.1.0-cccc.part.5678.0", "notes.part.1", "draft.removing.2", "v1.2-x.part.3.0"] {
         std::fs::create_dir_all(cache.join(name).join("runtime")).unwrap();
     }
     let mut old = std::fs::OpenOptions::new();
@@ -850,8 +856,10 @@ fn a_staging_folder_an_unpack_left_goes_after_a_day() {
     // A folder opens on Windows only with FILE_FLAG_BACKUP_SEMANTICS.
     #[cfg(windows)]
     std::os::windows::fs::OpenOptionsExt::custom_flags(old.write(true), 0x0200_0000);
-    old.open(cache.join("0.1.0-bbbb.part.1234.0")).unwrap().set_modified(SystemTime::now() - Duration::from_secs(2 * 24 * 3600)).unwrap();
+    for name in ["0.1.0-bbbb.part.1234.0", "notes.part.1", "v1.2-x.part.3.0"] {
+        old.open(cache.join(name)).unwrap().set_modified(SystemTime::now() - Duration::from_secs(2 * 24 * 3600)).unwrap();
+    }
     remove_unused(&cache, "0.1.0-aaaa");
-    assert_eq!(names(&cache), ["0.1.0-aaaa", "0.1.0-cccc.part.5678.0"]);
+    assert_eq!(names(&cache), ["0.1.0-aaaa", "0.1.0-cccc.part.5678.0", "draft.removing.2", "notes.part.1", "v1.2-x.part.3.0"]);
     std::fs::remove_dir_all(&cache).unwrap();
 }
