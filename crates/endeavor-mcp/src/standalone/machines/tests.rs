@@ -5,7 +5,7 @@ use crate::client::{JobInfo, QueueInfo};
 use crate::standalone::{Command, Env, Options, parse};
 
 fn status(state: State) -> Status {
-    Status { machine: "lab".into(), name: "lab".into(), state, step: None, hello: None, job: None }
+    Status { machine: "lab".into(), name: "lab".into(), state, step: None, hello: None, job: None, gone: None }
 }
 
 fn reached(outcome: Outcome, status: Status) -> Reached {

@@ -408,7 +408,7 @@ impl Provider for Local {
             Phase::Ready(runtime) => (State::Ready((**runtime).clone()), None),
             Phase::Failed(why) => (State::Failed(why.clone()), None),
         };
-        Status { machine: LOCAL.into(), name: LOCAL.into(), state, step, hello: None, job: None }
+        Status { machine: LOCAL.into(), name: LOCAL.into(), state, step, hello: None, job: None, gone: None }
     }
 
     fn stop(&self, force: bool) -> Result<(), String> {
