@@ -2925,4 +2925,13 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     assert!(status["browser_note"].as_str().is_some_and(|n| n.contains("ssh -L")), "asked for the link again, the agent gets the steps again: {status}");
     assert!(!shut.to_string().contains(TOKEN) && !shut.to_string().contains(&pages), "{shut}");
     front.finish();
+
+    // A browser that should open and doesn't (the opener fails: here the stand-in can't write its
+    // file) gets the same note, not a bare link (#299).
+    let mut front = start_front(&place, &[("ENDEAVOR_TEST_BROWSER", place.dir.to_str().unwrap())]);
+    front.initialize();
+    let failed = front.ok("open_notebook", json!({ "path": path }));
+    assert_eq!(failed["opened_in_browser"], false, "{failed}");
+    assert!(failed["browser_note"].as_str().is_some_and(|n| n.contains("No browser could be opened")), "{failed}");
+    front.finish();
 }

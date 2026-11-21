@@ -1417,6 +1417,7 @@ impl Relay {
         // another front, which works on this computer. `shown_at` lets a view the client draws again
         // later (the conversation reopened) tell that it's an old one.
         let in_view = route.host.is_none() && self.views.load(std::sync::atomic::Ordering::SeqCst) && matches!(tool, Some("new_notebook" | "open_notebook")) && !asked;
+        let mut failed = false;
         if in_view {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
             fields.insert("opened_in_browser".into(), false.into());
@@ -1430,12 +1431,14 @@ impl Relay {
                 self.opened.lock().unwrap().insert(key, Instant::now());
             }
             fields.insert("opened_in_browser".into(), opened.into());
+            failed = !opened;
         }
-        // A runtime on this computer, which shows the user no browser: nothing opened for them, and the
-        // address may or may not reach their browser. (On a machine the connection's port is on the
-        // user's computer already.)
+        // A runtime on this computer that shows the user no browser, or whose opener failed (a display
+        // that is set but gone, as in a tmux session left from a desktop login, #299): nothing opened
+        // for them, and the address may or may not reach their browser. (On a machine the
+        // connection's port is on the user's computer already.)
         let var = |name: &str| std::env::var(name).ok();
-        if route.host.is_none() && !in_view && !browser::shows(var) {
+        if route.host.is_none() && !in_view && (failed || !browser::shows(var)) {
             let open = crate::core::open_command(&self.options.state_dir());
             fields.insert("browser_note".into(), browser::note(&crate::hostname(), route.port, &open).into());
         }
