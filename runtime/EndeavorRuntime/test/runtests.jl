@@ -394,6 +394,24 @@ end
         @test EndeavorRuntime._interactive_html(html("<p>" ^ 3_000_000 * "<script>"))
     end
 
+    @testset "saving: a notebook is written beside its file and renamed over it (#102)" begin
+        @test parentmodule(which(Pluto.write_buffered, (Function, String))) === EndeavorRuntime
+        dir = mktempdir()
+        real = joinpath(dir, "real.jl")
+        nb = Pluto.Notebook([Pluto.Cell(; code="x = 1")], real)
+        Pluto.save_notebook(nb, real)
+        chmod(real, 0o640)
+        link = joinpath(dir, "link.jl")
+        symlink(real, link)
+        nb.cells[1].code = "x = 2"
+        Pluto.save_notebook(nb, link)
+        @test islink(link)
+        @test occursin("x = 2", read(real, String))
+        @test filemode(real) & 0o777 == 0o640
+        @test sort(readdir(dir)) == ["link.jl", "real.jl"]
+        @test Pluto.load_notebook_nobackup(real).cells[1].code == "x = 2"
+    end
+
     @testset "validation parses as Pluto does" begin
         session, nb, cells = make_session_with_notebook("x = 1")
         errors = EndeavorRuntime._parse_validation_errors(nb, cells[1], "a = 1\nb = 2")
