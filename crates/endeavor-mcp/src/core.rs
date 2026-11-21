@@ -1896,8 +1896,9 @@ fn stop_grace() -> std::time::Duration {
     std::time::Duration::from_secs(10)
 }
 
-/// A stop signal passed on to Julia (`pid`) didn't end it: Julia with notebooks open can go on (#316). Ask
-/// it to shut down, as `endeavor stop` does, and if it still runs, kill it; the core ends with it.
+/// In case a stop signal passed on to Julia (`pid`) doesn't end it (#316: once a core went on after a SIGTERM;
+/// a real Julia with two notebooks open ends in about 4 s), ask it to shut down, as `endeavor stop` does, and
+/// if it still runs, kill it; the core ends with it.
 #[cfg(unix)]
 fn unless_julia_ends(served: Arc<Served>, pid: i32) {
     std::thread::spawn(move || {
@@ -1911,7 +1912,8 @@ fn unless_julia_ends(served: Arc<Served>, pid: i32) {
         std::thread::sleep(stop_grace());
         if runs() {
             eprintln!("[ Warning: Julia didn't shut down; killing it");
-            // SAFETY: plain syscall; the pid is still our unreaped child's.
+            // SAFETY: plain syscall. The pid is Julia's until the wait thread reaps it and stores 0; a reuse in
+            // that brief window is the only way this could hit another process.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     });
