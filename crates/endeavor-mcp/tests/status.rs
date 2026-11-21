@@ -268,6 +268,8 @@ fn a_start_under_way_is_reported_beside_whatever_is_recorded() {
     assert!(text.contains("Recorded by another-computer") && text.contains("Start under way: yes"), "{text}");
     let r = runtime(&json_out);
     assert_eq!((&r["state"], &r["starting"], &r["pid"], &r["port"], &r["node"]), (&json!("other_computer"), &json!(true), &Value::Null, &Value::Null, &json!("another-computer")));
+    // Unlocked first: a child another test spawns now keeps a copy of the descriptor, and the lock, until it execs (#212).
+    lock.unlock().unwrap();
     drop(lock);
 
     std::fs::remove_file(dir.join("runtime.json")).unwrap();
