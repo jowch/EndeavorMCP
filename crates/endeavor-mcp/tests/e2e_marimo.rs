@@ -414,17 +414,30 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": headings[3] }));
         let both = agent.ok("edit_cells", json!({ "notebook_id": nb, "cells": [{ "cell_id": headings[3], "code": "mo.md(\"## Cleaned Growth Curves\")" }] }));
         assert_eq!(both["code"][&headings[3]], "mo.md(\"\"\"\n## Cleaned Growth Curves\n\"\"\")", "{both}");
-        // marimo's file would turn the backslashes of LaTeX into escapes (`\a` is a bell): that cell is kept as sent.
+        // marimo's file would turn the backslashes of LaTeX into escapes (`\a` is a bell): that cell is kept
+        // as a raw string, which marimo writes as it is (#433).
         let latex = r#"mo.md("$\\alpha + \\beta$")"#;
+        let raw = "mo.md(r\"\"\"\n$\\alpha + \\beta$\n\"\"\")";
         let added = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": last, "code": latex }));
-        assert!(added.get("code").is_none(), "kept as sent: {added}");
+        assert_eq!(added["code"], raw, "kept as a raw string: {added}");
         let math = added["cell_id"].as_str().unwrap().to_owned();
+        // A value a raw string can't hold (it ends in a backslash) is kept as sent.
+        let ends = r#"mo.md("a path: C:\\")"#;
+        let added = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": math, "code": ends }));
+        assert!(added.get("code").is_none(), "kept as sent: {added}");
         agent.ok("submit_changes", json!({ "notebook_id": nb, "wait_for_completion": true }));
         let read = agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": math, "include_code": true }));
-        assert_eq!(read["code"], latex, "{read}");
+        assert_eq!(read["code"], raw, "{read}");
         assert!(!read.to_string().contains('\u{7}'), "no bell in the output: {read}");
         let file = folder.join("headings.py");
-        let text = std::fs::read_to_string(&file).unwrap();
+        let in_file = "    mo.md(r\"\"\"\n    $\\alpha + \\beta$\n    \"\"\")";
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        while !text.contains(in_file) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+            text = std::fs::read_to_string(&file).unwrap();
+        }
+        assert!(text.contains(in_file), "the file keeps the backslashes: {text}");
         std::fs::write(&file, text.replacen("# ///\n", "# ///\n# touched by the test\n", 1)).unwrap();
         std::thread::sleep(Duration::from_secs(3));
         let mut titles = titles.to_vec();

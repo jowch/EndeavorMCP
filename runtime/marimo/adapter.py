@@ -255,16 +255,47 @@ def file_form(code):
     session keep this form, not the agent's, so that they match the file. When they don't, marimo's reload after
     the file changes under it (a package added to its header) pairs cells by similar code, and can give one
     heading's code to another (L1 on Haiku, 11-20). marimo writes a markdown string's value into a plain
-    `\"\"\"`, so a backslash in it (LaTeX's `\\alpha`) would become an escape: such a cell is kept as sent."""
+    `\"\"\"`, so a backslash in it (LaTeX's `\\alpha`) would become an escape (#433): such a cell takes a raw
+    `r\"\"\"`, which marimo keeps, and is kept as sent only when that can't hold its value either."""
+    try:
+        kept = _marimo_writes(code)
+        if kept == code or _meaning(kept) == _meaning(code):
+            return kept
+        raw = _raw_markdown(code)
+        if raw is not None:
+            kept = _marimo_writes(raw)
+            if _meaning(kept) == _meaning(code):
+                return kept
+        return code
+    except Exception:  # noqa: BLE001 - code marimo can't write, or that doesn't parse, is kept as it came
+        return code
+
+
+def _marimo_writes(code):
+    """A cell's code as marimo writes it to the file and reads it back."""
     from marimo._ast import codegen
     from marimo._ast.cell import CellConfig
     from marimo._ast.parse import parse_notebook
-    try:
-        cells = parse_notebook(codegen.generate_filecontents([code], ["_"], [CellConfig()])).cells
-        kept = cells[0].code if len(cells) == 1 else code
-        return kept if kept == code or _meaning(kept) == _meaning(code) else code
-    except Exception:  # noqa: BLE001 - code marimo can't write, or that doesn't parse, is kept as it came
-        return code
+    cells = parse_notebook(codegen.generate_filecontents([code], ["_"], [CellConfig()])).cells
+    return cells[0].code if len(cells) == 1 else code
+
+
+def _raw_markdown(code):
+    """A `mo.md("...")` cell whose text has a backslash, written as `mo.md(r\"\"\"...\"\"\")` with the same
+    text, or None when a raw string can't hold it (it has `\"\"\"` or ends in a backslash)."""
+    tree = ast.parse(code)
+    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.Expr):
+        return None
+    call = tree.body[0].value
+    if not (isinstance(call, ast.Call) and ast.unparse(call.func) == "mo.md" and len(call.args) == 1 and not call.keywords):
+        return None
+    text = call.args[0]
+    if not (isinstance(text, ast.Constant) and isinstance(text.value, str)):
+        return None
+    value = text.value.strip()
+    if "\\" not in value or '"""' in value or value.endswith("\\") or "\r" in value:
+        return None
+    return f'mo.md(r"""\n{value}\n""")'
 
 
 def _meaning(code):
