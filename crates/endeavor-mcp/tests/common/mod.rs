@@ -8,6 +8,8 @@
 //! `helper` drives `endeavor connect` as the app does.
 
 #![allow(dead_code)]
+// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
+#![allow(clippy::disallowed_methods)]
 
 pub mod exec;
 pub mod front;

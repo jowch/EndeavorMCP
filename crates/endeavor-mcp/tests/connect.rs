@@ -4,6 +4,9 @@
 //! attaching on request, relaying, several clients on one runtime, a runtime
 //! from before one port per runtime, and each way a connection ends.
 
+// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
+#![allow(clippy::disallowed_methods)]
+
 #![cfg(unix)]
 
 mod common;

@@ -12,6 +12,9 @@
 //! and the streams go on through a second helper on the job's node
 //! (`endeavor relay`, see `slurm`).
 
+// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod askpass;
 mod asks;
 pub mod client;

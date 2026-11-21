@@ -526,7 +526,7 @@ fn data_url(url: &str) -> Option<String> {
 
 /// A WebSocket client to Pluto on loopback: a reader thread fills the inbox.
 struct Socket {
-    stream: Mutex<TcpStream>,
+    stream: Mutex<wire::Shared>,
     inbox: Mutex<Inbox>,
     arrived: Condvar,
     closed: AtomicBool,
@@ -551,7 +551,8 @@ impl Socket {
     /// A socket that closes itself when its view hasn't asked about it for `idle`, or has left more
     /// than `inbox_max` bytes unread: the view went away without saying so (Claude quit, say).
     fn connect(port: u16, path: &str, idle: Duration, inbox_max: usize) -> io::Result<Arc<Socket>> {
-        let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+        // One handle for the reader and the writer, not a `try_clone` (wire::Shared says why).
+        let stream = wire::Shared::new(TcpStream::connect(("127.0.0.1", port))?);
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         let mut key = [0u8; 16];
         fill_random(&mut key);
@@ -559,8 +560,8 @@ impl Socket {
             "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\n\r\n",
             STANDARD.encode(key)
         );
-        stream.write_all(request.as_bytes())?;
-        let mut reader = BufReader::new(stream.try_clone()?);
+        (&stream).write_all(request.as_bytes())?;
+        let mut reader = BufReader::new(stream.clone());
         let mut status = String::new();
         reader.read_line(&mut status)?;
         if !status.split_whitespace().nth(1).is_some_and(|code| code == "101") {
@@ -598,7 +599,7 @@ impl Socket {
         Ok(socket)
     }
 
-    fn read_all(&self, mut reader: BufReader<TcpStream>, inbox_max: usize) {
+    fn read_all(&self, mut reader: BufReader<wire::Shared>, inbox_max: usize) {
         let mut message = Vec::new();
         while let Ok((fin, opcode, payload)) = read_frame(&mut reader) {
             match opcode {

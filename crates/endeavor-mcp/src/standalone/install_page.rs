@@ -216,14 +216,16 @@ fn settled() -> Duration {
 
 /// Answer one request on the page server.
 fn serve(stream: TcpStream, port: u16, shared: &Shared) -> std::io::Result<()> {
-    let mut out = stream.try_clone()?;
+    // One handle for both, not a `try_clone` (wire::Shared says why).
+    let stream = wire::Shared::new(stream);
+    let mut out = stream.clone();
     let mut reader = BufReader::new(stream);
     let Some(head) = Head::read(&mut reader)? else { return Ok(()) };
     let ours = |value: Option<&str>, scheme: &str| value.is_some_and(|v| v == format!("{scheme}127.0.0.1:{port}") || v == format!("{scheme}localhost:{port}"));
     // Only a request addressed to this loopback port: a page elsewhere that points a name at
     // 127.0.0.1 sends its own name as the host.
     let secret = head.path().strip_prefix(PATH).filter(|_| ours(head.header("Host"), ""));
-    let page = |status: &str, body: String, out: &mut TcpStream| {
+    let page = |status: &str, body: String, out: &mut wire::Shared| {
         let headers = [
             ("Cache-Control", "no-store"),
             // Not "no-referrer": with it, a browser sends `Origin: null` with the page's own form.

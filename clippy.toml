@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "std::net::TcpStream::try_clone", reason = "on Windows the copy is inheritable, so a child started while it is open keeps the connection open (#154, #157); share one handle with wire::Shared" },
+]

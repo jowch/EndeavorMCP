@@ -2,6 +2,9 @@
 //! 127.0.0.1 (`ENDEAVOR_RELEASE_URL`). The full update needs a platform the
 //! release has binaries for; elsewhere it says to use cargo install.
 
+// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
+#![allow(clippy::disallowed_methods)]
+
 #![cfg(unix)]
 
 #[path = "common/exec.rs"]
