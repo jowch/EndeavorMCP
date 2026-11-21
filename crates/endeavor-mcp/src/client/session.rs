@@ -597,6 +597,14 @@ impl Session {
         self.shared.listener.port()
     }
 
+    /// Close the listener now and return its port, for a new session to have (`Config::port`) while
+    /// `close`, which can wait on a connect being cut short, runs in a thread of its own. Calls to the
+    /// port in between find nothing there. Call `close` next: nothing else is of use after this.
+    pub fn release_port(&self) -> u16 {
+        self.shared.listener.close();
+        self.port()
+    }
+
     /// Let go of the machine's helper (which leaves the runtime running, and discards what an
     /// upload had written part way), end the connection, close the listener and end the session's
     /// thread. A connect that is under way is cancelled at once. Nothing begins after this, and calls

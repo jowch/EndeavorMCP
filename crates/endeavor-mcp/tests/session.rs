@@ -314,6 +314,24 @@ fn a_session_opened_on_a_closed_ones_port_keeps_the_agents_url_working() {
 }
 
 #[test]
+fn a_released_port_goes_to_the_next_session_while_the_old_one_still_closes() {
+    // The app closes the old session in a thread of its own, so it releases the port first.
+    let place = Place::new("release-port");
+    let session = place.session();
+    let runtime = ready(session.ensure(start(), LONG, false));
+    assert_eq!(session.release_port(), runtime.port);
+    let mut config = place.config(true, None);
+    config.port = Some(runtime.port);
+    let second = Session::new(config).expect("a session");
+    assert_eq!(second.port(), runtime.port, "the port was free at once");
+    // The old session's close, after the new one has the port, leaves it alone.
+    std::thread::spawn(move || session.close()).join().unwrap();
+    let again = ready(second.ensure(Want::Attach { install: false }, LONG, false));
+    assert_eq!((again.port, again.pid), (runtime.port, runtime.pid));
+    assert!(call(again.port, &again.token).contains(r#""result""#), "an agent's call reaches the runtime");
+}
+
+#[test]
 fn a_dropped_session_ends_its_thread_helper_and_port_and_stops_nothing() {
     let place = Place::new("drop");
     let session = place.session();
