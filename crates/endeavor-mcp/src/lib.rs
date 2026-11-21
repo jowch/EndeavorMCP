@@ -615,11 +615,12 @@ impl Attached {
     /// The app has this runtime again: one an earlier quit left to the plugin goes back to the lifetime it
     /// started with (`core::keep_for_app`), so no front takes it for the plugin's own. A runtime of an
     /// older build ignores the call.
+    /// Tried a few times, off the helper's loop, since a runtime still left would stop under the app once
+    /// the plugin is out of it (#453).
     fn take_back(&self) {
         let How::Process(_, port) = &self.how else { return };
-        if let Err(e) = bridge_rpc(*port, &self.state.token, "endeavor/keep_for_app", json!({})) {
-            eprintln!("[ Warning: Couldn't take the runtime back from the plugin: {e}");
-        }
+        let (port, token) = (*port, self.state.token.clone());
+        std::thread::spawn(move || take_back_with(&|| bridge_rpc(port, &token, "endeavor/keep_for_app", json!({})).map(drop), &TAKE_BACK_WAITS));
     }
 
     fn ready(&self, id: u32, reattached: bool) -> ToApp {
@@ -1738,6 +1739,26 @@ pub(crate) fn is_this_node(node: &str) -> bool {
 const CALL: &str = "/endeavor/call";
 
 /// POST one JSON-RPC call to the runtime's calls; its reply.
+/// The waits between tries of `endeavor/keep_for_app` (`Attached::take_back`): about a minute in all.
+const TAKE_BACK_WAITS: [Duration; 5] = [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(15), Duration::from_secs(30)];
+
+/// Call `call` until it answers, waiting `waits` between tries. Whether it answered.
+fn take_back_with(call: &dyn Fn() -> std::io::Result<()>, waits: &[Duration]) -> bool {
+    let mut waits = waits.iter();
+    loop {
+        match call() {
+            Ok(()) => return true,
+            Err(e) => match waits.next() {
+                Some(wait) => std::thread::sleep(*wait),
+                None => {
+                    eprintln!("[ Warning: Couldn't take the runtime back from the plugin: {e}");
+                    return false;
+                }
+            },
+        }
+    }
+}
+
 fn bridge_rpc(port: u16, token: &str, method: &str, params: Value) -> std::io::Result<Value> {
     let mut socket = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(2))?;
     socket.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1774,6 +1795,25 @@ fn bridge_call_within(port: u16, path: &str, token: &str, method: &str, wait: Du
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn taking_the_runtime_back_is_tried_again_until_it_answers() {
+        // A runtime still left to the plugin stops under the reopened app once the plugin is out of it (#453).
+        let tries = std::cell::Cell::new(0);
+        let fails_twice = || {
+            tries.set(tries.get() + 1);
+            if tries.get() < 3 { Err(std::io::ErrorKind::ConnectionRefused.into()) } else { Ok(()) }
+        };
+        assert!(take_back_with(&fails_twice, &[Duration::ZERO; 5]));
+        assert_eq!(tries.get(), 3, "it stops once it answers");
+        tries.set(0);
+        let never = || {
+            tries.set(tries.get() + 1);
+            Err(std::io::ErrorKind::ConnectionRefused.into())
+        };
+        assert!(!take_back_with(&never, &[Duration::ZERO; 5]));
+        assert_eq!(tries.get(), 6, "one try, then one after each wait");
+    }
 
     /// The runtime records Julia's `gethostname()`, the DNS name in its own
     /// case, which Windows' `hostname` command also prints.
