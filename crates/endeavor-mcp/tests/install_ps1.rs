@@ -8,6 +8,8 @@
 //! (`CI` set), on a runner that is thrown away after.
 
 #![cfg(windows)]
+// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
+#![allow(clippy::disallowed_methods)]
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};

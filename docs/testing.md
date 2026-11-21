@@ -262,6 +262,10 @@ installed in R's library (or `R_LIBS` naming one), and takes about ten seconds:
 Rscript runtime/r/test/test.R
 ```
 
+The E2E workflow's `e2e r` job runs it after `e2e_r`, with `R_LIBS` naming
+the Ember build that test installed (`~/.cache/endeavor/r/ember`, the build
+`ember.dcf` names, and `deps`). It needs R's `curl` and `processx` packages.
+
 `crates/endeavor-mcp/tests/e2e_r.rs` runs `endeavor serve` with real Julia
 and R. An agent opens an Ember notebook, which starts R's adapter; it reads,
 edits and runs a cell, and the browser link reaches Ember's page at

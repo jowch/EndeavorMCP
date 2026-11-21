@@ -156,7 +156,7 @@ jobs:
       - name: R
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends r-base-core r-base-dev r-cran-commonmark r-cran-httpuv r-cran-jsonlite r-cran-later r-cran-processx r-cran-promises r-cran-renv
+          sudo apt-get install -y --no-install-recommends r-base-core r-base-dev r-cran-commonmark r-cran-httpuv r-cran-jsonlite r-cran-curl r-cran-later r-cran-processx r-cran-promises r-cran-renv
       # The Julia depot, and the folder Ember installs into (paths.rs ember_folder).
       # A build's library is only there when its install finished, so a restored
       # one is whole; the test updates it to Ember's latest build.
@@ -198,6 +198,13 @@ jobs:
           # e2e_r starts no Julia, so nothing else makes the depot.
           mkdir -p target/tmp/e2e-r/depot
           touch target/tmp/e2e-r/depot/.e2e-complete
+      # R's adapter on its own (runtime/r/test/test.R): every method over HTTP, against the Ember
+      # build e2e_r just installed. It ends non-zero when a check fails, after printing the adapter's log.
+      - name: R adapter test
+        run: |
+          ember=~/.cache/endeavor/r/ember
+          build=$(sed -n 's/^Current: //p' "$ember/ember.dcf")
+          R_LIBS="$ember/$build:$ember/deps" Rscript runtime/r/test/test.R
       # Only a passing run saves, so the Ember library saved is one that worked.
       - name: Save depot and Ember
         if: success() && steps.depot-r.outputs.complete != 'true'
