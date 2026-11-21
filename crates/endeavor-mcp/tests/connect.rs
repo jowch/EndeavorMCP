@@ -1083,6 +1083,15 @@ fn the_helpers_check_says_a_start_is_under_way_beside_a_hung_runtime_and_not_aft
     lock.lock().unwrap();
     assert_eq!(check(&helper, 2), RuntimeState::Starting, "its replacement is on the way");
     drop(lock);
+    // A child another test spawns at this moment holds a copy of the descriptor until it execs, and
+    // with it the lock (#212): wait until it can be taken.
+    let free = std::fs::File::open(dir.join("starting.lock")).unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while free.try_lock_shared().is_err() {
+        assert!(std::time::Instant::now() < until, "the start lock is still held 10 s after the test let go of it");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(free);
     assert_eq!(check(&helper, 3), RuntimeState::NotRunning);
     assert!(runtime.alive());
     helper.stdin.0.lock().unwrap().take();
