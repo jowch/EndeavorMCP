@@ -1072,9 +1072,9 @@ fn the_helpers_check_says_a_start_is_under_way_beside_a_hung_runtime_and_not_aft
     let dir = state_dir("check-silent");
     let runtime = FakeRuntime::start(&dir, &this_host());
     // Its port stops answering: a runtime that hangs.
-    let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = silent();
     let mut state = common::read_json(&dir.join("runtime.json"));
-    state["port"] = closed.into();
+    state["port"] = port.into();
     std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
     let helper = Helper::start(&dir, &[]);
     helper.hello();
@@ -1108,6 +1108,12 @@ fn quiet_for(quiet: Duration) -> u16 {
     port
 }
 
+/// A runtime's port that never answers. It stays bound for the whole test run: a port bound and let
+/// go at once could be taken by a test running beside it, and then the silent runtime answers (#253).
+fn silent() -> u16 {
+    quiet_for(Duration::from_secs(24 * 3600))
+}
+
 /// The runtime recorded in `dir` now listens on `port`.
 fn record_port(dir: &Path, port: u16) {
     let mut state = common::read_json(&dir.join("runtime.json"));
@@ -1137,8 +1143,7 @@ fn a_runtime_that_is_silent_for_a_while_is_waited_for_and_used_and_none_is_start
 fn a_stop_while_a_silent_runtime_is_asked_again_stops_it_as_a_stop_with_nothing_attached_does() {
     let dir = state_dir("silent-stop");
     let runtime = FakeRuntime::start(&dir, &this_host());
-    let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    record_port(&dir, closed);
+    record_port(&dir, silent());
     let julia = fake_julia(&dir);
     let helper = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[("ENDEAVOR_TEST_SILENT_WAIT_SECS", "20")]);
     helper.hello();
@@ -1157,8 +1162,7 @@ fn a_runtime_that_stays_silent_is_neither_stopped_nor_replaced_and_every_client_
     let dir = state_dir("silent-stuck");
     let cores = Cores(dir.clone());
     let runtime = FakeRuntime::start(&dir, &this_host());
-    let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    record_port(&dir, closed);
+    record_port(&dir, silent());
     let julia = fake_julia(&dir);
     let wait = ("ENDEAVOR_TEST_SILENT_WAIT_SECS", "2");
     let said = format!("Endeavor here (pid {}) is running but hasn't answered for 2 seconds, so no second one was started beside it.", runtime.pid);
