@@ -285,13 +285,20 @@ fn real_julia(julia: String) -> String {
     let mut command = Command::new(&julia);
     crate::client::no_window(&mut command);
     let output = command.args(["--startup-file=no", "--history-file=no", "-e", "print(Sys.BINDIR)"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
-    let Ok(output) = output else { return julia };
-    if !output.status.success() {
-        return julia;
-    }
+    // Started through the launcher, the Julia run can differ from the one checked (#55): say so in the log.
+    let as_found = |why: String| {
+        eprintln!("Couldn't find the Julia behind {julia} ({why}), so it is started as found.");
+        julia.clone()
+    };
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => return as_found(format!("it ended with {}", output.status)),
+        Err(e) => return as_found(e.to_string()),
+    };
     match bindir_julia(&String::from_utf8_lossy(&output.stdout)) {
         Some(exe) if exe.is_file() => exe.display().to_string(),
-        _ => julia,
+        Some(exe) => as_found(format!("{} isn't there", exe.display())),
+        None => as_found("it printed no Sys.BINDIR".to_owned()),
     }
 }
 
@@ -827,7 +834,6 @@ mod tests {
         assert_eq!(julia_in(&std::env::join_paths([&without]).unwrap()), None);
     }
 
-    /// The cloud VMs' setup script installs this Julia and the pinned Rust too (Endeavor's docs/cloud.md).
     #[test]
     fn juliaups_launcher_gives_way_to_the_julia_in_its_bindir() {
         let (bindir, exe) = if cfg!(windows) {
@@ -848,8 +854,12 @@ mod tests {
         std::fs::write(root.join("julia").join("bin").join("libjulia.dll"), "").unwrap();
         assert!(!is_real_julia(&launcher));
         assert!(is_real_julia(&root.join("julia").join("bin").join(exe)));
+        // Julia's own binary (an empty file, which can't run) is started as it is, without being asked.
+        let real = root.join("julia").join("bin").join(exe).display().to_string();
+        assert_eq!(real_julia(real.clone()), real);
     }
 
+    /// The cloud VMs' setup script installs this Julia and the pinned Rust too (Endeavor's docs/cloud.md).
     #[test]
     fn the_cloud_setup_script_pins_the_same_julia() {
         let script = include_str!("../../../scripts/cloud-setup.sh");
