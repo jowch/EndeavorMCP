@@ -815,7 +815,15 @@ fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
                 other => panic!("expected Ready, got {other:?}"),
             }
         }
-        let record: Value = serde_json::from_str(&std::fs::read_to_string(state.join("runtime.json")).unwrap()).unwrap();
-        assert_eq!(record["exits_when_idle"], json!(false), "{record}");
+        // The helper takes it back just after it answers (#453).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let record: Value = serde_json::from_str(&std::fs::read_to_string(state.join("runtime.json")).unwrap()).unwrap();
+            if record["exits_when_idle"] == json!(false) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{record}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
     });
 }
