@@ -135,7 +135,10 @@ fn found(source: &Source, download: bool, endeavors: &std::cell::Cell<bool>, pro
             Ok((path, version))
         }
         Source::Shell(line) => {
-            let (path, err) = login_shell_julia(Some(line));
+            let (path, err, ended_early) = login_shell_julia(Some(line));
+            if ended_early {
+                return Err(format!("Running `{line}` in a login shell ended before it looked for julia, because a `#` in it comments out the rest. Take the comment out.").into());
+            }
             let path = path.ok_or_else(|| {
                 let why = err.lines().rev().find(|l| !l.trim().is_empty()).map(|l| format!(" ({})", l.trim())).unwrap_or_default();
                 format!("Running `{line}` in a login shell didn't put julia on the PATH{why}.")
@@ -311,16 +314,24 @@ fn bindir_julia(printed: &str) -> Option<std::path::PathBuf> {
 }
 
 /// The julia the user's login shell finds, after `line` when there is one: the
-/// last absolute path it prints (profiles can print other things first), and
-/// what it wrote to stderr.
-fn login_shell_julia(line: Option<&str>) -> (Option<String>, String) {
+/// last absolute path it prints (profiles can print other things first), what
+/// it wrote to stderr, and whether it ended well without printing a path.
+/// `command -v` fails when it finds nothing, so that means the lookup never ran:
+/// a `#` in the line commented it out.
+fn login_shell_julia(line: Option<&str>) -> (Option<String>, String, bool) {
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
     let Ok(output) = lookup_command(&shell, line).stdin(Stdio::null()).output() else {
-        return (None, format!("couldn't run {shell}"));
+        return (None, format!("couldn't run {shell}"), false);
     };
+    looked_up(&output)
+}
+
+/// `login_shell_julia`'s answer from the shell's output.
+fn looked_up(output: &std::process::Output) -> (Option<String>, String, bool) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let path = stdout.lines().rev().map(str::trim).find(|l| l.starts_with('/')).map(str::to_owned);
-    (path.filter(|_| output.status.success()), String::from_utf8_lossy(&output.stderr).into_owned())
+    let ended_early = output.status.success() && path.is_none();
+    (path.filter(|_| output.status.success()), String::from_utf8_lossy(&output.stderr).into_owned(), ended_early)
 }
 
 /// `shell` asked for julia's path, after `line`. csh and tcsh take `-l` only as their one flag, so they
@@ -633,8 +644,8 @@ mod tests {
         ];
         let found = |shell: &str, line: &str| {
             let output = lookup_command(shell, Some(line)).stdin(Stdio::null()).stderr(Stdio::null()).output().unwrap();
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            (output.status.success(), stdout.lines().rev().map(str::trim).find(|l| l.starts_with('/')).map(str::to_owned))
+            let (path, _, ended_early) = looked_up(&output);
+            (output.status.success(), path, ended_early)
         };
         let mut tried = 0;
         for (shell, line, no_julia) in shells {
@@ -642,8 +653,9 @@ mod tests {
                 continue;
             }
             tried += 1;
-            assert_eq!(found(shell, &line), (true, Some(dir.join("julia").display().to_string())), "{shell}");
-            assert!(!found(shell, no_julia).0, "{shell}: a PATH without julia finds none");
+            assert_eq!(found(shell, &line), (true, Some(dir.join("julia").display().to_string()), false), "{shell}");
+            assert_eq!(found(shell, no_julia), (false, None, false), "{shell}: a PATH without julia finds none");
+            assert_eq!(found(shell, &format!("{line} # julia 1.12")), (true, None, true), "{shell}: a comment ends the line before the lookup (#478)");
         }
         assert!(tried > 0);
         let _ = std::fs::remove_dir_all(&dir);
