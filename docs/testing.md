@@ -191,6 +191,18 @@ It takes about a minute and starts Julia twice:
 2. `mcp` over stdio starts a runtime in the background. A second `mcp` with
    another folder shares it, and `stop` ends it.
 
+To run `serve` or `mcp` by hand without leaving anything in your own folders,
+give it scratch folders for everything it writes:
+
+```sh
+endeavor serve --state-dir /tmp/s/state --cache /tmp/s/cache \
+  --depot /tmp/s/depot: --julia "$(command -v julia)"
+```
+
+`--julia` with a path keeps it from downloading its own Julia into
+`~/.cache/endeavor`. An R notebook still installs Ember under
+`~/.cache/endeavor/r` (or `$SCRATCH/endeavor/r`), which no option moves yet.
+
 ## The notebook view in a sandboxed frame
 
 `scripts/notebook-view-check.cjs` checks the notebook view that clients

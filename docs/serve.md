@@ -53,7 +53,7 @@ cargo install --git https://github.com/jowch/EndeavorMCP endeavor-mcp
 
 The binary carries Endeavor's Julia code (`runtime/`) and the skills, so it is
 all you install. On first use it unpacks the Julia code into
-`~/.cache/endeavor/serve/<version>/`. A new version removes the older
+`~/.cache/endeavor/serve/<version>/` (`--cache` moves it). A new version removes the older
 versions' folders once no running Julia uses them and none has been used for
 a day.
 
@@ -199,6 +199,7 @@ status` shows what is running and where.
 | `--r PATH` | The `Rscript` for R notebooks (not open to agents yet), or `auto`. On a Mac with no R, Endeavor can install its own R 4.6.1 once you agree | `auto`: your login shell's `Rscript`, else Endeavor's own R if it's installed (looked for once, when the runtime starts) |
 | `--r-shell LINE` | A shell line that puts `Rscript` on the `PATH`, such as `'module load R/4.4'`. It runs each time R starts, so what else it sets up (libraries, a compiler) is there too | |
 | `--depot DEPOT` | `JULIA_DEPOT_PATH` for the runtime | `~/.cache/endeavor/depot:`, or `$SCRATCH/endeavor/depot:` when `$SCRATCH` is set |
+| `--cache DIR` | Where the runtime's Julia code is unpacked, one folder per version | `~/.cache/endeavor/serve` (`$XDG_CACHE_HOME/endeavor/serve` when that is set; `%LOCALAPPDATA%\Endeavor\serve-runtime` on Windows) |
 | `--idle-stop HOURS` | Stop a notebook nobody has used for this long. `0` never stops one | `48` |
 | `--host-tools` | Give every agent session `list_folder`, `read_file` and `run_shell` on this machine (`serve` only) | Off |
 | `--state-dir DIR` | Where the runtime keeps `runtime.json`, its token and `runtime.log` | `~/.local/state/endeavor/serve/<host name>`, or `~/.cache/endeavor/state` while a runtime the Endeavor app started there on a server is still running |

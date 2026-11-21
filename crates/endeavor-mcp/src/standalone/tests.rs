@@ -75,6 +75,11 @@ fn flags_set_what_they_name() {
     let shell = parse(&["mcp", "--julia-shell", "module load julia", "--skills", "plugin", "--folder", "/abs"].map(String::from), &env());
     let Ok(Command::Mcp(o)) = shell else { panic!() };
     assert_eq!((o.julia, o.skills_plugin, o.folder), (julia::Source::Shell("module load julia".into()), true, Some(PathBuf::from("/abs"))));
+    let Ok(Command::Serve(o)) = parsed("serve --cache /scratch/unpack") else { panic!() };
+    assert_eq!(o.cache, PathBuf::from("/scratch/unpack"), "the runtime is unpacked where --cache says (#126)");
+    let Ok(Command::Mcp(o)) = parse(&["mcp", "--cache", "unpack"].map(String::from), &env()) else { panic!() };
+    assert_eq!(o.cache, PathBuf::from("/home/ada/project/unpack"), "a relative one is under the folder it was given in");
+    assert!(parse(&["stop", "--cache", "/c"].map(String::from), &env()).is_err(), "stop unpacks nothing");
     let Ok(Command::Serve(o)) = parsed("serve --r /opt/R/bin/Rscript") else { panic!() };
     assert_eq!(o.r, crate::r::Source::Path("/opt/R/bin/Rscript".into()));
     let Ok(Command::Mcp(o)) = parse(&["mcp", "--r-shell", "module load R"].map(String::from), &env()) else { panic!() };
