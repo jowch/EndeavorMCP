@@ -275,7 +275,7 @@ pub enum SessionEvent {
     Step(Event),
     /// Something that went wrong or waits on the user, in plain words: a lost connection, a start
     /// that failed or needs an install, a wait for the agreement to install the helper, a runtime
-    /// that stopped or that another connection took over.
+    /// that stopped.
     Trouble(String),
 }
 

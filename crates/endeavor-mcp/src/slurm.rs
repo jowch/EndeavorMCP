@@ -145,7 +145,7 @@ impl Link {
     }
 }
 
-/// Take the cluster runtime over: the one running in a job, a job already
+/// Attach to the cluster runtime: the one running in a job, a job already
 /// waiting, or a new job. The start lock is held while it reads `job.json`,
 /// decides and submits, so two helpers never submit two jobs, and let go
 /// before the wait in the queue: a helper that comes in meanwhile finds
