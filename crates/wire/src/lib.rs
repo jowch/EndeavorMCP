@@ -328,6 +328,10 @@ pub enum ToHelper {
     },
     /// Exit and leave the runtime running.
     Detach,
+    /// What `--own-with-client` is from now on: the app's "Keep notebooks running after Endeavor quits"
+    /// changed (on = the setting is off), so an app that goes without saying leaves the runtime, or stops
+    /// one this connection started, as the setting says now (app #245). A helper that predates it ignores it.
+    OwnWithClient { on: bool },
     Files { id: u32, request: files::Request },
 }
 
@@ -535,6 +539,7 @@ mod tests {
         // The app's quit: absent from an ordinary stop, and false when a client that predates it says nothing.
         assert_eq!(serde_json::to_string(&ToHelper::Stop { id: 3, force: false, unless_shared: true }).unwrap(), r#"{"type":"Stop","id":3,"unless_shared":true}"#);
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"Stop","id":3}"#).unwrap(), ToHelper::Stop { id: 3, force: false, unless_shared: false });
+        assert_eq!(serde_json::to_string(&ToHelper::OwnWithClient { on: false }).unwrap(), r#"{"type":"OwnWithClient","on":false}"#);
         assert_eq!(serde_json::from_str::<ToApp>(r#"{"type":"Replaced"}"#).unwrap(), ToApp::Replaced);
         let not_stopped = ToApp::NotStopped { id: 2, message: "Julia was not stopped.".into() };
         let Frame::Control(json) = not_stopped.frame() else { panic!() };

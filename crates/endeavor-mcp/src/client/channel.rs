@@ -511,6 +511,12 @@ impl Channel {
         (!self.left.load(Ordering::SeqCst)).then(|| Notice::Lost("The connection closed unexpectedly.".into()))
     }
 
+    /// The app's Keep running setting changed: the helper of this computer's runtime leaves it, or stops
+    /// one it started, as the setting now says if the app goes without quitting (app #245).
+    pub fn keep_running(&self, keep: bool) {
+        let _ = self.mux.send(&ToHelper::OwnWithClient { on: !keep }.frame());
+    }
+
     /// The client is quitting: leave Julia running, or stop it, unless the
     /// plugin works in it too (`ToHelper::Stop`'s `unless_shared`, app #232). The
     /// helper does the rest after the client has gone.

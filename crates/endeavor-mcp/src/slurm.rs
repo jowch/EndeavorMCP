@@ -341,7 +341,8 @@ fn wait(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, 
                 break Err(Unstarted::Stopped { id, force, other: false });
             }
             Heard::Detach | Heard::Eof => std::process::exit(0),
-            Heard::Event => continue,
+            // A cluster's job is left either way (`Args::own_with_client`).
+            Heard::Event | Heard::OwnWithClient(_) => continue,
             Heard::Quiet => {}
         }
         let q = match squeue(job) {

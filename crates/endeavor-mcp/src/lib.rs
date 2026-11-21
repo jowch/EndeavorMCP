@@ -116,7 +116,7 @@ struct Args {
     /// The same, but only for a runtime this connection started: one it attached to, or another
     /// connection's start it waited for, is left running. Only for the process launcher: a cluster's
     /// job is left, since a running job another helper submitted also attaches as not reattached.
-    own_with_client: bool,
+    own_with_client: AtomicBool,
     /// The state folder belongs to this one machine, so a different node name
     /// only means the machine was renamed.
     any_node: bool,
@@ -283,6 +283,15 @@ fn keep_runtime() {
     }
 }
 
+/// `ToHelper::OwnWithClient`: off, a start of this helper's that is under way is wanted too, so its
+/// lifeline lets go (`keep_runtime`) and a killed app leaves it (app #245).
+fn own_with_client(args: &Args, on: bool) {
+    args.own_with_client.store(on, Ordering::SeqCst);
+    if !on {
+        keep_runtime();
+    }
+}
+
 /// The helper's main, given its arguments without the program name. Call it
 /// before the process starts any thread: it blocks SIGUSR1 for all of them.
 pub fn run(argv: Vec<String>) -> ! {
@@ -397,7 +406,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         depot: depot.ok_or("--depot is required")?,
         launcher,
         quit_with_client,
-        own_with_client,
+        own_with_client: own_with_client.into(),
         any_node,
         build,
         own_r,
@@ -501,7 +510,7 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
                 };
                 answer_stops(mux, &mut inbox, id, force, &stopped);
             }
-            Event::Eof if args.quit_with_client || (args.own_with_client && args.launcher == Launcher::Process && attached.as_ref().is_some_and(|a| !a.reattached)) => {
+            Event::Eof if args.quit_with_client || (args.own_with_client.load(Ordering::SeqCst) && args.launcher == Launcher::Process && attached.as_ref().is_some_and(|a| !a.reattached)) => {
                 if let Some(runtime) = attached.take()
                     && let Err(failed) = runtime.stop(args, &routes, &mut inbox, standalone::start_lock_limit())
                 {
@@ -517,6 +526,7 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
                 std::process::exit(0)
             }
             Event::Eof => std::process::exit(0),
+            Event::App(ToHelper::OwnWithClient { on }) => own_with_client(args, on),
             // Answered as they arrive (relay_stdin).
             Event::App(ToHelper::Files { .. }) => {}
             Event::Exited(pid, status) => {
@@ -720,6 +730,8 @@ enum Heard {
     Eof,
     /// What happened to a runtime or a relay: nothing a start under way acts on.
     Event,
+    /// `OwnWithClient`: what `--own-with-client` is from now on.
+    OwnWithClient(bool),
 }
 
 impl Inbox {
@@ -747,6 +759,7 @@ impl Inbox {
             }
             Event::App(ToHelper::Stop { id, force, .. }) => Heard::Stop(id, force),
             Event::App(ToHelper::Detach) => Heard::Detach,
+            Event::App(ToHelper::OwnWithClient { on }) => Heard::OwnWithClient(on),
             Event::Eof => Heard::Eof,
             _ => Heard::Event,
         }
@@ -867,8 +880,9 @@ impl<'a> Client<'a> {
             }
             Heard::Eof if self.args.quit_with_client && waiting != Waiting::Lock => return false,
             // `await_runtime` stops the runtime this start began.
-            Heard::Eof if self.args.own_with_client && waiting == Waiting::Ready => return false,
+            Heard::Eof if self.args.own_with_client.load(Ordering::SeqCst) && waiting == Waiting::Ready => return false,
             Heard::Eof => std::process::exit(0),
+            Heard::OwnWithClient(on) => own_with_client(self.args, on),
             Heard::Quiet | Heard::Event => {}
         }
         true
@@ -1585,7 +1599,7 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
     command.args(args.r.args()).args(args.own_r.then_some("--own-r")).stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
     // A start this connection owns ends if this helper does before the app has it (`LIFELINE`).
-    let lifeline = match args.own_with_client {
+    let lifeline = match args.own_with_client.load(Ordering::SeqCst) {
         true => Some(std::io::pipe().map_err(|e| format!("Couldn't start the runtime: {e}"))?),
         false => None,
     };
@@ -1942,8 +1956,8 @@ mod tests {
         let a = args("connect --state-dir /s --julia /j --runtime /r --depot /d: --quit-with-client").unwrap();
         assert_eq!((a.state_dir, a.julia, a.depot.as_str()), (PathBuf::from("/s"), julia::Source::Path("/j".into()), "/d:"));
         assert!(a.quit_with_client && !a.any_node && a.launcher == Launcher::Process);
-        assert!(!a.own_with_client);
-        assert!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --own-with-client").unwrap().own_with_client);
+        assert!(!a.own_with_client.load(Ordering::SeqCst));
+        assert!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --own-with-client").unwrap().own_with_client.load(Ordering::SeqCst));
         assert!(args("connect --state-dir /s --julia auto --runtime /r --depot /d --own-with-client --quit-with-client").is_err());
         assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().julia, julia::Source::Auto);
         assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().r, r::Source::Auto);
