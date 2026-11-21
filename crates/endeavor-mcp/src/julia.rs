@@ -135,7 +135,7 @@ fn found(source: &Source, download: bool, endeavors: &std::cell::Cell<bool>, pro
             Ok((path, version))
         }
         Source::Shell(line) => {
-            let (path, err) = login_shell_julia(&format!("{line} >/dev/null && command -v julia"));
+            let (path, err) = login_shell_julia(Some(line));
             let path = path.ok_or_else(|| {
                 let why = err.lines().rev().find(|l| !l.trim().is_empty()).map(|l| format!(" ({})", l.trim())).unwrap_or_default();
                 format!("Running `{line}` in a login shell didn't put julia on the PATH{why}.")
@@ -251,7 +251,7 @@ fn expand_home(path: &str) -> String {
 /// The julia on the login shell's PATH.
 #[cfg(unix)]
 fn path_julia() -> Option<String> {
-    login_shell_julia("command -v julia").0
+    login_shell_julia(None).0
 }
 
 /// The first `julia.exe` on the PATH: Windows has no login shell. juliaup from
@@ -310,16 +310,32 @@ fn bindir_julia(printed: &str) -> Option<std::path::PathBuf> {
     Some(Path::new(bindir).join(if cfg!(windows) { "julia.exe" } else { "julia" }))
 }
 
-/// The last absolute path a login shell prints for `script` (profiles can
-/// print other things first), and what it wrote to stderr.
-fn login_shell_julia(script: &str) -> (Option<String>, String) {
+/// The julia the user's login shell finds, after `line` when there is one: the
+/// last absolute path it prints (profiles can print other things first), and
+/// what it wrote to stderr.
+fn login_shell_julia(line: Option<&str>) -> (Option<String>, String) {
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
-    let Ok(output) = Command::new(&shell).args(["-lc", script]).stdin(Stdio::null()).output() else {
+    let Ok(output) = lookup_command(&shell, line).stdin(Stdio::null()).output() else {
         return (None, format!("couldn't run {shell}"));
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let path = stdout.lines().rev().map(str::trim).find(|l| l.starts_with('/')).map(str::to_owned);
     (path.filter(|_| output.status.success()), String::from_utf8_lossy(&output.stderr).into_owned())
+}
+
+/// `shell` asked for julia's path, after `line`. csh and tcsh take `-l` only as their one flag, so they
+/// run a plain `-c`, which still reads ~/.cshrc or ~/.tcshrc, where module setup goes, and sh looks
+/// julia up on the PATH they leave (as R's setting does: `r::Source::command`).
+fn lookup_command(shell: &str, line: Option<&str>) -> Command {
+    let mut command = Command::new(shell);
+    if crate::r::is_csh(shell) {
+        let line = line.map_or(String::new(), |line| format!("{} >/dev/null; ", line.replace('\n', "; ")));
+        command.args(["-c", &format!("{line}exec /bin/sh -c 'command -v julia'")]);
+    } else {
+        let line = line.map_or(String::new(), |line| format!("{line} >/dev/null && "));
+        command.args(["-lc", &format!("{line}command -v julia")]);
+    }
+    command
 }
 
 /// `julia --version`, if it's new enough.
@@ -598,6 +614,40 @@ fn sha256_of(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn every_login_shell_finds_the_julia_a_line_puts_on_the_path() {
+        let dir = std::env::temp_dir().join(format!("endeavor-julia-shell-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::test_exec::write_executable(&dir.join("julia"), "#!/bin/sh\n");
+        let d = dir.display();
+        let shells = [
+            ("/bin/sh", format!("export PATH=\"{d}:$PATH\""), "PATH=/nonexistent"),
+            ("/bin/bash", format!("export PATH=\"{d}:$PATH\""), "PATH=/nonexistent"),
+            ("/bin/zsh", format!("export PATH=\"{d}:$PATH\""), "PATH=/nonexistent"),
+            ("/usr/bin/fish", format!("set -gx PATH {d} $PATH"), "set -gx PATH /nonexistent"),
+            ("/bin/tcsh", format!("echo loading\nsetenv PATH \"{d}:$PATH\""), "setenv PATH /nonexistent"),
+            ("/bin/csh", format!("setenv PATH \"{d}:$PATH\""), "setenv PATH /nonexistent"),
+        ];
+        let found = |shell: &str, line: &str| {
+            let output = lookup_command(shell, Some(line)).stdin(Stdio::null()).stderr(Stdio::null()).output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            (output.status.success(), stdout.lines().rev().map(str::trim).find(|l| l.starts_with('/')).map(str::to_owned))
+        };
+        let mut tried = 0;
+        for (shell, line, no_julia) in shells {
+            if !Path::new(shell).exists() {
+                continue;
+            }
+            tried += 1;
+            assert_eq!(found(shell, &line), (true, Some(dir.join("julia").display().to_string())), "{shell}");
+            assert!(!found(shell, no_julia).0, "{shell}: a PATH without julia finds none");
+        }
+        assert!(tried > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_chosen_julia_is_checked_by_its_version() {

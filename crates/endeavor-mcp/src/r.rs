@@ -152,7 +152,7 @@ impl Source {
 }
 
 /// csh and tcsh, which read `-c` scripts their own way.
-fn is_csh(shell: &str) -> bool {
+pub(crate) fn is_csh(shell: &str) -> bool {
     matches!(shell.rsplit('/').next(), Some("csh" | "tcsh" | "bsd-csh"))
 }
 
