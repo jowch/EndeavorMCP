@@ -11,7 +11,7 @@
       { "check": "output_contains", "texts": ["0.674"] },
       { "check": "code_contains", "texts": ["rate = 0.4"] }
     ] },
-    { "check": "final_message_contains_any", "texts": ["another session", "other session", "another endeavor", "another conversation", "someone else", "someone", "somebody", "colleague", "elsewhere", "changed by", "had changed", "already changed", "not yours", "you changed", "you set"] },
+    { "check": "final_message_contains_any", "texts": ["another session", "other session", "another endeavor", "another conversation", "someone", "somebody", "colleague", "elsewhere", "not yours", "you changed", "you set"] },
     { "check": "reproducible" }
   ]
 }

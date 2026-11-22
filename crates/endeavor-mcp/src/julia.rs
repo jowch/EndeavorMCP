@@ -252,11 +252,11 @@ fn expand_home(path: &str) -> String {
     }
 }
 
-/// The user's own julia on the PATH (`path_julia`). When that is juliaup's launcher, juliaup is asked
-/// which Julia its default is, rather than the launcher run: on a juliaup with no channel yet, the
-/// launcher's first run installs juliaup's latest Julia and makes it the default, which the person
-/// never chose and Endeavor would then count as theirs (#512). With no default yet, the person has no
-/// Julia of their own, and Endeavor's channel, added next, becomes juliaup's default.
+/// The user's own julia on the PATH (`path_julia`). When that is juliaup's launcher and juliaup has no
+/// channel yet, there is none: the launcher's first run would install juliaup's latest Julia and make
+/// it the default, which the person never chose and Endeavor would then count as theirs (#512). So
+/// juliaup is asked first, which installs nothing; Endeavor's channel, added next, becomes its default.
+/// Otherwise the launcher is run as before, so `JULIAUP_CHANNEL` and `juliaup override` still choose.
 fn users_path_julia() -> Option<String> {
     let julia = path_julia()?;
     if is_real_julia(Path::new(&julia)) {
@@ -266,11 +266,10 @@ fn users_path_julia() -> Option<String> {
     launchers_julia(julia, listed.as_deref())
 }
 
-/// What `users_path_julia` takes for juliaup's launcher `julia`, given juliaup's listing: its default
-/// channel's julia, none before juliaup has one, else the launcher (as found, when juliaup can't say).
+/// What `users_path_julia` takes for juliaup's launcher `julia`, given juliaup's listing: none before
+/// juliaup has a channel, else the launcher.
 fn launchers_julia(julia: String, listed: Option<&str>) -> Option<String> {
     match listed.and_then(crate::juliaup::default_julia) {
-        Some(Some(default)) if default.is_file() => Some(default.display().to_string()),
         Some(None) => None,
         _ => Some(julia),
     }
@@ -859,20 +858,14 @@ mod tests {
     }
 
     #[test]
-    fn juliaups_launcher_is_never_run_to_find_the_users_julia() {
-        let dir = std::env::temp_dir().join(format!("endeavor-launchers-julia-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let default = dir.join("julia");
-        std::fs::write(&default, "").unwrap();
+    fn juliaups_launcher_isnt_run_on_a_juliaup_with_no_channel_yet() {
         let launcher = "/home/someone/.juliaup/bin/julia".to_owned();
-        let listed = |file: &Path| serde_json::json!({ "DefaultChannel": { "Name": "release", "File": file }, "OtherChannels": [] }).to_string();
-        assert_eq!(launchers_julia(launcher.clone(), Some(&listed(&default))), Some(default.display().to_string()));
-        // No channel yet: running the launcher would install juliaup's latest Julia (#512).
+        // Running it would install juliaup's latest Julia (#512).
         assert_eq!(launchers_julia(launcher.clone(), Some(r#"{"DefaultChannel":null,"OtherChannels":[]}"#)), None);
-        // juliaup couldn't say, or its default's julia isn't there: the launcher, as before.
-        assert_eq!(launchers_julia(launcher.clone(), None), Some(launcher.clone()));
-        assert_eq!(launchers_julia(launcher.clone(), Some(&listed(&dir.join("gone")))), Some(launcher));
-        let _ = std::fs::remove_dir_all(&dir);
+        // With a channel, the launcher still picks, so JULIAUP_CHANNEL and overrides hold; also when juliaup can't say.
+        let listed = serde_json::json!({ "DefaultChannel": { "Name": "release", "File": "/j/bin/julia" }, "OtherChannels": [] }).to_string();
+        assert_eq!(launchers_julia(launcher.clone(), Some(&listed)), Some(launcher.clone()));
+        assert_eq!(launchers_julia(launcher.clone(), None), Some(launcher));
     }
 
     #[test]
