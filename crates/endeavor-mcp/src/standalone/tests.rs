@@ -483,12 +483,15 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
     assert_eq!(head.target(), "/mcp");
 }
 
+#[cfg(unix)]
 #[test]
 fn the_relay_says_claude_codes_auto_mode_as_its_hook_last_saw_it() {
     let (port, seen) = fake_core();
     let (mut relay, _out) = ready_relay(port, &seen, true);
     let modes = crate::client::scratch("claude-modes");
-    let files = claude_mode::Files::of(&modes, Some("conv-1"), Some(4242));
+    // This test process stands for the front, under its real parent.
+    let parent = std::os::unix::process::parent_id();
+    let files = claude_mode::Files::of(&modes, Some("conv-1"), Some(parent));
     files.register();
     Arc::get_mut(&mut relay).unwrap().mode = files;
     let mode_sent = |id: u32| {
@@ -496,7 +499,7 @@ fn the_relay_says_claude_codes_auto_mode_as_its_hook_last_saw_it() {
         seen.lock().unwrap().last().unwrap().0.header("X-Endeavor-Mode").map(str::to_owned)
     };
     assert_eq!(mode_sent(1), None, "no hook has run");
-    let hook = |session: &str, mode: &str| claude_mode::record(&modes, &json!({ "session_id": session, "permission_mode": mode }).to_string(), &[777, 4242]);
+    let hook = |session: &str, mode: &str| claude_mode::record(&modes, &json!({ "session_id": session, "permission_mode": mode }).to_string(), &[777, parent]);
     hook("conv-1", "auto");
     assert_eq!(mode_sent(2).as_deref(), Some("auto"));
     hook("conv-1", "default");

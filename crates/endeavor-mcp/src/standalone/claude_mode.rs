@@ -8,7 +8,10 @@
 //! The hook writes two files. One is named by the conversation (the hook's `session_id`), which the
 //! front knows from `CLAUDE_CODE_SESSION_ID`. The other is named by the Claude Code process the hook
 //! runs under, `by-process/<pid>`: the front is that process's child, registers that file when it
-//! starts, and the hook writes it for the nearest of its own ancestors that has one. `/clear` starts a
+//! starts, with its own pid beside it, and the hook writes it for the nearest of its own ancestors
+//! whose registered front is still running as that ancestor's child. Claude Code runs one
+//! front of the plugin per process (subagents share it, in their parent's mode), so one file per
+//! process is one per front. `/clear` starts a
 //! new conversation in the same front, whose `CLAUDE_CODE_SESSION_ID` then names the old one (#505), so
 //! the process's file is what carries the mode there; Windows has no parent lookup here and has only
 //! the conversation's. The front reads whichever of its two was written last.
@@ -62,6 +65,30 @@ fn process_file(dir: &Path, pid: u32) -> PathBuf {
     dir.join("by-process").join(pid.to_string())
 }
 
+/// Which front registered `process_file`: its pid.
+fn front_file(process_file: &Path) -> PathBuf {
+    process_file.with_extension("front")
+}
+
+/// Whether the front registered for process `pid` is still running as its child.
+fn front_alive(dir: &Path, pid: u32) -> bool {
+    let Some(front) = std::fs::read_to_string(front_file(&process_file(dir, pid))).ok().and_then(|f| f.trim().parse::<u32>().ok()) else { return false };
+    #[cfg(test)]
+    if let Some(alive) = FRONTS_FOR_TEST.with(|f| f.borrow().get(&front).copied()) {
+        return alive == pid;
+    }
+    #[cfg(unix)]
+    return crate::unixproc::parent(front as i32) == Some(pid as i32);
+    #[cfg(not(unix))]
+    false
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The test fronts that are running, by pid, with their parents.
+    static FRONTS_FOR_TEST: std::cell::RefCell<std::collections::HashMap<u32, u32>> = Default::default();
+}
+
 /// Where a front reads Claude Code's mode.
 #[derive(Default)]
 pub(super) struct Files {
@@ -75,14 +102,19 @@ impl Files {
         Files { conversation: conversation_file(dir, conversation), process: parent.filter(|&pid| pid > 1).map(|pid| process_file(dir, pid)) }
     }
 
-    /// Make the process's file, empty (no mode yet), so the hook finds it. Any mode a former process
-    /// given the same pid left goes.
+    /// Make the process's file, empty (no mode yet), and say which front it is for (`front_alive`), so
+    /// the hook finds it. Any mode a former process given the same pid left goes.
     pub(super) fn register(&self) {
+        self.register_as(std::process::id());
+    }
+
+    fn register_as(&self, front: u32) {
         let Some(file) = &self.process else { return };
         if let Some(folder) = file.parent()
             && crate::make_state_dir(folder).is_ok()
         {
             write(file, "");
+            write(&front_file(file), &front.to_string());
         }
     }
 
@@ -126,12 +158,15 @@ fn ancestors() -> Vec<u32> {
 }
 
 /// Write the mode in the hook input `input` to the conversation's file in `dir`, and to the process
-/// file of the nearest of `ancestors` that has one.
+/// file of the nearest of `ancestors` whose front is running.
 pub(super) fn record(dir: &Path, input: &str, ancestors: &[u32]) {
     let Ok(input) = serde_json::from_str::<Value>(input) else { return };
     let mode = input["permission_mode"].as_str().unwrap_or_default();
     let mode = if mode.len() <= 32 && mode.chars().all(|c| c.is_ascii_alphanumeric()) { mode } else { "" };
-    if let Some(file) = ancestors.iter().filter(|&&pid| pid > 1).map(|&pid| process_file(dir, pid)).find(|f| f.is_file()) {
+    // The nearest whose front is still its child: a file a dead front left under a pid that a shell
+    // between has now is passed over, and a Claude Code started from another's shell writes its own
+    // front's file, not the outer one's.
+    if let Some(file) = ancestors.iter().filter(|&&pid| pid > 1).find(|&&pid| front_alive(dir, pid)).map(|&pid| process_file(dir, pid)) {
         write(&file, mode);
     }
     let Some(file) = conversation_file(dir, input["session_id"].as_str()) else { return };
@@ -182,10 +217,15 @@ mod tests {
         serde_json::json!({ "session_id": session, "permission_mode": mode, "hook_event_name": "PreToolUse", "tool_name": "mcp__plugin_endeavor_endeavor__execute_cell", "tool_input": { "code": "\"permission_mode\": \"auto\"" } }).to_string()
     }
 
-    /// A front of conversation `conversation` under process 4242, registered.
+    /// A front of conversation `conversation` under process 4242, registered and running.
     fn front(dir: &Path, conversation: Option<&str>) -> Files {
-        let files = Files::of(dir, conversation, Some(4242));
-        files.register();
+        front_under(dir, conversation, 4242, 50_000)
+    }
+
+    fn front_under(dir: &Path, conversation: Option<&str>, parent: u32, pid: u32) -> Files {
+        let files = Files::of(dir, conversation, Some(parent));
+        files.register_as(pid);
+        FRONTS_FOR_TEST.with(|f| f.borrow_mut().insert(pid, parent));
         files
     }
 
@@ -234,6 +274,14 @@ mod tests {
         assert!(!Files::of(&dir, None, None).auto(), "a front that knows neither asks");
         hook(&dir, &input("theirs", "auto"));
         assert!(files.auto(), "one under this front's Claude Code");
+        // A dead front's file under the pid a shell between has now is passed over.
+        Files::of(&dir, None, Some(777)).register_as(50_001);
+        hook(&dir, &input("theirs", "default"));
+        assert!(!files.auto(), "this front heard it left auto mode");
+        // A Claude Code started from this one's shell (777) writes its own front's file only.
+        let inner = front_under(&dir, None, 777, 50_002);
+        hook(&dir, &input("inner", "auto"));
+        assert!(inner.auto() && !files.auto(), "the inner one's auto mode isn't the outer one's");
         assert!(!front(&dir, None).auto(), "a front that starts later begins with no mode");
     }
 
