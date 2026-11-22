@@ -647,6 +647,14 @@ Next:
   SIGTERM, as did everything they started, and the curl, wget or juliaup the core starts to
   download Julia, Endeavor's own R or a helper (#181), which before went on after
   a Ctrl-C had stopped the core.
+- A stop signal to the core (SIGTERM, SIGINT, SIGHUP) asks a ready Julia to shut
+  down through its bridge, and passes the signal on only if that fails or Julia
+  still runs 10 s later; 10 s after that it kills Julia. A SIGTERM that reaches
+  Julia while it compiles can hang its exit for good, so before, a stop during a
+  long cell took 12 to 15 s in two tries of three. Now five stops of six took 1.3 to 3.1 s,
+  and one 10.6 s, when the shutdown didn't end Julia and the signal did (#509).
+  A Julia still starting has no bridge yet and gets the signal. The core still
+  ends as the signal would end it.
 - Stop on a Julia cell that waits (`sleep`, a download, a lock) stops the cell and keeps the
   notebook's process and its values (#139). On Julia 1.12 a Ctrl+C sent to the process
   never reaches a waiting cell, so Pluto pressed it until Julia ended, which lost every value

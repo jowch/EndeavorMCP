@@ -1810,6 +1810,8 @@ fn a_stop_signal_to_the_core_stops_julia() {
     unsafe { libc::kill(core.process.id() as i32, libc::SIGTERM) };
     assert_eq!(core.exits().signal(), Some(libc::SIGTERM));
     wait_for("Julia to exit", || !pid_alive(core.julia_pid));
+    // A ready Julia is asked through its bridge, not signalled: a SIGTERM mid-compile can hang it (#509).
+    assert!(bridge.seen().iter().any(|s| String::from_utf8_lossy(&s.body).contains("endeavor/shutdown")), "it asked Julia to shut down");
     assert!(!dir.join("runtime.json").exists());
 }
 
