@@ -2106,6 +2106,37 @@ fn a_call_made_while_embers_install_runs_waits_for_it_as_the_first_did() {
 }
 
 #[test]
+fn a_first_ember_install_that_ends_after_its_call_stopped_waiting_starts_r_then() {
+    require_debug_build();
+    let dir = state_dir("core-r-install-then-start");
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    // An R whose Ember install takes 3 s and works, and whose adapter says when it was started.
+    let (r, started) = (dir.join("installing-r"), dir.join("adapter-started"));
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in\n*install.R*) sleep 3; folder=\"$3\"; mkdir -p \"$folder/b1/ember\"; printf 'Current: b1\\nPrevious: \\nFailed: \\n' > \"$folder/ember.dcf\"; exit 0;;\n*adapter.R*) echo started >> '{}'; sleep 30; exit 0;;\nesac\nexit 1\n",
+        started.display()
+    );
+    common::write_executable(&r, &script);
+    let home = temp_folder("core-r-install-then-start-home");
+    let home = home.display().to_string();
+    let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed"), std::ffi::OsStr::new("--r"), r.as_os_str()];
+    let core = Core::try_start_with(&dir, &[("HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str()), ("ENDEAVOR_TEST_EMBER_WAIT_SECS", "1")], &args).unwrap();
+    let folder = temp_folder("core-r-install-then-start-notebooks");
+    let path = folder.join("a.R");
+    std::fs::write(&path, "### An Ember notebook ###\n").unwrap();
+    give_folder(&core, "s1", &folder);
+    let opened = tool_call(&core, "open_notebook", serde_json::json!({ "path": path.display().to_string() }));
+    assert_eq!(opened["error"], "r_installing", "{opened}");
+    assert!(!started.exists(), "R isn't started before Ember is installed");
+    // No call comes again, and still R starts once the install has ended, so the next call needn't
+    // wait for it and the app's pane never reads `not_started` in between (#148).
+    wait_for("R to start after its install", || started.exists());
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(std::fs::read_to_string(&started).unwrap().lines().count(), 1, "started once");
+}
+
+#[test]
 fn a_failed_ember_install_is_said_to_every_call_for_a_while_before_one_tries_again() {
     require_debug_build();
     let dir = state_dir("core-r-install-failed");

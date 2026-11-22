@@ -619,8 +619,10 @@ Next:
   `ready` while R runs (with `updating` while a newer Ember installs for the
   next start), `failed` with the error's code and why (until the next start),
   or `not_started`, whoever is waiting, the agent included. It starts nothing.
-  After a first install that finished with no call waiting it reads
-  `not_started` until the agent's next call (#148). The interface number is 9.
+  The interface number is 9. An install (Endeavor's own R, or Ember the first
+  time) that finishes after the agent's call stopped waiting goes straight on
+  to start R, as Julia's start does, so the pane goes from the install's step
+  to "Starting R" and the agent's next call finds R ready (#148).
 - An agent can stop a run with `interrupt_notebook` (#161; interface 11), as the
   notebook's Stop button does. Before it, an agent asked to "stop if it takes too long"
   had no way to, and its edits queued behind the run. It asks nothing in any mode and
