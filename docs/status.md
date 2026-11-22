@@ -279,7 +279,7 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
 - When someone else changed a cell since a session last read it (the user,
   another session, or this conversation before it was resumed), that session's
   next `read_cell` says so in `changed_since_your_read` (with the code it had
-  read), and `read_notebook_code` lists such cells. That message and
+  read), and `read_notebook_code` lists such cells, each with that code. That message and
   `stale_read`'s ask the agent to tell the user before it replaces the change.
   Haiku 4.5 replaced another session's edit without a word in three runs of
   smoke N5 out of three (#504).

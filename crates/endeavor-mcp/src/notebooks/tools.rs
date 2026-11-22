@@ -344,9 +344,9 @@ impl Call<'_> {
     /// session, or this conversation before it was resumed. Asked before the read is recorded. An
     /// agent that read the new code without being told it was new replaced it without a word to the
     /// user (#504). Not for the app's calls (no owner), and not for a snapshot the engine took before
-    /// the cell's last edit through the tools, which still shows the code from before: an engine that
-    /// numbers its snapshots says which those are, and for one that doesn't, a cell this session
-    /// changed last counts as its own.
+    /// the cell's last edit through the tools, which still shows the code from before. An engine that
+    /// numbers its snapshots (`seq`) says which those are; with one that doesn't, a cell whose last
+    /// change was this session's is taken as unchanged by anyone else.
     fn changed_since_read(&self, nb: &Snapshot, cell: &str) -> Option<String> {
         if self.owner.is_empty() {
             return None;
@@ -1338,7 +1338,9 @@ impl Call<'_> {
             blocks.push(format!("{marker}{id}\n{body}"));
             ids.push(id);
         }
-        let changed: Vec<&String> = ids.iter().filter(|id| self.changed_since_read(&nb, id).is_some()).collect();
+        let changed: Map<String, Value> = ids.iter()
+            .filter_map(|id| self.changed_since_read(&nb, id).map(|was| (id.clone(), json!({ "was": was }))))
+            .collect();
         for id in &ids {
             self.record_read(&nb.id, id, &nb.cells[id].code);
         }
@@ -1363,7 +1365,7 @@ impl Call<'_> {
         }
         if !changed.is_empty() {
             result["changed_since_your_read"] = json!(changed);
-            result["message"] = json!(format!("The cells in changed_since_your_read changed since you last read them, {CHANGED_BY}. Tell the user what changed before you replace it."));
+            result["message"] = json!(format!("The cells in changed_since_your_read changed since you last read them, {CHANGED_BY}; `was` is the code you had read. Tell the user what changed before you replace them."));
         }
         Ok(result)
     }

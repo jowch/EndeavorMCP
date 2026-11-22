@@ -1346,7 +1346,7 @@ fn a_read_says_when_someone_else_changed_the_cell_since_this_session_read_it() {
     // The user's change in the notebook's page, after it, is.
     s.engine.with(NB, |nb| nb.cells[0].code = "rate = 0.6".into());
     let code = s.call("a", "read_notebook_code", json!({ "notebook_id": NB })).unwrap();
-    assert_eq!(code["changed_since_your_read"], json!([X]), "{code}");
+    assert_eq!(code["changed_since_your_read"], json!({ X: { "was": "rate = 0.5" } }), "{code}");
     assert!(code["message"].as_str().unwrap().contains("Tell the user what changed"), "{code}");
     // A cell never read before isn't news, and the app's calls are never told.
     assert_eq!(s.call("c", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap().get("changed_since_your_read"), None);
