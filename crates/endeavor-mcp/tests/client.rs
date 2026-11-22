@@ -56,6 +56,10 @@ impl Place {
     }
 }
 
+/// Held by each test that calls `client::test`: those share one listener, as the app's tests run one at a time,
+/// so two at once reach each other's runtime through it.
+static ONE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The helpers running with `state` as their state folder: the one kind of process that has it in its arguments.
 fn helper_pids(state: &Path) -> Vec<i32> {
     let found = Command::new("pgrep").arg("-f").arg("--").arg(state.display().to_string()).output().unwrap();
@@ -409,6 +413,7 @@ fn cancelling_after_the_connect_is_over_ends_the_connection_while_it_lasts() {
 
 #[test]
 fn cancelling_a_test_while_its_start_waits_ends_it_at_once() {
+    let _one = ONE_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let place = Place::new("cancel-test-start");
     // Another start holds the lock, so the helper waits for it to say anything about Julia.
     let held = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(place.state.join("start.lock")).unwrap();
@@ -435,6 +440,7 @@ fn cancelling_a_test_while_its_start_waits_ends_it_at_once() {
 
 #[test]
 fn cancelling_a_test_while_julia_boots_stops_the_runtime_it_was_starting() {
+    let _one = ONE_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let (place, core) = cancel_while_booting("cancel-test-boot", true);
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while running(core) {
@@ -501,6 +507,57 @@ fn cancel_while_booting(name: &str, as_test: bool) -> (Place, i32) {
     cancel.cancel();
     assert_eq!(done.recv_timeout(Duration::from_secs(10)).expect("it returns"), Err("Cancelled.".to_owned()));
     (place, core)
+}
+
+#[test]
+fn a_test_that_finds_a_runtime_running_without_julia_yet_checks_that_julia_starts() {
+    let _one = ONE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let place = Place::new("test-lazy-julia");
+    // A julia that doesn't run, on a server whose runtime starts Julia only once a notebook needs it.
+    let julia = place.home.join("julia");
+    exec::write_executable(&julia, "#!/bin/sh\necho 'broken' >&2\nexit 1\n");
+    let server = Server { julia: Some(julia.display().to_string()), ..Default::default() };
+    let lazy = Options { julia_when_needed: true, ..place.options() };
+    let (channel, _) = connect(&server, &place.transport(), &lazy, &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect");
+    let runtime = start(&channel, &Listener::start("test").unwrap(), &StartOptions { install: true, ..StartOptions::default() }, &|_| {}, |_| {}).map_err(|e| e.message()).expect("a runtime starts without Julia");
+    assert!(!runtime.reattached);
+    channel.detach();
+    // Test connection reattaches, and the ping alone would pass (app #169).
+    let (seen, on) = events();
+    let err = endeavor_mcp::client::test(&server, &place.transport(), &place.options(), &Cancel::default(), &on).expect_err("Julia can't start there");
+    assert!(err.starts_with("Endeavor runs on ") && err.contains("but Julia there can't start") && err.contains(&julia.display().to_string()), "{err}");
+    assert!(seen.lock().unwrap().iter().any(|e| matches!(e, Event::Started { reattached: true, .. })), "{:?}", seen.lock().unwrap());
+    // It found the runtime running, so it leaves it so.
+    let (channel, _) = connect(&server, &place.transport(), &lazy, &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect");
+    let again = start(&channel, &Listener::start("test").unwrap(), &StartOptions { attach_only: true, ..StartOptions::default() }, &|_| {}, |_| {}).map_err(|e| e.message()).expect("still running");
+    assert!(again.reattached);
+    channel.stop().unwrap();
+    channel.detach();
+    no_helper_left(&place.state);
+}
+
+#[test]
+fn a_test_that_may_not_install_doesnt_download_julia_for_a_runtime_it_finds_running() {
+    let _one = ONE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let place = Place::new("test-lazy-no-julia");
+    // No julia on the login shell's PATH and none of Endeavor's own: only a download would give one.
+    let shell = place.home.join("no-julia-shell");
+    exec::write_executable(&shell, "#!/bin/sh\nexit 1\n");
+    let home = place.home.display().to_string();
+    let transport = Transport::Shell { env: vec![("HOME".into(), home.clone()), ("SHELL".into(), shell.display().to_string()), ("XDG_CACHE_HOME".into(), home)], ask: None };
+    let lazy = Options { julia_when_needed: true, ..place.options() };
+    let (channel, _) = connect(&Server::default(), &transport, &lazy, &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect");
+    start(&channel, &Listener::start("test").unwrap(), &StartOptions::default(), &|_| {}, |_| {}).map_err(|e| e.message()).expect("a runtime starts without Julia");
+    channel.detach();
+    let no_install = Options { allow_install: false, ..place.options() };
+    let err = endeavor_mcp::client::test(&Server::default(), &transport, &no_install, &Cancel::default(), &|_| {}).expect_err("no Julia there");
+    assert!(err.ends_with("but Julia isn't installed there, and this test may not download Endeavor's own."), "{err}");
+    assert!(!place.home.join("endeavor").exists() || std::fs::read_dir(place.home.join("endeavor")).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with("julia-")), "nothing downloaded");
+    let (channel, _) = connect(&Server::default(), &transport, &lazy, &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect");
+    start(&channel, &Listener::start("test").unwrap(), &StartOptions { attach_only: true, ..StartOptions::default() }, &|_| {}, |_| {}).map_err(|e| e.message()).expect("still running");
+    channel.stop().unwrap();
+    channel.detach();
+    no_helper_left(&place.state);
 }
 
 #[test]

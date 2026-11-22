@@ -642,7 +642,9 @@ pub fn start(channel: &Channel, listener: &Arc<Listener>, options: &StartOptions
 }
 
 /// Test connection: connect, check the runtime answers through a listener,
-/// then stop it (or leave it running if it already was). On a cluster, only
+/// then stop it (or leave it running if it already was). A runtime it found
+/// running may not have started Julia yet, so it has that start Julia, and
+/// fails with why Julia can't start, if it can't. On a cluster, only
 /// ask Slurm about itself: starting Julia there means a job. What the start needs
 /// installed is installed only if `options.allow_install`; else the test fails
 /// naming it. A cancel ends ssh, and the helper then stops the runtime this test
@@ -663,9 +665,16 @@ pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &
     let listener = test_listener()?;
     let runtime = start(&channel, &listener, &StartOptions { install: options.allow_install, ..StartOptions::default() }, on, |_| {}).map_err(|e| or_cancelled(cancel, e.message()))?;
     let answered = bridge_ping(listener.port(), &runtime.token);
+    // A runtime the test found running may start Julia only once a notebook needs it, so the ping says
+    // nothing about Julia: have it start Julia now, and wait for that (app #169).
+    let julia = match (&answered, runtime.reattached) {
+        (Ok(()), true) => julia_starts(listener.port(), &runtime.token, options.allow_install, cancel, on),
+        _ => Ok(()),
+    };
     let stopped = if runtime.reattached { Ok(()) } else { channel.stop() };
     channel.detach();
     answered.map_err(|e| format!("Endeavor started on {}, but it didn't answer through Endeavor's connection ({e}).", runtime.node))?;
+    julia.map_err(|e| or_cancelled(cancel, format!("Endeavor runs on {}, but {e}", runtime.node)))?;
     stopped?;
     on(Event::Finished { stopped: !runtime.reattached });
     Ok(())
@@ -688,22 +697,64 @@ fn test_listener() -> Result<Arc<Listener>, String> {
 
 /// The bridge's `ping`, through a local port.
 fn bridge_ping(port: u16, token: &str) -> Result<(), String> {
+    bridge_call(port, token, "ping").map(|_| ())
+}
+
+/// Have the runtime start Julia (`endeavor/start_julia`), and wait until it is ready or has failed,
+/// passing on each step it is at. `install`: it may download Endeavor's own Julia, as a test's own start
+/// may (`Options::allow_install`, which the app gives: an empty Julia field means Endeavor's); without it,
+/// a Julia that would need a download is reported as not there. Why it can't start, as the end of a
+/// sentence ("but …"), on failure.
+fn julia_starts(port: u16, token: &str, install: bool, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(), String> {
+    let mut said = String::new();
+    if install {
+        bridge_call(port, token, "endeavor/allow_julia_install").map_err(|e| format!("it didn't answer about Julia ({e})."))?;
+    }
+    let mut status = bridge_call(port, token, "endeavor/start_julia").map_err(|e| format!("it didn't answer about Julia ({e})."))?;
+    loop {
+        match status["state"].as_str() {
+            Some("ready") => return Ok(()),
+            // Only without `install`. The runtime's words are for the agent.
+            Some("failed") if status["code"] == "julia_not_found" => {
+                return Err("Julia isn't installed there, and this test may not download Endeavor's own.".into());
+            }
+            Some("failed") => return Err(format!("Julia there can't start: {}", status["message"].as_str().unwrap_or("it gave no reason."))),
+            _ => {}
+        }
+        if let Some(step) = status["step"].as_str()
+            && step != said
+        {
+            on(Event::Progress(step.to_owned()));
+            said = step.to_owned();
+        }
+        if cancel.cancelled.load(Ordering::SeqCst) {
+            return Err("Cancelled.".into());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        status = bridge_call(port, token, "endeavor/julia_status").map_err(|e| format!("it stopped answering while Julia started ({e})."))?;
+    }
+}
+
+/// One of the app's calls to the runtime (`/endeavor/call`), through a local port: its `result`.
+fn bridge_call(port: u16, token: &str, method: &str) -> Result<serde_json::Value, String> {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
     socket.set_read_timeout(Some(Duration::from_secs(20))).map_err(|e| e.to_string())?;
-    let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#;
+    let body = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":{{}}}}"#);
     write!(
         socket,
         "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )
     .map_err(|e| e.to_string())?;
-    let mut status = String::new();
-    BufReader::new(socket).read_line(&mut status).map_err(|e| e.to_string())?;
-    match status.split_whitespace().nth(1) {
-        Some("200") => Ok(()),
-        Some(code) => Err(format!("HTTP {code}")),
-        None => Err("no answer".into()),
+    let mut reply = String::new();
+    BufReader::new(socket).read_to_string(&mut reply).map_err(|e| e.to_string())?;
+    match reply.split_whitespace().nth(1) {
+        Some("200") => {}
+        Some(code) => return Err(format!("HTTP {code}")),
+        None => return Err("no answer".into()),
     }
+    let body = reply.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+    Ok(serde_json::from_str::<serde_json::Value>(body).map(|reply| reply["result"].clone()).unwrap_or_default())
 }
 
 /// ssh's stderr: logged, and its last lines kept to say what went wrong.

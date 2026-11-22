@@ -603,7 +603,12 @@ Next:
   conversation's id, so a resumed conversation keeps its reads and its notebook
   (#176). The plugin's `serve`, `mcp` and machines
   pass the flag; on Slurm the login node still finds or downloads Julia, as
-  before, and only starting it waits. A session whose folder has Pluto
+  before, and only starting it waits. Test connection (`client::test`) that
+  finds a runtime already running has it start Julia and waits for it, so it
+  fails when that server's Julia can't start, rather than pass on a ping
+  (Endeavor #169). It downloads Endeavor's Julia only when the test may install
+  (the app's may: an empty Julia field means Endeavor's own); otherwise a server
+  with no Julia says "Julia isn't installed there". A session whose folder has Pluto
   notebooks, or whose caller says it is a Julia session (`kind`), gets Julia
   started ahead in the background. A session said to be R's never does, and
   its `new_notebook` without a path makes an R notebook (#86; interface 6). That never downloads Julia; Pluto's
