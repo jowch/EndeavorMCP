@@ -488,17 +488,22 @@ fn the_relay_says_claude_codes_auto_mode_as_its_hook_last_saw_it() {
     let (port, seen) = fake_core();
     let (mut relay, _out) = ready_relay(port, &seen, true);
     let modes = crate::client::scratch("claude-modes");
-    Arc::get_mut(&mut relay).unwrap().mode_file = claude_mode::file_for(&modes, Some("conv-1"));
+    let files = claude_mode::Files::of(&modes, Some("conv-1"), Some(4242));
+    files.register();
+    Arc::get_mut(&mut relay).unwrap().mode = files;
     let mode_sent = |id: u32| {
         relay.handle(&format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"session_status","arguments":{{}}}}}}"#));
         seen.lock().unwrap().last().unwrap().0.header("X-Endeavor-Mode").map(str::to_owned)
     };
     assert_eq!(mode_sent(1), None, "no hook has run");
-    let hook = |mode: &str| claude_mode::record(&modes, &json!({ "session_id": "conv-1", "permission_mode": mode }).to_string());
-    hook("auto");
+    let hook = |session: &str, mode: &str| claude_mode::record(&modes, &json!({ "session_id": session, "permission_mode": mode }).to_string(), &[777, 4242]);
+    hook("conv-1", "auto");
     assert_eq!(mode_sent(2).as_deref(), Some("auto"));
-    hook("default");
+    hook("conv-1", "default");
     assert_eq!(mode_sent(3), None);
+    // After `/clear` the hook names a new conversation; the front still hears it (#505).
+    hook("conv-2", "auto");
+    assert_eq!(mode_sent(4).as_deref(), Some("auto"));
 }
 
 #[cfg(unix)]
