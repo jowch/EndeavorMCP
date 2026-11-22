@@ -941,8 +941,9 @@ impl Notebooks {
                     openings.remove(&key);
                 }
                 drop(openings);
-                // Collected: the caller takes it from here.
-                self.left.lock().unwrap().retain(|(_, left)| !Arc::ptr_eq(left, &opening));
+                // Collected: this caller takes it from here. Another session that stopped waiting
+                // for the same open (its key is the path) still gets it.
+                self.left.lock().unwrap().retain(|(o, left)| !(o == owner && Arc::ptr_eq(left, &opening)));
                 return result.map(|result| (result, opening.params.clone()));
             }
             let left = deadline.saturating_duration_since(Instant::now());

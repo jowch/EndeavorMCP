@@ -2480,6 +2480,20 @@ fn a_notebook_made_after_the_call_stopped_waiting_is_still_the_sessions() {
     // A one-notebook session is bound to it.
     let (path, _) = made_late("f", "one");
     assert_eq!(s.notebooks.bound("f"), Some(canonical_path(&path).unwrap()));
+
+    // Two sessions stop waiting for the same open; one collects it, and it's still the other's too.
+    let path = format!("{dir}{SEP}nb0.jl");
+    let (release, held) = mpsc::channel();
+    *s.engine.hold_open.lock().unwrap() = Some(held);
+    let open = |owner: &str, began| s.notebooks.tool(owner, "open_notebook", &json!({ "path": path }), &Folder::Process, began).map(tool_json);
+    s.notebooks.allow_several("g");
+    s.notebooks.allow_several("h");
+    assert!(open("g", late).unwrap_err().starts_with("notebook_opening::"));
+    assert!(open("h", late).unwrap_err().starts_with("notebook_opening::"));
+    release.send(()).unwrap();
+    let id = open("h", Instant::now()).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+    assert_eq!(refusal(s.call("g", "run_all_cells", json!({ "notebook_id": id }))), None);
+    assert_eq!(refusal(s.call("h", "run_all_cells", json!({ "notebook_id": id }))), None);
 }
 
 #[test]
