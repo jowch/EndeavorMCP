@@ -29,7 +29,7 @@ On a machine, a call made while Endeavor starts there, or while its Slurm job is
 | `error` | Meaning | Do |
 |---|---|---|
 | `invalid_argument` | The call named an argument the tool doesn't have, or left out a required one such as `notebook_id` or `path`; the message lists the tool's arguments | Call again with the arguments it names |
-| `read_required`, `stale_read` | You haven't read the cell, or it changed since you did | Read it, then retry. `edit_cells` refuses the whole batch if one cell fails this |
+| `read_required`, `stale_read` | You haven't read the cell, or it changed since you did | Read it, then retry. After `stale_read`, tell the user what changed before you replace it. `edit_cells` refuses the whole batch if one cell fails this |
 | `placement_required` | `add_cell` without `after_cell_id` in a notebook that has cells | Pass the cell to add after |
 | `not_staged` | `submit_changes` was given a `cell_ids` entry that isn't in `pending_run` | Leave `cell_ids` out, or use `execute_cell` for a cell you didn't edit |
 | `one_notebook` | The call is for a notebook other than this session's | Work in this session's notebook; read the other one as a file |

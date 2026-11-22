@@ -1327,6 +1327,35 @@ fn an_approved_run_after_run_anyway_runs_nothing_again_edited_or_not() {
 }
 
 #[test]
+fn a_read_says_when_someone_else_changed_the_cell_since_this_session_read_it() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "rate = 0.3"), (Y, "y = 2")]);
+    let read = |owner: &str| s.call(owner, "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let edit = |owner: &str, code: &str| s.call(owner, "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": code })).unwrap();
+    s.read("a", NB, X);
+    s.read("b", NB, X);
+    // Another session changes it: session a's next read says so, with what it had read, once (#504).
+    edit("b", "rate = 0.4");
+    let after = read("a");
+    assert_eq!(after["changed_since_your_read"], json!({ "was": "rate = 0.3" }), "{after}");
+    assert!(after["message"].as_str().unwrap().contains("Tell the user what changed"), "{after}");
+    assert_eq!(read("a").get("changed_since_your_read"), None, "said once");
+    // A session's own edit is not someone else's.
+    edit("a", "rate = 0.5");
+    assert_eq!(read("a").get("changed_since_your_read"), None);
+    // The user's change in the notebook's page, after it, is.
+    s.engine.with(NB, |nb| nb.cells[0].code = "rate = 0.6".into());
+    let code = s.call("a", "read_notebook_code", json!({ "notebook_id": NB })).unwrap();
+    assert_eq!(code["changed_since_your_read"], json!([X]), "{code}");
+    assert!(code["message"].as_str().unwrap().contains("Tell the user what changed"), "{code}");
+    // A cell never read before isn't news, and the app's calls are never told.
+    assert_eq!(s.call("c", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap().get("changed_since_your_read"), None);
+    s.read("", NB, X);
+    s.engine.with(NB, |nb| nb.cells[0].code = "rate = 0.7".into());
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap().get("changed_since_your_read"), None);
+}
+
+#[test]
 fn reads_come_before_edits_and_edits_of_several_cells_are_all_or_nothing() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = 2")]);
@@ -1339,7 +1368,7 @@ fn reads_come_before_edits_and_edits_of_several_cells_are_all_or_nothing() {
     s.call("", "edit_cell", edit("x = 2")).unwrap();
     s.call("", "edit_cell", edit("x = 3")).unwrap();
     s.engine.with(NB, |nb| nb.cells[0].code = "x = 99".into());
-    assert_eq!(s.call("", "edit_cell", edit("x = 4")), Err(format!("ArgumentError: stale_read::Cell {X} changed since last read; call read_cell again")));
+    assert_eq!(s.call("", "edit_cell", edit("x = 4")), Err(format!("ArgumentError: stale_read::Cell {X} changed since you last read it, {}. Read it again (read_cell), and tell the user about that change before you replace it", super::tools::CHANGED_BY)));
     // A read after someone else's change sends the code: it isn't what this session has.
     let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
     assert_eq!((&read["code"], &read["code_unchanged"]), (&json!("x = 99"), &Value::Null));

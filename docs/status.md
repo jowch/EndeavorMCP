@@ -276,6 +276,13 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   needs it (`run_conflict`). Cells the turn deleted can't come back yet, and
   a cell to delete isn't checked by the engine itself (#146). The app's Restore
   button is the next step.
+- When someone else changed a cell since a session last read it (the user,
+  another session, or this conversation before it was resumed), that session's
+  next `read_cell` says so in `changed_since_your_read` (with the code it had
+  read), and `read_notebook_code` lists such cells. That message and
+  `stale_read`'s ask the agent to tell the user before it replaces the change.
+  Haiku 4.5 replaced another session's edit without a word in three runs of
+  smoke N5 out of three (#504).
 - The pages have a token of their own since 2026-10-15 (interface 8, #100). The
   bearer token, which an agent's MCP config carries, opens `/mcp` and
   `/endeavor/…` only; the pages' token (`page_token` in the state folder and
