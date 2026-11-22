@@ -322,6 +322,8 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
         Some("node-start") => slurm::node_start_main(&argv[1..]),
         Some("core") => core::main(&argv[1..]),
         Some("serve" | "mcp" | "stop" | "status" | "open") => standalone::main(&argv),
+        // Claude Code's PreToolUse hook, from the plugin's launcher.
+        Some("hook") => standalone::claude_mode::hook_main(),
         Some("--version" | "-V" | "version") => update::print_version(),
         Some("update") => update::main(&argv[1..]),
         // ssh runs `$SSH_ASKPASS PROMPT`, with no room for a mode argument.

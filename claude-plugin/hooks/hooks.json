@@ -10,6 +10,18 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_endeavor_endeavor__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/launch/endeavor-mcp.sh\" --hook >/dev/null 2>&1",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }

@@ -483,6 +483,24 @@ fn the_relay_answers_the_handshake_itself_and_passes_the_rest_on() {
     assert_eq!(head.target(), "/mcp");
 }
 
+#[test]
+fn the_relay_says_claude_codes_auto_mode_as_its_hook_last_saw_it() {
+    let (port, seen) = fake_core();
+    let (mut relay, _out) = ready_relay(port, &seen, true);
+    let modes = crate::client::scratch("claude-modes");
+    Arc::get_mut(&mut relay).unwrap().mode_file = claude_mode::file_for(&modes, Some("conv-1"));
+    let mode_sent = |id: u32| {
+        relay.handle(&format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"session_status","arguments":{{}}}}}}"#));
+        seen.lock().unwrap().last().unwrap().0.header("X-Endeavor-Mode").map(str::to_owned)
+    };
+    assert_eq!(mode_sent(1), None, "no hook has run");
+    let hook = |mode: &str| claude_mode::record(&modes, &json!({ "session_id": "conv-1", "permission_mode": mode }).to_string());
+    hook("auto");
+    assert_eq!(mode_sent(2).as_deref(), Some("auto"));
+    hook("default");
+    assert_eq!(mode_sent(3), None);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_runtime_replaced_by_another_process_is_noticed_and_the_new_one_is_found() {

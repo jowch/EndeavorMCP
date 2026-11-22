@@ -5,6 +5,11 @@
 #
 #   endeavor-mcp.sh --skills plugin --folder DIR   run the server
 #   endeavor-mcp.sh --fetch-only                   only get the binary
+#   endeavor-mcp.sh --hook                         Claude Code's PreToolUse hook
+#
+# The hook gives the binary the hook's input, so the server learns Claude
+# Code's permission mode. It runs only a binary that is already here, prints
+# nothing, and always exits 0: it never fetches, and never stops a tool call.
 #
 # The build is the first line of release-key, next to this file. Empty or
 # missing, it is the newest build: one that is already here is used without
@@ -36,7 +41,14 @@ here=$(cd "$(dirname "$0")" && pwd)
 # installed elsewhere wouldn't help: the advice is to fetch into that folder.
 manual="Run this in a terminal to download it, then reconnect the server: sh \"$here/endeavor-mcp.sh\" --fetch-only"
 
+hook=
+if [ "${1:-}" = --hook ]; then
+  hook=1
+  shift
+fi
+
 fail() {
+  [ -z "$hook" ] || exit 0
   echo "endeavor: $*" >&2
   exit 1
 }
@@ -54,6 +66,10 @@ if [ "${1:-}" = --fetch-only ]; then
   shift
 fi
 
+if [ -n "$hook" ] && [ -n "${ENDEAVOR_BIN:-}" ]; then
+  [ ! -x "$ENDEAVOR_BIN" ] || "$ENDEAVOR_BIN" hook 3>&- || true
+  exit 0
+fi
 if [ -n "${ENDEAVOR_BIN:-}" ]; then
   [ -x "$ENDEAVOR_BIN" ] || fail "ENDEAVOR_BIN ($ENDEAVOR_BIN) isn't an executable file."
   [ -z "$fetch_only" ] || exit 0
@@ -97,6 +113,12 @@ have() {
   fi
   [ -n "$bin" ] && [ -x "$bin" ]
 }
+
+# A build from before the hook says it doesn't know `hook`: that is no failure either.
+if [ -n "$hook" ]; then
+  ! have || "$bin" hook 3>&- || true
+  exit 0
+fi
 
 # Once a day, unpinned: look for a newer build in a process of its own, which
 # neither holds the server's input and output nor delays its start.

@@ -105,6 +105,15 @@ impl Env {
         self.data_home.clone().unwrap_or_else(|| self.home.join(".local/share")).join("endeavor/bin")
     }
 
+    /// Claude Code's permission mode in each of its conversations, as the plugin's hook last saw it
+    /// (`standalone::claude_mode`).
+    pub(crate) fn claude_modes_dir(&self) -> PathBuf {
+        if cfg!(windows) {
+            return self.local.join("claude-modes");
+        }
+        self.state_base().join("endeavor/claude-modes")
+    }
+
     /// What projects remember (`projects`).
     pub(crate) fn projects_path(&self) -> PathBuf {
         if cfg!(windows) {

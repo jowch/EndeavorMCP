@@ -1181,15 +1181,16 @@ impl Notebooks {
         };
     }
 
-    /// Whether session `owner` is in the app's Auto mode (`endeavor/set_policy`).
+    /// Whether session `owner` is in Auto mode: the app's (`endeavor/set_policy`), or its client's own,
+    /// as a front says with each call (`mcp::Caller::auto_mode`).
     pub fn set_auto(&self, owner: &str, auto: bool) {
         let mut sessions = self.auto.lock().unwrap();
         if auto { sessions.insert(owner.to_owned()) } else { sessions.remove(owner) };
     }
 
     /// Whether a run of session `owner`'s asks the user before a Julia notebook adds a package it
-    /// doesn't have yet (#397): everywhere but the app's Auto mode. A plugin client's own auto mode
-    /// isn't known here, so it asks.
+    /// doesn't have yet (#397): everywhere but Auto mode, the app's or Claude Code's own. Another
+    /// plugin client's auto mode isn't known here, so it asks.
     pub fn asks_new_packages(&self, owner: &str) -> bool {
         !self.auto.lock().unwrap().contains(owner)
     }

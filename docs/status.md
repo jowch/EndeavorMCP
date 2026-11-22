@@ -73,9 +73,14 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   gate holds when the notebook leaves safe preview (`allow_execution`) and
   when `open_notebook` runs it, so a file with no environment of its own adds
   nothing unasked. Runs in the
-  app's Auto mode don't ask. A plugin client's own auto mode can't be seen
-  from Endeavor (Claude Code doesn't tell an MCP server its permission
-  mode), so those runs ask. The app's card for a Julia `approve_install`
+  app's Auto mode don't ask, and neither do runs in Claude Code's own auto
+  mode (or bypassPermissions) through the plugin. Claude Code doesn't tell an
+  MCP server its permission mode, but it gives it to hooks: the plugin's
+  PreToolUse hook (`endeavor-mcp.sh --hook`, then `endeavor hook`) writes it
+  to a file named by the conversation, and the front reads it with each
+  call (`standalone/claude_mode.rs`). Anything missing or older than 30
+  seconds counts as not auto, so the user is asked. Other plugin clients'
+  auto modes (Codex) can't be seen, so those runs ask. The app's card for a Julia `approve_install`
   still uses R's download wording (an app follow-up).
   The same page asks before `approve_install` passes an R notebook's large
   download on, where the client can't show a dialog (#388). Its question
@@ -409,7 +414,8 @@ Next:
   package a run imports is installed and written there at its exact version.
   A package new to the notebook (not in its header) waits for the user's OK
   first, as in Julia (#355): the cells stay queued, `packages.step` is
-  `asking`, and `approve_install` installs it; the app's Auto mode doesn't ask.
+  `asking`, and `approve_install` installs it; the app's Auto mode doesn't ask,
+  nor does Claude Code's own.
   A name a letter away from a widely used package's (a short list in the
   adapter, no network; same first letter, not a prefix of it) gets a hint in
   the question and the agent's message (#416).

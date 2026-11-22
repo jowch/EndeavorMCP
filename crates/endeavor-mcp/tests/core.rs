@@ -551,6 +551,41 @@ fn a_call_with_arguments_the_tool_does_not_take_is_refused_and_is_not_the_sessio
     assert!(ago() < 2);
 }
 
+#[test]
+fn a_front_whose_client_is_in_auto_mode_adds_new_packages_without_asking() {
+    // Claude Code's own auto mode, as the plugin's front says it with each call (#397).
+    let dir = state_dir("core-client-auto");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let folder = temp_folder("core-client-auto-notebooks");
+    let path = folder.join("a.jl").display().to_string();
+    std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
+    let mut open = notebook("aaaaaaaa-0000-0000-0000-000000000001", "using Example");
+    open["path"] = path.as_str().into();
+    bridge.set_notebooks(vec![open]);
+    let call = |id: u32, name: &str, arguments: serde_json::Value, caller: &[(&str, &str)]| {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
+        mcp(&core, &message.to_string(), caller).1
+    };
+    let asks_new = |caller: &[(&str, &str)], id: u32| {
+        let before = engine_calls(&bridge).len();
+        call(id, "execute_cell", serde_json::json!({ "notebook_id": "aaaaaaaa-0000-0000-0000-000000000001", "cell_id": "c1" }), caller);
+        let runs: Vec<_> = engine_calls(&bridge).into_iter().skip(before).filter(|(method, _)| method == "run").collect();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        runs[0].1["ask_new"].clone()
+    };
+    let front = [("X-Endeavor-Session", "claude-s1"), ("X-Endeavor-Client", "plugin"), ("X-Endeavor-Consent", "front")];
+    let auto = [("X-Endeavor-Session", "claude-s1"), ("X-Endeavor-Client", "plugin"), ("X-Endeavor-Consent", "front"), ("X-Endeavor-Mode", "auto")];
+    call(1, "open_notebook", serde_json::json!({ "path": path }), &front);
+    assert_eq!(asks_new(&front, 2), true, "not in auto mode: asked");
+    assert_eq!(asks_new(&auto, 3), false, "in auto mode: not asked");
+    assert_eq!(asks_new(&front, 4), true, "the user left auto mode");
+    // Only a front says its client's mode: for another caller the mode is the app's to set.
+    let app_session = [("X-Endeavor-Session", "7"), ("X-Endeavor-Mode", "auto")];
+    call(5, "open_notebook", serde_json::json!({ "path": path }), &app_session);
+    assert_eq!(asks_new(&app_session, 6), true);
+}
+
 /// The engine calls the core made, by method and parameters.
 fn engine_calls(bridge: &FakeBridge) -> Vec<(String, serde_json::Value)> {
     let calls = bridge.seen().into_iter().filter(|s| s.line.starts_with("POST /adapter"));
