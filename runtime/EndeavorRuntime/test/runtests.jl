@@ -267,6 +267,31 @@ end
         Pluto.SessionActions.shutdown(session2, nb2; async=false, verbose=false)
     end
 
+    @testset "render_png waits a while, not for the run, on a worker running cells (#62)" begin
+        picture = """
+        begin
+            struct Picture end
+            Base.show(io::IO, ::MIME"image/svg+xml", ::Picture) = print(io, "<svg xmlns='http://www.w3.org/2000/svg'/>")
+            Base.show(io::IO, ::MIME"image/png", ::Picture) = write(io, UInt8[0x89, 0x50, 0x4e, 0x47])
+            Picture()
+        end
+        """
+        # A computation that never yields, so the worker answers nothing until it ends.
+        long = "let t = time(); s = 0.0; while time() - t < 25; s += 1; end; s end"
+        session, nb, cells = make_session_with_notebook(picture, long)
+        Pluto.update_save_run!(session, nb, [cells[1]]; run_async=false, save=true)
+        Pluto.update_save_run!(session, nb, [cells[2]]; run_async=true, save=true)
+        timedwait(() -> cells[2].running, 30.0)
+        @test cells[2].running
+        took = @elapsed err = try EndeavorRuntime.render_png(session, nb, cells[1]); "" catch e; e.msg end
+        @test startswith(err, "no_image::") && occursin(EndeavorRuntime._BUSY, err)
+        @test EndeavorRuntime._BUSY_RENDER_WAIT <= took < 20
+        # Once the run ends, the worker renders it again.
+        timedwait(() -> !cells[2].running, 60.0)
+        @test base64decode(EndeavorRuntime.render_png(session, nb, cells[1])["png"]) == UInt8[0x89, 0x50, 0x4e, 0x47]
+        Pluto.SessionActions.shutdown(session, nb; async=false)
+    end
+
     @testset "render_png without a worker" begin
         session, nb, cells = make_session_with_notebook("plot", "fig")   # never run: no workspace
         png = UInt8[0x89, 0x50, 0x4e, 0x47]

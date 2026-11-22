@@ -2360,6 +2360,9 @@ fn the_app_s_picture_stands_in_for_html_with_no_png_and_for_a_picture_from_the_h
     assert!(!super::snapshot_may_help(&result(Y)), "text");
     s.engine.with(NB, |nb| nb.cells[0].errored = true);
     assert!(!super::snapshot_may_help(&result(X)), "an error");
+    // The runtime's answer when the worker is too busy running cells to render a value (#62).
+    let busy = crate::mcp::tool_error(&format!("no_image::Cell {X}: the notebook's worker is busy running cells and didn't render its value within 10 seconds; view it again when read_cell says they have finished"), false);
+    assert!(super::snapshot_may_help(&busy), "a worker running cells");
 }
 
 #[test]
