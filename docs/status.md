@@ -672,7 +672,11 @@ Next:
   (`run_user_profile`), so an error in it is logged instead of stopping R, and
   R's stdout goes to the log, never to the MCP channel. The user's R runs ahead
   of Endeavor's own R. juliaup's launcher gives way to the Julia it would start
-  (its `Sys.BINDIR`) on every platform, not only Windows. Julia 1.11 is refused
+  (its `Sys.BINDIR`) on every platform, not only Windows. On a juliaup with no
+  channel yet (its listing has no default), the launcher isn't run, and there is
+  no Julia of the user's, so Endeavor's channel goes in as juliaup's default. Run,
+  the launcher would have installed juliaup's latest Julia (1.13.4) and
+  notebooks would have run on it (#512). Julia 1.11 is refused
   (the runtime's manifest doesn't instantiate on it). E2E runs the Julia tests
   daily on the newest release and pre-release.
   `endeavor/julia_status` says which Julia a start found (`julia`: `path`,
