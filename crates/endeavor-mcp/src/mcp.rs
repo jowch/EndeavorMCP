@@ -281,6 +281,11 @@ pub struct Caller {
     /// not a check: it stops an agent's own yes, since a model can't add headers to its client's
     /// requests, not a client configured to send one. No text an agent reads names them.
     pub consent: bool,
+    /// For a front's caller (`X-Endeavor-Client: plugin`), whether its client is in its own auto mode
+    /// (`X-Endeavor-Mode: auto`, from Claude Code's hook: `standalone::claude_mode`), so a run adds a
+    /// new package without asking, as in the app's Auto mode. None for any other caller, whose mode is
+    /// the app's to say (`endeavor/set_policy`). A declaration like `consent`: no text an agent reads names it.
+    pub auto_mode: Option<bool>,
     /// The front's own process (`X-Endeavor-Front-*`), which the runtime checks is still running to tell
     /// whether the plugin is still in it when the app quits (`Notebooks::shared`, app #232).
     pub front_process: Option<Front>,
@@ -364,7 +369,8 @@ impl Caller {
             _ => app_runtime,
         };
         let consent = header("X-Endeavor-Consent") == "front" || header("X-Endeavor-Client") == "app";
-        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false, several, app, consent, front_process: Front::of(request) }
+        let auto_mode = (header("X-Endeavor-Client") == "plugin").then(|| header("X-Endeavor-Mode") == "auto");
+        Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false, several, app, consent, auto_mode, front_process: Front::of(request) }
     }
 
     /// No one asks the user before this caller's `approve_install`: not the app (its card), not a
@@ -619,6 +625,10 @@ impl Bridge {
             // The notebook view's calls: not the session's activity, and nothing the app is told of.
             if let Some(name) = params["name"].as_str().filter(|name| crate::views::is_view_tool(name)) {
                 return self.view_call(name, params);
+            }
+            // A front says its client's mode with each call; the mode can change between calls.
+            if let Some(auto) = caller.auto_mode.filter(|_| !caller.owner.is_empty()) {
+                self.notebooks.set_auto(&caller.owner, auto);
             }
             let call = Call { caller, request: &message["id"], call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone, began };
             let result = self.call_tool(params, &call);

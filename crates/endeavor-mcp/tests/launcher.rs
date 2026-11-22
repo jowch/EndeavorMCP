@@ -392,6 +392,34 @@ fn fetch_only_gets_the_binary_and_runs_nothing() {
 }
 
 #[test]
+fn the_hook_runs_only_a_binary_already_here_prints_nothing_and_never_fails() {
+    let place = Place::new("hook");
+    // Like a build from before the hook: it answers `hook` with an error.
+    let log = place.dir.join("hook.log");
+    let bin = format!("#!/bin/sh\necho \"args: $*\" >> '{}'\ncat >> '{}'\necho printed\nexit 2\n", log.display(), log.display());
+    place.publish(KEY, &platform(), "", bin.as_bytes(), &sha(bin.as_bytes()));
+    place.pin(KEY);
+    place.logging_curl("");
+    let hook = |stdin: &str| {
+        let mut command = place.command("endeavor-mcp.sh", &["--hook"], &place.url());
+        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        place.finish(child.wait_with_output().unwrap())
+    };
+    let none = hook("{}");
+    assert!(none.ok && none.stdout.is_empty(), "{}", none.stderr);
+    assert_eq!(place.downloads_of_the_binary(), 0, "the hook never fetches");
+    assert!(place.launch(&["--fetch-only"]).ok);
+    let ran = hook(r#"{"session_id":"s","permission_mode":"auto"}"#);
+    assert!(ran.ok && ran.stdout.is_empty(), "{} {}", ran.stdout, ran.stderr);
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "args: hook\n{\"session_id\":\"s\",\"permission_mode\":\"auto\"}");
+    // With HOME unset there is nowhere to look: still no failure.
+    let mut command = place.command("endeavor-mcp.sh", &["--hook"], &place.url());
+    let lost = place.finish(command.env_remove("HOME").env_remove("XDG_DATA_HOME").stdin(Stdio::null()).output().unwrap());
+    assert!(lost.ok && lost.stdout.is_empty(), "{}", lost.stderr);
+}
+
+#[test]
 fn the_developer_override_runs_that_binary_without_touching_the_network_or_the_data_folder() {
     let place = Place::new("override");
     let mine = place.dir.join("mine");

@@ -36,6 +36,7 @@ use machines::Need;
 use target::{Local, Target};
 
 mod browser;
+pub mod claude_mode;
 mod consent;
 mod install_page;
 mod machines;
@@ -876,6 +877,8 @@ struct Relay {
     consent: consent::Consent,
     /// The user's own yes to an install on a machine, where the client can't show a dialog (`install_page`).
     pages: install_page::Pages,
+    /// Where the plugin's hook writes Claude Code's permission mode in this conversation (`claude_mode`).
+    mode_file: Option<PathBuf>,
     out: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -883,9 +886,14 @@ fn relay(options: Options) -> ! {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let fresh = format!("stdio-{}-{}", std::process::id(), now.as_millis());
     let conversation = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
-    let session = session_key(conversation.as_deref(), std::env::var_os("CLAUDE_CODE_CHILD_SESSION").is_some()).unwrap_or(fresh);
+    let child_of_shell = std::env::var_os("CLAUDE_CODE_CHILD_SESSION").is_some();
+    let session = session_key(conversation.as_deref(), child_of_shell).unwrap_or(fresh);
     precompile_after_update(&options);
-    let relay = Arc::new(Relay::new(options, session, Box::new(io::stdout())));
+    let mut relay = Relay::new(options, session, Box::new(io::stdout()));
+    if !child_of_shell {
+        relay.mode_file = claude_mode::file_for(&Env::here().claude_modes_dir(), conversation.as_deref());
+    }
+    let relay = Arc::new(relay);
     relay.target_from_project();
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -1103,6 +1111,7 @@ impl Relay {
             meta_salt: Default::default(),
             consent: Default::default(),
             pages: Default::default(),
+            mode_file: None,
             out: Mutex::new(out),
         }
     }
@@ -1465,6 +1474,10 @@ impl Relay {
         }
         if self.options.skills_plugin {
             head.push_str("X-Endeavor-Skills: plugin\r\n");
+        }
+        // Claude Code is in auto mode, so a new package isn't asked about (`claude_mode`, `mcp::Caller::auto_mode`).
+        if claude_mode::auto(self.mode_file.as_deref()) {
+            head.push_str("X-Endeavor-Mode: auto\r\n");
         }
         // This front's process, so the runtime can tell while it lives (`mcp::Front`, app #232).
         head.push_str(&crate::mcp::Front::own().header());
