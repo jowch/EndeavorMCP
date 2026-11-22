@@ -1,1 +1,1 @@
-Plot sin(x) from 0 to 2π.
+Plot sin(x) from 0 to 2π in a Julia notebook.
