@@ -277,18 +277,26 @@ end
         end
         """
         # A computation that never yields, so the worker answers nothing until it ends.
-        long = "let t = time(); s = 0.0; while time() - t < 25; s += 1; end; s end"
+        long = "let t = time(); s = 0.0; while time() - t < 35; s += 1; end; s end"
         session, nb, cells = make_session_with_notebook(picture, long)
         Pluto.update_save_run!(session, nb, [cells[1]]; run_async=false, save=true)
         Pluto.update_save_run!(session, nb, [cells[2]]; run_async=true, save=true)
         timedwait(() -> cells[2].running, 30.0)
+        sleep(1)   # `running` is set before the worker is inside the loop
         @test cells[2].running
         took = @elapsed err = try EndeavorRuntime.render_png(session, nb, cells[1]); "" catch e; e.msg end
         @test startswith(err, "no_image::") && occursin(EndeavorRuntime._BUSY, err)
         @test EndeavorRuntime._BUSY_RENDER_WAIT <= took < 20
+        # The render that timed out still waits on the worker; asking again joins it.
+        key = (nb.notebook_id, string(cells[1].cell_id))
+        first = EndeavorRuntime._RENDERS[key]
+        err = try EndeavorRuntime.render_png(session, nb, cells[1]); "" catch e; e.msg end
+        @test occursin(EndeavorRuntime._BUSY, err)
+        @test EndeavorRuntime._RENDERS[key] === first && !istaskdone(first)
         # Once the run ends, the worker renders it again.
         timedwait(() -> !cells[2].running, 60.0)
         @test base64decode(EndeavorRuntime.render_png(session, nb, cells[1])["png"]) == UInt8[0x89, 0x50, 0x4e, 0x47]
+        @test !haskey(EndeavorRuntime._RENDERS, key)   # a finished render leaves
         Pluto.SessionActions.shutdown(session, nb; async=false)
     end
 

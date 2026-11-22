@@ -183,6 +183,32 @@ const _BUSY_RENDER_WAIT = 10.0
 const _BUSY = "is busy running cells"
 
 """
+Renders still waiting on a notebook's worker, by notebook and cell id. A render that
+timed out stays queued there (#62), so a retry joins it rather than queueing another.
+"""
+const _RENDERS = Dict{Tuple{Any, String}, Task}()
+const _RENDERS_LOCK = ReentrantLock()
+
+"Asks `worker` for the PNG form of the cell's value, as a task that leaves `_RENDERS` when done."
+function _render_png(worker, cell_id, key)
+    @async try
+        Pluto.WorkspaceManager.Malt.remote_eval_fetch(worker, quote
+            let value = get(PlutoRunner.cell_results, $cell_id, nothing)
+                # `@bind x widget` makes the cell's value Pluto's `Bond`, which shows only as
+                # HTML; the widget inside it may have a picture of its own.
+                value isa PlutoRunner.Bond && (value = value.element)
+                value !== nothing && showable(MIME"image/png"(), value) ?
+                    repr(MIME"image/png"(), value) : nothing
+            end
+        end)
+    finally
+        lock(_RENDERS_LOCK) do
+            get(_RENDERS, key, nothing) === current_task() && delete!(_RENDERS, key)
+        end
+    end
+end
+
+"""
     _cell_png(session, nb, cell) -> (Union{Vector{UInt8}, Nothing}, source)
 
 PNG rendering of a cell's output and where it came from (`"value"` or `"embedded image"`).
@@ -205,20 +231,17 @@ function _cell_png(session, nb, cell)
             "has no running worker (safe preview or not yet run), so its value can't be rendered"))
     end
     cell_id = cell.cell_id
-    asked = @async Pluto.WorkspaceManager.Malt.remote_eval_fetch(workspace.worker, quote
-        let value = get(PlutoRunner.cell_results, $cell_id, nothing)
-            # `@bind x widget` makes the cell's value Pluto's `Bond`, which shows only as
-            # HTML; the widget inside it may have a picture of its own.
-            value isa PlutoRunner.Bond && (value = value.element)
-            value !== nothing && showable(MIME"image/png"(), value) ?
-                repr(MIME"image/png"(), value) : nothing
-        end
-    end)
+    key = (nb.notebook_id, string(cell_id))
+    asked = lock(_RENDERS_LOCK) do
+        pending = get(_RENDERS, key, nothing)
+        pending !== nothing && !istaskdone(pending) && return pending
+        _RENDERS[key] = _render_png(workspace.worker, cell_id, key)
+    end
     # A worker running cells answers only when they yield, which a long computation may not
     # do for minutes (#62): then wait a while, not for the run. Without cells running, the
     # render itself can take long (a first Makie plot compiles), so it's waited for.
-    busy = any(c -> c.running || c.queued, values(nb.cells_dict))
-    if busy && timedwait(() -> istaskdone(asked), _BUSY_RENDER_WAIT) === :timed_out
+    busy() = any(c -> c.running || c.queued, values(nb.cells_dict))
+    if busy() && timedwait(() -> istaskdone(asked) || !busy(), _BUSY_RENDER_WAIT) === :timed_out
         embedded = _embedded_png(cell.output)
         embedded === nothing || return (embedded, "embedded image")
         throw(ArgumentError("no_image::Cell $(cell.cell_id): the notebook's worker $(_BUSY) " *
