@@ -1458,7 +1458,7 @@ impl Call<'_> {
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
         let key = format!("open {}", canonical_path(path).unwrap_or_else(|_| path.clone()));
         // A call made again while an open is under way gets that open, run as that one asked.
-        let (opened, run) = match self.nbs.open_waited("open", json!({ "path": path, "run": run, "ask_new": self.nbs.asks_new_packages(self.owner), "timeout": TIMEOUT_SECONDS }), key, self.run_wait(), &format!("Opening '{path}'")) {
+        let (opened, run) = match self.nbs.open_waited(self.owner, "open", json!({ "path": path, "run": run, "ask_new": self.nbs.asks_new_packages(self.owner), "timeout": TIMEOUT_SECONDS }), key, self.run_wait(), &format!("Opening '{path}'")) {
             Ok((opened, params)) => (opened, params["run"] == true),
             Err(error) if already_open(&error) => return self.join(path).unwrap_or(Err(error)),
             Err(error) => return Err(error),
@@ -1598,7 +1598,7 @@ impl Call<'_> {
             Some(path) => (format!("new {path}"), format!("Creating '{path}'")),
             None => (format!("new in {} for {}", params["folder"].as_str().unwrap_or_default(), self.owner), "Creating the notebook".to_owned()),
         };
-        let (made, _) = self.nbs.open_waited("new", params, key, self.run_wait(), &doing)?;
+        let (made, _) = self.nbs.open_waited(self.owner, "new", params, key, self.run_wait(), &doing)?;
         let id = made["notebook_id"].as_str().unwrap_or_default();
         let mut cell_ids = Vec::new();
         // The caller knows these cells are empty; without a read first, the first edit would be refused.
@@ -1646,7 +1646,7 @@ impl Call<'_> {
         }
         let params = json!({ "notebook_id": id, "run": run, "timeout": TIMEOUT_SECONDS, "ask_new": self.nbs.asks_new_packages(self.owner) });
         let why = "a new Julia process starts for it, and its packages may need installing";
-        let (allowed, _) = self.nbs.waited("allow_execution", params, key, self.run_wait(), &format!("Starting the notebook is taking longer than one call waits: {why}"))?;
+        let (allowed, _) = self.nbs.waited(self.owner, "allow_execution", params, key, self.run_wait(), &format!("Starting the notebook is taking longer than one call waits: {why}"))?;
         let ran = allowed["ran"] == true;
         let mut result = json!({
             "notebook_id": id, "execution_allowed": true, "already_allowed": allowed["already_allowed"], "ran": ran,

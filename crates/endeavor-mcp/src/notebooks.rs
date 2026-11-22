@@ -346,6 +346,9 @@ pub struct Notebooks {
     auto: Mutex<HashSet<String>>,
     /// Opens and creations under way or not yet collected, by what they open (`open_waited`).
     openings: Mutex<HashMap<String, Arc<Opening>>>,
+    /// Opens and creations a session's call stopped waiting for and no call has collected: the
+    /// notebook each makes is that session's though no call collects it (`settle`, #333).
+    left: Mutex<Vec<(String, Arc<Opening>)>>,
     /// Agents' calls on a notebook under way (`running`): owner, JSON-RPC id, notebook, and
     /// whether the call runs code. The agent's cancellation of one is its Stop (`cancelled`).
     runs: Mutex<Vec<(String, Value, String, bool)>>,
@@ -655,6 +658,7 @@ impl Notebooks {
             kinds: Mutex::default(),
             auto: Mutex::default(),
             openings: Mutex::default(),
+            left: Mutex::default(),
             runs: Mutex::default(),
         }
     }
@@ -896,19 +900,20 @@ impl Notebooks {
     /// which may differ from this one's), kept for `OPENING_KEPT`. If no call comes again, the open
     /// still ends in the engine, but no session is recorded as having opened it; a later
     /// `open_notebook` joins it as already open.
-    fn open_waited(&self, method: &str, params: Value, key: String, wait: Duration, doing: &str) -> Result<(Value, Value), String> {
+    fn open_waited(&self, owner: &str, method: &str, params: Value, key: String, wait: Duration, doing: &str) -> Result<(Value, Value), String> {
         let began = Instant::now();
         self.start_engine(engines::of_params(&params), wait)?;
         let why = "the first notebook in a new Julia process takes a while to compile";
-        self.waited(method, params, key, (began + wait).saturating_duration_since(Instant::now()), &format!("{doing} is taking longer than one call waits: {why}"))
+        self.waited(owner, method, params, key, (began + wait).saturating_duration_since(Instant::now()), &format!("{doing} is taking longer than one call waits: {why}"))
     }
 
     /// The engine's `method` on a background thread, waited for up to `wait`, with the params it
     /// was made with (`open_waited`). When the wait runs out, the call answers `notebook_opening`
     /// with `taking` and goes on; the same call again, with the same `key`, waits for it and gets
     /// its result and its params (an earlier call's, which may differ from this one's), kept for
-    /// `OPENING_KEPT`.
-    fn waited(&self, method: &str, params: Value, key: String, wait: Duration, taking: &str) -> Result<(Value, Value), String> {
+    /// `OPENING_KEPT`. An open or creation that session `owner` stopped waiting for makes its
+    /// notebook, even if no call collects it.
+    fn waited(&self, owner: &str, method: &str, params: Value, key: String, wait: Duration, taking: &str) -> Result<(Value, Value), String> {
         let began = Instant::now();
         let opening = {
             let mut openings = self.openings.lock().unwrap();
@@ -935,10 +940,22 @@ impl Notebooks {
                 if openings.get(&key).is_some_and(|kept| Arc::ptr_eq(kept, &opening)) {
                     openings.remove(&key);
                 }
+                drop(openings);
+                // Collected: this caller takes it from here. Another session that stopped waiting
+                // for the same open (its key is the path) still gets it.
+                self.left.lock().unwrap().retain(|(o, left)| !(o == owner && Arc::ptr_eq(left, &opening)));
                 return result.map(|result| (result, opening.params.clone()));
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
+                // Not held with `left`, which `settle` takes first.
+                drop(done);
+                if !owner.is_empty() && (method == "open" || method == "new") {
+                    let mut left = self.left.lock().unwrap();
+                    if !left.iter().any(|(o, l)| o == owner && Arc::ptr_eq(l, &opening)) {
+                        left.push((owner.to_owned(), opening.clone()));
+                    }
+                }
                 return Err(format!("notebook_opening::{taking}. It goes on by itself. Make the same call again to wait for it."));
             }
             done = opening.came.wait_timeout(done, left).unwrap().0;
@@ -1245,6 +1262,7 @@ impl Notebooks {
     }
 
     pub fn bound(&self, owner: &str) -> Option<String> {
+        self.settle();
         self.state.lock().unwrap().bindings.get(owner).cloned()
     }
 
@@ -1259,6 +1277,30 @@ impl Notebooks {
                 opened.insert(id.to_owned());
             }
             state.record_bound(owner, now);
+        }
+    }
+
+    /// An open or creation a session stopped waiting for, once it has come, is that session's
+    /// notebook, as if its call had collected it (#333): an agent may take the id from
+    /// `list_notebooks` rather than make the same call again.
+    fn settle(&self) {
+        let came: Vec<(String, Value)> = {
+            let mut left = self.left.lock().unwrap();
+            let mut came = Vec::new();
+            left.retain(|(owner, opening)| match opening.done.lock().unwrap().as_ref() {
+                None => true,
+                Some((Ok(opened), _)) => {
+                    came.push((owner.clone(), opened.clone()));
+                    false
+                }
+                Some((Err(_), _)) => false,
+            });
+            came
+        };
+        for (owner, opened) in came {
+            if let (Some(path), Some(id)) = (opened["path"].as_str(), opened["notebook_id"].as_str()) {
+                self.opened_by(&owner, path, id);
+            }
         }
     }
 
@@ -1314,6 +1356,7 @@ impl Notebooks {
         if owner.is_empty() {
             return None;
         }
+        self.settle();
         if self.several(owner) {
             return self.several_refusal(owner, tool, arguments, folder);
         }
