@@ -709,7 +709,7 @@ impl Notebooks {
 
     /// Start `backend`'s engine unless it runs. Julia keeps its own start in order (core.rs), and can
     /// take minutes; the other engines' starts are taken one at a time here.
-    fn start_engine(&self, backend: Backend, wait: Duration) -> Result<(), String> {
+    pub(crate) fn start_engine(&self, backend: Backend, wait: Duration) -> Result<(), String> {
         if self.engines.has(backend) {
             return Ok(());
         }

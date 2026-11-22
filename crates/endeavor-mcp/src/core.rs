@@ -219,6 +219,19 @@ pub fn main(argv: &[String]) -> ! {
     let r = RStarter { mask: Some(inherited_mask), ..r };
     let r = Arc::new(r);
     let _ = served.r.set(r.clone());
+    // An install the call that started it no longer waits for goes on to start R as that call would
+    // have: through the notebooks, so that a call made meanwhile waits for this start, not a second one.
+    // It waits for nothing: an install it begins (Ember's, after Endeavor's own R) comes back here when
+    // it ends, and an update goes on in the background as an update's call has it. So the start lock is
+    // held only for R's launch, and an agent call made meanwhile still answers within its own wait.
+    let weak = Arc::downgrade(&served);
+    let _ = r.after_install.set(Box::new(move || {
+        let Some(served) = weak.upgrade() else { return };
+        match served.bridge.notebooks.start_engine(Backend::Ember, Duration::ZERO) {
+            Err(why) if !why.starts_with("r_installing::") => eprintln!("endeavor core: R didn't start after its install: {why}"),
+            _ => {}
+        }
+    }));
     let marimo = MarimoStarter::new(&args, &engine_token);
     #[cfg(unix)]
     let marimo = MarimoStarter { mask: Some(inherited_mask), ..marimo };
@@ -849,7 +862,9 @@ const EMBER_PREVIOUS: &str = "ember_previous::Ember's newest build didn't work h
 enum Install {
     Idle,
     Running,
-    /// Done while no call waited for it: what the next call says.
+    /// Done while no call waited for it: what the next call says. A first install's OK end is taken by
+    /// the start `RStarter::after_install` makes at once, so it lasts that long; an update's
+    /// lasts until the next call.
     Done(Result<bool, String>),
     /// It failed (why, and when): every call is told, until `retry_after()` has passed; the call
     /// after that tries again. Told once and tried again on the next call, several agents retrying
@@ -894,7 +909,8 @@ struct RNow<'a> {
 /// while a newer Ember installs for the next start), `starting` with the step in words (installing
 /// Endeavor's own R, installing or updating Ember, starting R), `failed` with the error's code and why
 /// (until the next start), else `not_started`. An install that finished after the call that started it
-/// stopped waiting reads `not_started` until the next call starts R (#148).
+/// stopped waiting goes straight on to start R (`RStarter::after_install`), so `not_started` between
+/// the two lasts only a moment (#148).
 fn r_status(now: &RNow) -> Value {
     let failed = |why: &str| {
         let (code, message) = why.split_once("::").unwrap_or(("r_failed", why));
@@ -1066,6 +1082,9 @@ struct RStarter {
     launching: std::sync::atomic::AtomicBool,
     /// Why the last start failed, until the next one (`start_noting`), for `status`.
     failed: std::sync::Mutex<Option<String>>,
+    /// Starts R as a call would (the core sets it), once an install that no call waits for any more
+    /// has finished (#148).
+    after_install: Arc<OnceLock<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl RStarter {
@@ -1109,6 +1128,7 @@ impl RStarter {
             child: Arc::default(),
             launching: false.into(),
             failed: Default::default(),
+            after_install: Arc::default(),
         }
     }
 
@@ -1339,7 +1359,7 @@ impl RStarter {
                 return Err(own_r_offer(&item, in_app));
             }
             Install::Idle | Install::Done(_) | Install::Failed(..) => {
-                let state = self.own_install.clone();
+                let (state, after) = (self.own_install.clone(), self.after_install.clone());
                 std::thread::spawn(move || {
                     let done = match crate::r::install_own(&mut |line| eprintln!("{line}")) {
                         Ok(_) => Install::Idle,
@@ -1348,7 +1368,12 @@ impl RStarter {
                             Install::Failed(format!("r_failed::{why}"), std::time::Instant::now())
                         }
                     };
+                    let installed = matches!(done, Install::Idle);
                     *state.lock().unwrap() = done;
+                    // The call that started it answered at once: go on to Ember and R now, not at the agent's next call.
+                    if installed && let Some(start) = after.get() {
+                        start();
+                    }
                 });
             }
         }
@@ -1394,7 +1419,11 @@ impl RStarter {
         let mut command = self.r.command(&[Path::new("--vanilla"), &install_r, folder, Path::new(&self.repository)]);
         command.stdin(Stdio::null());
         self.with_mask(&mut command);
-        let (state, r) = (self.install.clone(), self.r.clone());
+        let (state, r, after) = (self.install.clone(), self.r.clone(), self.after_install.clone());
+        // Whether this call still waits for the install: set false, with the install's lock held, when
+        // it stops waiting, so that the install's end, under the same lock, knows whether anyone takes it.
+        let waited = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let waiting = waited.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let done = match command.status() {
@@ -1406,16 +1435,27 @@ impl RStarter {
                 Ok(_) => Err(INSTALL_FAILED.into()),
                 Err(e) => Err(format!("r_not_found::Couldn't start R ({}): {e}", r.describe())),
             };
-            *state.lock().unwrap() = match done {
+            let mut install = state.lock().unwrap();
+            // A first install that ended OK after its call stopped waiting starts R now, so the agent's
+            // next call finds it ready, and `r_status` never reads `not_started` in between (#148). An
+            // update's call started R with the installed Ember already.
+            let start = !updating && done.is_ok() && !waiting.load(std::sync::atomic::Ordering::SeqCst);
+            *install = match done {
                 Ok(kept_previous) => Install::Done(Ok(kept_previous)),
                 Err(why) => Install::Failed(why, std::time::Instant::now()),
             };
+            drop(install);
             let _ = tx.send(());
+            if start && let Some(start) = after.get() {
+                start();
+            }
         });
-        if rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())).is_err() {
+        let _ = rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now()));
+        let mut install = self.install.lock().unwrap();
+        if matches!(*install, Install::Running) {
+            waited.store(false, std::sync::atomic::Ordering::SeqCst);
             return installing(updating);
         }
-        let mut install = self.install.lock().unwrap();
         match std::mem::replace(&mut *install, Install::Idle) {
             Install::Done(done) => done,
             Install::Failed(why, at) => {
@@ -2781,7 +2821,7 @@ mod tests {
         assert_eq!(now(false, &idle, &done_err, false, false, None), json!({ "state": "failed", "code": "r_failed", "message": "Couldn't install Ember" }));
         assert_eq!(now(false, &idle, &idle, false, false, Some("r_not_found::Couldn't find R")), json!({ "state": "failed", "code": "r_not_found", "message": "Couldn't find R" }));
         assert_eq!(now(true, &idle, &idle, true, false, Some("r_failed::old")), json!({ "state": "ready" }), "a running R outranks an old failure");
-        assert_eq!(now(false, &idle, &done_ok, true, false, None), json!({ "state": "not_started" }), "installed while no call waited (#148)");
+        assert_eq!(now(false, &idle, &done_ok, true, false, None), json!({ "state": "not_started" }), "installed while no call waited, for the moment before R starts (#148)");
     }
 
     #[test]
