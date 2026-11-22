@@ -221,10 +221,13 @@ pub fn main(argv: &[String]) -> ! {
     let _ = served.r.set(r.clone());
     // An install the call that started it no longer waits for goes on to start R as that call would
     // have: through the notebooks, so that a call made meanwhile waits for this start, not a second one.
+    // It waits for nothing: an install it begins (Ember's, after Endeavor's own R) comes back here when
+    // it ends, and an update goes on in the background as an update's call has it. So the start lock is
+    // held only for R's launch, and an agent call made meanwhile still answers within its own wait.
     let weak = Arc::downgrade(&served);
     let _ = r.after_install.set(Box::new(move || {
         let Some(served) = weak.upgrade() else { return };
-        match served.bridge.notebooks.start_engine(Backend::Ember, ember_wait()) {
+        match served.bridge.notebooks.start_engine(Backend::Ember, Duration::ZERO) {
             Err(why) if !why.starts_with("r_installing::") => eprintln!("endeavor core: R didn't start after its install: {why}"),
             _ => {}
         }
@@ -859,7 +862,9 @@ const EMBER_PREVIOUS: &str = "ember_previous::Ember's newest build didn't work h
 enum Install {
     Idle,
     Running,
-    /// Done while no call waited for it: what the next call says.
+    /// Done while no call waited for it: what the next call says. A first install's OK end is taken by
+    /// the start `RStarter::after_install` makes at once, so it lasts that long; an update's
+    /// lasts until the next call.
     Done(Result<bool, String>),
     /// It failed (why, and when): every call is told, until `retry_after()` has passed; the call
     /// after that tries again. Told once and tried again on the next call, several agents retrying
