@@ -215,6 +215,9 @@ impl Notebooks {
     }
 }
 
+/// Who may have changed a cell since a session read it, as its replies say.
+pub(crate) const CHANGED_BY: &str = "by the user, by another Endeavor session, or by this conversation before it was resumed";
+
 /// The owner of a change the user made through the app (`endeavor/restore_cells`): no session's.
 pub const USER: &str = "(the user)";
 
@@ -332,9 +335,30 @@ impl Call<'_> {
         let read = state.notebooks.get(&nb.id).and_then(|n| n.reads.get(&(self.owner.to_owned(), cell.to_owned())));
         match read {
             None => Err(argument_error(&format!("read_required::Call read_cell or read_notebook_code before editing cell {cell}"))),
-            Some((code, _, _)) if *code != nb.cells[cell].code => Err(argument_error(&format!("stale_read::Cell {cell} changed since last read; call read_cell again"))),
+            Some((code, _, _)) if *code != nb.cells[cell].code => Err(argument_error(&format!("stale_read::Cell {cell} changed since you last read it, {CHANGED_BY}. Read it again (read_cell), and tell the user about that change before you replace it"))),
             Some(_) => Ok(()),
         }
+    }
+
+    /// What this session last read of `cell`, if someone else has changed it since: the user, another
+    /// session, or this conversation before it was resumed. Asked before the read is recorded. An
+    /// agent that read the new code without being told it was new replaced it without a word to the
+    /// user (#504). Not for the app's calls (no owner), and not for a snapshot the engine took before
+    /// the cell's last edit through the tools, which still shows the code from before. An engine that
+    /// numbers its snapshots (`seq`) says which those are; with one that doesn't, a cell whose last
+    /// change was this session's is taken as unchanged by anyone else.
+    fn changed_since_read(&self, nb: &Snapshot, cell: &str) -> Option<String> {
+        if self.owner.is_empty() {
+            return None;
+        }
+        let state = self.nbs.state.lock().unwrap();
+        let notebook = state.notebooks.get(&nb.id)?;
+        let (read, _, _) = notebook.reads.get(&(self.owner.to_owned(), cell.to_owned()))?;
+        let behind = match (nb.seq, notebook.edited_at.get(cell)) {
+            (Some(seq), Some(&edited)) => seq < edited,
+            _ => notebook.changes.get(cell).is_some_and(|change| change.owner == self.owner),
+        };
+        (!behind && nb.cells.get(cell).is_some_and(|c| c.code != *read)).then(|| read.clone())
     }
 
     fn mark_pending(&self, id: &str, cells: &[String]) {
@@ -876,6 +900,7 @@ impl Call<'_> {
         // Code this session read or wrote a few calls ago, unchanged since, isn't sent again: an agent
         // that reads each cell it just ran gets its own code back each time, a tenth of a long session.
         let left_out = !include_code && self.recent_read(&nb.id, &cell).is_some_and(|read| read == code);
+        let was = self.changed_since_read(&nb, &cell);
         self.record_read_of(&nb.id, &cell, &code, !left_out);
         let mut out = self.cell_json(&nb, &cell);
         if left_out {
@@ -917,6 +942,15 @@ impl Call<'_> {
             if let Some(message) = message {
                 out.insert("message".into(), json!(message));
             }
+        }
+        if let Some(was) = was {
+            out.insert("changed_since_your_read".into(), json!({ "was": was }));
+            let said = format!("This cell changed since you last read it, {CHANGED_BY}. Tell the user what changed before you replace it.");
+            let message = match out.get("message").and_then(Value::as_str) {
+                Some(more) => format!("{said} {more}"),
+                None => said,
+            };
+            out.insert("message".into(), json!(message));
         }
         Ok(Value::Object(out))
     }
@@ -1304,6 +1338,9 @@ impl Call<'_> {
             blocks.push(format!("{marker}{id}\n{body}"));
             ids.push(id);
         }
+        let changed: Map<String, Value> = ids.iter()
+            .filter_map(|id| self.changed_since_read(&nb, id).map(|was| (id.clone(), json!({ "was": was }))))
+            .collect();
         for id in &ids {
             self.record_read(&nb.id, id, &nb.cells[id].code);
         }
@@ -1325,6 +1362,10 @@ impl Call<'_> {
         // open_notebook's note and described it as if it had run (#163).
         if !nb.execution_allowed {
             result["note"] = json!(NOT_RUN);
+        }
+        if !changed.is_empty() {
+            result["changed_since_your_read"] = json!(changed);
+            result["message"] = json!(format!("The cells in changed_since_your_read changed since you last read them, {CHANGED_BY}; `was` is the code you had read. Tell the user what changed before you replace them."));
         }
         Ok(result)
     }
