@@ -9,16 +9,22 @@
 //! Anything missing, unreadable or old is not auto, so the user is asked as before: a hook that didn't
 //! run, a client that isn't Claude Code, a conversation whose id changed. The hook writes before every
 //! call, so a file written more than `FRESH` ago doesn't say what the mode is now.
+//!
+//! Like `X-Endeavor-Consent`, the file is a declaration, not a check. An agent outside auto mode
+//! could write "auto" into it itself, but only with the user's OK for a shell command (which could
+//! as well install the package), and only between its call's hook and the call: the hook rewrites
+//! the file before every call. No text an agent reads names it.
 
-use std::io::Read;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
 /// How long after the hook wrote it a mode still counts. The hook runs just before the call, and in
-/// auto mode only Claude Code's own check of the call comes between.
-const FRESH: Duration = Duration::from_secs(120);
+/// auto mode only Claude Code's own check of the call comes between. Kept short, since a hook that
+/// failed to write after the user left auto mode leaves the old mode standing this long.
+const FRESH: Duration = Duration::from_secs(30);
 
 /// A conversation's file is removed this long after it was last written.
 const KEPT: Duration = Duration::from_secs(7 * 24 * 3600);
@@ -51,7 +57,8 @@ pub(super) fn auto(file: Option<&Path>) -> bool {
 /// write is left alone.
 pub fn hook_main() -> ! {
     let mut input = String::new();
-    let _ = std::io::stdin().take(4 << 20).read_to_string(&mut input);
+    // Read whole: a cut input wouldn't parse, and then an earlier auto mode would stay.
+    let _ = std::io::stdin().read_to_string(&mut input);
     record(&crate::paths::Env::here().claude_modes_dir(), &input);
     std::process::exit(0)
 }
@@ -118,6 +125,20 @@ mod tests {
             record(&dir, &input("abc-123", mode));
             assert!(!auto(file.as_deref()), "{mode} asks");
         }
+    }
+
+    #[test]
+    fn the_plugins_hook_matches_its_own_servers_tools() {
+        // Claude Code names a plugin's MCP tools mcp__plugin_<plugin>_<server>__<tool>.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../claude-plugin");
+        let read = |file: &str| serde_json::from_str::<Value>(&std::fs::read_to_string(root.join(file)).unwrap()).unwrap();
+        let plugin = read(".claude-plugin/plugin.json")["name"].as_str().unwrap().to_owned();
+        let servers = read(".mcp.json")["mcpServers"].as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(servers.len(), 1, "{servers:?}");
+        let hooks = read("hooks/hooks.json");
+        let matcher = hooks["hooks"]["PreToolUse"][0]["matcher"].as_str().unwrap();
+        assert_eq!(matcher, format!("mcp__plugin_{plugin}_{}__.*", servers[0]));
+        assert!(hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap().contains("--hook"));
     }
 
     #[test]

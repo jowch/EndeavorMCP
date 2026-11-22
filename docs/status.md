@@ -78,8 +78,8 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   MCP server its permission mode, but it gives it to hooks: the plugin's
   PreToolUse hook (`endeavor-mcp.sh --hook`, then `endeavor hook`) writes it
   to a file named by the conversation, and the front reads it with each
-  call (`standalone/claude_mode.rs`). Anything missing or older than two
-  minutes counts as not auto, so the user is asked. Other plugin clients'
+  call (`standalone/claude_mode.rs`). Anything missing or older than 30
+  seconds counts as not auto, so the user is asked. Other plugin clients'
   auto modes (Codex) can't be seen, so those runs ask. The app's card for a Julia `approve_install`
   still uses R's download wording (an app follow-up).
   The same page asks before `approve_install` passes an R notebook's large
