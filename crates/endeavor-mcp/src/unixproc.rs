@@ -112,6 +112,38 @@ pub fn start_time(_pid: i32) -> Start {
     Start::Unknown
 }
 
+/// The parent of process `pid`, if it is running and that can be read here (Linux and macOS).
+#[cfg(target_os = "linux")]
+pub fn parent(pid: i32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parent_of(&stat).filter(|&ppid| ppid > 0)
+}
+
+/// Field 4 of `/proc/PID/stat`, the parent.
+#[cfg(any(target_os = "linux", test))]
+fn parent_of(stat: &str) -> Option<i32> {
+    stat[stat.rfind(')')? + 1..].split_whitespace().nth(1)?.parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+pub fn parent(pid: i32) -> Option<i32> {
+    if pid <= 0 {
+        return None;
+    }
+    // SAFETY: as in `start_time`.
+    unsafe {
+        let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let got = libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size);
+        (got == size && info.pbi_ppid > 0).then_some(info.pbi_ppid as i32)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn parent(_pid: i32) -> Option<i32> {
+    None
+}
+
 /// Which boot of this computer this is, where start times count from boot (Linux). macOS gives an absolute
 /// time, so none.
 #[cfg(target_os = "linux")]
@@ -160,6 +192,13 @@ fn boot_time() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_parent_is_the_field_after_the_state_whatever_the_name_holds() {
+        assert_eq!(parent_of("42 (a) b) c) S 7 42 42 0"), Some(7));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(parent(std::process::id() as i32), Some(std::os::unix::process::parent_id() as i32));
+    }
 
     #[test]
     fn the_start_is_field_22_counted_after_the_last_parenthesis() {

@@ -877,8 +877,8 @@ struct Relay {
     consent: consent::Consent,
     /// The user's own yes to an install on a machine, where the client can't show a dialog (`install_page`).
     pages: install_page::Pages,
-    /// Where the plugin's hook writes Claude Code's permission mode in this conversation (`claude_mode`).
-    mode_file: Option<PathBuf>,
+    /// Where the plugin's hook writes Claude Code's permission mode (`claude_mode`).
+    mode: claude_mode::Files,
     out: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -890,9 +890,14 @@ fn relay(options: Options) -> ! {
     let session = session_key(conversation.as_deref(), child_of_shell).unwrap_or(fresh);
     precompile_after_update(&options);
     let mut relay = Relay::new(options, session, Box::new(io::stdout()));
-    if !child_of_shell {
-        relay.mode_file = claude_mode::file_for(&Env::here().claude_modes_dir(), conversation.as_deref());
-    }
+    // A Claude Code started from another one's shell has that one's conversation in its environment,
+    // so only its own process's file counts; registering it keeps the inner hook's mode there.
+    #[cfg(unix)]
+    let parent = Some(std::os::unix::process::parent_id());
+    #[cfg(not(unix))]
+    let parent = None;
+    relay.mode = claude_mode::Files::of(&Env::here().claude_modes_dir(), conversation.as_deref().filter(|_| !child_of_shell), parent);
+    relay.mode.register();
     let relay = Arc::new(relay);
     relay.target_from_project();
     let stdin = io::stdin();
@@ -1111,7 +1116,7 @@ impl Relay {
             meta_salt: Default::default(),
             consent: Default::default(),
             pages: Default::default(),
-            mode_file: None,
+            mode: Default::default(),
             out: Mutex::new(out),
         }
     }
@@ -1476,7 +1481,7 @@ impl Relay {
             head.push_str("X-Endeavor-Skills: plugin\r\n");
         }
         // Claude Code is in auto mode, so a new package isn't asked about (`claude_mode`, `mcp::Caller::auto_mode`).
-        if claude_mode::auto(self.mode_file.as_deref()) {
+        if self.mode.auto() {
             head.push_str("X-Endeavor-Mode: auto\r\n");
         }
         // This front's process, so the runtime can tell while it lives (`mcp::Front`, app #232).

@@ -77,8 +77,11 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   mode (or bypassPermissions) through the plugin. Claude Code doesn't tell an
   MCP server its permission mode, but it gives it to hooks: the plugin's
   PreToolUse hook (`endeavor-mcp.sh --hook`, then `endeavor hook`) writes it
-  to a file named by the conversation, and the front reads it with each
-  call (`standalone/claude_mode.rs`). Anything missing or older than 30
+  to a file named by the conversation and one named by the Claude Code
+  process, and the front reads the newer with each call
+  (`standalone/claude_mode.rs`). The process's file carries it past `/clear`,
+  which starts a new conversation in the same server (#505); on Windows only
+  the conversation's is written. Anything missing or older than 30
   seconds counts as not auto, so the user is asked. Other plugin clients'
   auto modes (Codex) can't be seen, so those runs ask. The app's card for a Julia `approve_install`
   still uses R's download wording (an app follow-up).
