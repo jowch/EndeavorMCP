@@ -281,9 +281,30 @@ pub fn channel(listed: &str, version: &str) -> Option<Channel> {
     Some(Channel { julia: PathBuf::from(found["File"].as_str()?), default })
 }
 
+/// The real julia of juliaup's default channel in `juliaup api getconfig1`'s JSON: `Some(None)` when
+/// juliaup has no default yet (no channel was ever added), None when the JSON says neither (it isn't
+/// the listing, or the default has no `File`, as a linked channel may not).
+pub fn default_julia(listed: &str) -> Option<Option<PathBuf>> {
+    let config: serde_json::Value = serde_json::from_str(listed.trim()).ok()?;
+    match config.get("DefaultChannel")? {
+        serde_json::Value::Null => Some(None),
+        default => Some(Some(PathBuf::from(default["File"].as_str()?))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_julia_is_the_default_channel_s_file_or_none_before_any_channel() {
+        let listed = serde_json::json!({ "DefaultChannel": { "Name": "release", "File": "/j/julia-1.13.4/bin/julia" }, "OtherChannels": [] }).to_string();
+        assert_eq!(default_julia(&listed), Some(Some(PathBuf::from("/j/julia-1.13.4/bin/julia"))));
+        // What juliaup 1.24 answers before its launcher first runs (EndeavorMCP #512).
+        assert_eq!(default_julia(r#"{"DefaultChannel":null,"OtherChannels":[]}"#), Some(None));
+        assert_eq!(default_julia(r#"{"DefaultChannel":{"Name":"mine"}}"#), None);
+        assert_eq!(default_julia("Error: Failed to load configuration file"), None);
+    }
 
     #[test]
     fn the_julia_is_the_file_of_the_channel_juliaup_lists() {

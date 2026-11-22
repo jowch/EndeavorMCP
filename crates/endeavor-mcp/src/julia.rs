@@ -148,7 +148,7 @@ fn found(source: &Source, download: bool, endeavors: &std::cell::Cell<bool>, pro
             Ok((path, version))
         }
         Source::Auto => {
-            if let Some(path) = path_julia()
+            if let Some(path) = users_path_julia()
                 && let Ok(version) = checked_version(&path, &format!("Found {path}, but it doesn't run."))
             {
                 return Ok((path, version));
@@ -174,7 +174,7 @@ fn found(source: &Source, download: bool, endeavors: &std::cell::Cell<bool>, pro
 /// Windows the PATH's), with its version, or why it can't be used (too old, doesn't run), in which
 /// case `auto` runs Endeavor's. None when there is none.
 pub fn users_julia() -> Option<Result<(String, String), String>> {
-    let path = path_julia()?;
+    let path = users_path_julia()?;
     Some(checked_version(&path, &format!("Found {path}, but it doesn't run.")).map(|version| (real_julia(path), version)))
 }
 
@@ -249,6 +249,30 @@ fn expand_home(path: &str) -> String {
     match (path.strip_prefix("~/"), std::env::home_dir()) {
         (Some(rest), Some(home)) => format!("{}/{rest}", home.display()),
         _ => path.to_owned(),
+    }
+}
+
+/// The user's own julia on the PATH (`path_julia`). When that is juliaup's launcher, juliaup is asked
+/// which Julia its default is, rather than the launcher run: on a juliaup with no channel yet, the
+/// launcher's first run installs juliaup's latest Julia and makes it the default, which the person
+/// never chose and Endeavor would then count as theirs (#512). With no default yet, the person has no
+/// Julia of their own, and Endeavor's channel, added next, becomes juliaup's default.
+fn users_path_julia() -> Option<String> {
+    let julia = path_julia()?;
+    if is_real_julia(Path::new(&julia)) {
+        return Some(julia);
+    }
+    let listed = crate::juliaup::find().and_then(|juliaup| crate::juliaup::listing(&juliaup));
+    launchers_julia(julia, listed.as_deref())
+}
+
+/// What `users_path_julia` takes for juliaup's launcher `julia`, given juliaup's listing: its default
+/// channel's julia, none before juliaup has one, else the launcher (as found, when juliaup can't say).
+fn launchers_julia(julia: String, listed: Option<&str>) -> Option<String> {
+    match listed.and_then(crate::juliaup::default_julia) {
+        Some(Some(default)) if default.is_file() => Some(default.display().to_string()),
+        Some(None) => None,
+        _ => Some(julia),
     }
 }
 
@@ -832,6 +856,23 @@ mod tests {
         std::fs::write(with.join("julia.exe"), "").unwrap();
         assert_eq!(julia_in(&std::env::join_paths([&without, &with]).unwrap()), Some(with.join("julia.exe").display().to_string()));
         assert_eq!(julia_in(&std::env::join_paths([&without]).unwrap()), None);
+    }
+
+    #[test]
+    fn juliaups_launcher_is_never_run_to_find_the_users_julia() {
+        let dir = std::env::temp_dir().join(format!("endeavor-launchers-julia-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let default = dir.join("julia");
+        std::fs::write(&default, "").unwrap();
+        let launcher = "/home/someone/.juliaup/bin/julia".to_owned();
+        let listed = |file: &Path| serde_json::json!({ "DefaultChannel": { "Name": "release", "File": file }, "OtherChannels": [] }).to_string();
+        assert_eq!(launchers_julia(launcher.clone(), Some(&listed(&default))), Some(default.display().to_string()));
+        // No channel yet: running the launcher would install juliaup's latest Julia (#512).
+        assert_eq!(launchers_julia(launcher.clone(), Some(r#"{"DefaultChannel":null,"OtherChannels":[]}"#)), None);
+        // juliaup couldn't say, or its default's julia isn't there: the launcher, as before.
+        assert_eq!(launchers_julia(launcher.clone(), None), Some(launcher.clone()));
+        assert_eq!(launchers_julia(launcher.clone(), Some(&listed(&dir.join("gone")))), Some(launcher));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
