@@ -2445,6 +2445,44 @@ fn an_open_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_resul
 }
 
 #[test]
+fn a_notebook_made_after_the_call_stopped_waiting_is_still_the_sessions() {
+    // An R notebook's first open can outlast the call. The agent may then take its id from
+    // `list_notebooks` rather than make the same call again; the notebook is still the one it made (#333).
+    let s = setup();
+    let dir = temp_notebooks("late-made", 1)[0].rsplit_once(SEP).unwrap().0.to_owned();
+    let late = Instant::now() - Duration::from_secs(60);
+    let refusal = |result: Result<Value, String>| result.err().filter(|e| e.starts_with("ArgumentError: one_notebook::"));
+    let made_late = |owner: &str, name: &str| {
+        let path = format!("{dir}{SEP}{name}.jl");
+        let (release, held) = mpsc::channel();
+        *s.engine.hold_open.lock().unwrap() = Some(held);
+        let said = s.notebooks.tool(owner, "new_notebook", &json!({ "path": path }), &Folder::Process, late).map(tool_json).unwrap_err();
+        assert!(said.starts_with("notebook_opening::"), "{said}");
+        release.send(()).unwrap();
+        let began = Instant::now();
+        while s.notebooks.left.lock().unwrap().iter().any(|(_, opening)| opening.done.lock().unwrap().is_none()) {
+            assert!(began.elapsed() < Duration::from_secs(10), "the creation didn't finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let listed = s.call(owner, "list_notebooks", json!({})).unwrap();
+        let id = listed.as_array().unwrap().iter().find(|nb| nb["path"] == json!(path)).unwrap_or_else(|| panic!("{listed}"))["notebook_id"].as_str().unwrap().to_owned();
+        (path, id)
+    };
+
+    // A session that may work on several notebooks (Claude's desktop app) may run it.
+    s.notebooks.allow_several("d");
+    let (_, id) = made_late("d", "several");
+    assert_eq!(refusal(s.call("d", "run_all_cells", json!({ "notebook_id": id }))), None);
+    // Another session still may not.
+    s.notebooks.allow_several("other");
+    assert!(refusal(s.call("other", "run_all_cells", json!({ "notebook_id": id }))).is_some());
+
+    // A one-notebook session is bound to it.
+    let (path, _) = made_late("f", "one");
+    assert_eq!(s.notebooks.bound("f"), Some(canonical_path(&path).unwrap()));
+}
+
+#[test]
 fn leaving_safe_preview_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_result() {
     let s = setup();
     let dir = temp_notebooks("slow-allow", 1)[0].rsplit_once(SEP).unwrap().0.to_owned();
