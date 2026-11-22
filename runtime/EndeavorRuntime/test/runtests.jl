@@ -289,10 +289,10 @@ end
         @test EndeavorRuntime._BUSY_RENDER_WAIT <= took < 20
         # The render that timed out still waits on the worker; asking again joins it.
         key = (nb.notebook_id, string(cells[1].cell_id))
-        first = EndeavorRuntime._RENDERS[key]
+        first = last(EndeavorRuntime._RENDERS[key])
         err = try EndeavorRuntime.render_png(session, nb, cells[1]); "" catch e; e.msg end
         @test occursin(EndeavorRuntime._BUSY, err)
-        @test EndeavorRuntime._RENDERS[key] === first && !istaskdone(first)
+        @test last(EndeavorRuntime._RENDERS[key]) === first && !istaskdone(first)
         # Once the run ends, the worker renders it again.
         timedwait(() -> !cells[2].running, 60.0)
         @test base64decode(EndeavorRuntime.render_png(session, nb, cells[1])["png"]) == UInt8[0x89, 0x50, 0x4e, 0x47]

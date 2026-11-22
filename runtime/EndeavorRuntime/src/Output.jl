@@ -183,10 +183,11 @@ const _BUSY_RENDER_WAIT = 10.0
 const _BUSY = "is busy running cells"
 
 """
-Renders still waiting on a notebook's worker, by notebook and cell id. A render that
-timed out stays queued there (#62), so a retry joins it rather than queueing another.
+Renders still waiting on a notebook's worker, by notebook and cell id, with that worker.
+A render that timed out stays queued there (#62), so a retry joins it rather than
+queueing another; after Restart Julia the new worker gets its own.
 """
-const _RENDERS = Dict{Tuple{Any, String}, Task}()
+const _RENDERS = Dict{Tuple{Any, String}, Tuple{Any, Task}}()
 const _RENDERS_LOCK = ReentrantLock()
 
 "Asks `worker` for the PNG form of the cell's value, as a task that leaves `_RENDERS` when done."
@@ -203,7 +204,7 @@ function _render_png(worker, cell_id, key)
         end)
     finally
         lock(_RENDERS_LOCK) do
-            get(_RENDERS, key, nothing) === current_task() && delete!(_RENDERS, key)
+            last(get(_RENDERS, key, (nothing, nothing))) === current_task() && delete!(_RENDERS, key)
         end
     end
 end
@@ -233,9 +234,11 @@ function _cell_png(session, nb, cell)
     cell_id = cell.cell_id
     key = (nb.notebook_id, string(cell_id))
     asked = lock(_RENDERS_LOCK) do
-        pending = get(_RENDERS, key, nothing)
-        pending !== nothing && !istaskdone(pending) && return pending
-        _RENDERS[key] = _render_png(workspace.worker, cell_id, key)
+        worker, pending = get(_RENDERS, key, (nothing, nothing))
+        worker === workspace.worker && !istaskdone(pending) && return pending
+        asking = _render_png(workspace.worker, cell_id, key)
+        _RENDERS[key] = (workspace.worker, asking)
+        asking
     end
     # A worker running cells answers only when they yield, which a long computation may not
     # do for minutes (#62): then wait a while, not for the run. Without cells running, the
