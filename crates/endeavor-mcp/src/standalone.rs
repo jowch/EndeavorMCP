@@ -890,14 +890,14 @@ fn relay(options: Options) -> ! {
     let session = session_key(conversation.as_deref(), child_of_shell).unwrap_or(fresh);
     precompile_after_update(&options);
     let mut relay = Relay::new(options, session, Box::new(io::stdout()));
-    if !child_of_shell {
-        #[cfg(unix)]
-        let parent = Some(std::os::unix::process::parent_id());
-        #[cfg(not(unix))]
-        let parent = None;
-        relay.mode = claude_mode::Files::of(&Env::here().claude_modes_dir(), conversation.as_deref(), parent);
-        relay.mode.register();
-    }
+    // A Claude Code started from another one's shell has that one's conversation in its environment,
+    // so only its own process's file counts; registering it keeps the inner hook's mode there.
+    #[cfg(unix)]
+    let parent = Some(std::os::unix::process::parent_id());
+    #[cfg(not(unix))]
+    let parent = None;
+    relay.mode = claude_mode::Files::of(&Env::here().claude_modes_dir(), conversation.as_deref().filter(|_| !child_of_shell), parent);
+    relay.mode.register();
     let relay = Arc::new(relay);
     relay.target_from_project();
     let stdin = io::stdin();
