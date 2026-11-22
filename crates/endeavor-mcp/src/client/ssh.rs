@@ -706,7 +706,7 @@ fn bridge_ping(port: u16, token: &str) -> Result<(), String> {
 /// a Julia that would need a download is reported as not there. Why it can't start, as the end of a
 /// sentence ("but …"), on failure.
 fn julia_starts(port: u16, token: &str, install: bool, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(), String> {
-    let mut said = String::new();
+    let (mut said, mut asked_again) = (String::new(), false);
     if install {
         bridge_call(port, token, "endeavor/allow_julia_install").map_err(|e| format!("it didn't answer about Julia ({e})."))?;
     }
@@ -719,6 +719,14 @@ fn julia_starts(port: u16, token: &str, install: bool, cancel: &Cancel, on: &dyn
                 return Err("Julia isn't installed there, and this test may not download Endeavor's own.".into());
             }
             Some("failed") => return Err(format!("Julia there can't start: {}", status["message"].as_str().unwrap_or("it gave no reason."))),
+            // A start sets `starting` before it answers, so this is a runtime that won't start Julia: one that
+            // is stopping. Asked once more, in case a start ahead of a notebook had just given up.
+            Some("not_started") if asked_again => return Err("it didn't start Julia; it may be stopping. Test again in a moment.".into()),
+            Some("not_started") => {
+                asked_again = true;
+                status = bridge_call(port, token, "endeavor/start_julia").map_err(|e| format!("it didn't answer about Julia ({e})."))?;
+                continue;
+            }
             _ => {}
         }
         if let Some(step) = status["step"].as_str()

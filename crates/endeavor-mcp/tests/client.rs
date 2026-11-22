@@ -536,6 +536,35 @@ fn a_test_that_finds_a_runtime_running_without_julia_yet_checks_that_julia_start
     no_helper_left(&place.state);
 }
 
+/// With the real Julia on this machine: Test connection reattaches to a lazy runtime, starts its Julia, and
+/// passes, leaving the runtime running. Ignored like the other real-Julia tests (it loads Pluto).
+#[test]
+#[ignore = "starts a real Julia"]
+fn a_test_that_finds_a_runtime_running_without_julia_yet_starts_a_real_julia_and_passes() {
+    let _one = ONE_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let place = Place::new("test-lazy-real-julia");
+    let julia = Command::new("sh").args(["-lc", "command -v julia"]).output().unwrap();
+    let julia = String::from_utf8_lossy(&julia.stdout).trim().to_owned();
+    assert!(!julia.is_empty(), "no julia on this machine's PATH");
+    let server = Server { julia: Some(julia), ..Default::default() };
+    let lazy = Options { julia_when_needed: true, ..place.options() };
+    let (channel, _) = connect(&server, &place.transport(), &lazy, &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect");
+    start(&channel, &Listener::start("test").unwrap(), &StartOptions { install: true, ..StartOptions::default() }, &|_| {}, |_| {}).map_err(|e| e.message()).expect("a runtime starts without Julia");
+    channel.detach();
+    let (seen, on) = events();
+    let started = std::time::Instant::now();
+    endeavor_mcp::client::test(&server, &place.transport(), &place.options(), &Cancel::default(), &on).expect("Julia starts there");
+    let seen = seen.lock().unwrap();
+    eprintln!("passed in {:.0?}: {:?}", started.elapsed(), seen.iter().filter(|e| matches!(e, Event::Progress(_) | Event::Finished { .. })).collect::<Vec<_>>());
+    assert!(seen.iter().any(|e| matches!(e, Event::Progress(line) if line.contains("starting"))), "it passed on Julia's steps");
+    assert!(matches!(seen.last(), Some(Event::Finished { stopped: false })), "{seen:?}");
+    let (channel, _) = connect(&server, &place.transport(), &lazy, &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect");
+    start(&channel, &Listener::start("test").unwrap(), &StartOptions { attach_only: true, ..StartOptions::default() }, &|_| {}, |_| {}).map_err(|e| e.message()).expect("still running");
+    channel.stop().unwrap();
+    channel.detach();
+    no_helper_left(&place.state);
+}
+
 #[test]
 fn a_test_that_may_not_install_doesnt_download_julia_for_a_runtime_it_finds_running() {
     let _one = ONE_TEST.lock().unwrap_or_else(|e| e.into_inner());
