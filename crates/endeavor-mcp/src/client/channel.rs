@@ -1,7 +1,3 @@
-//! The client's end of `endeavor connect`'s stdin and stdout, on this computer
-//! or over ssh: the helper's hello, file requests, and a runtime starting,
-//! dying and stopping on it. It lasts as long as the helper does.
-
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::Child;
@@ -17,63 +13,35 @@ use wire::{Frame, ToApp, ToHelper};
 use super::listener::Listener;
 use super::machines::Launcher;
 
-/// How long `stop` waits for the helper's answer: the helper waits up to 20 s
-/// for the start lock, then stopping takes up to 20 s more.
 const STOP_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 60 });
 
-/// A runtime the client is attached to, as its server's listener serves it.
 #[derive(Clone, Debug)]
 pub struct Runtime {
-    /// The listener's port on this computer; every request goes through it with the token.
     pub port: u16,
-    /// The runtime's token, for the `Authorization: Bearer` header.
     pub token: String,
-    /// The token for its pages, which `page_url` carries; the bearer token for a runtime from before the
-    /// pages had their own.
     pub page_token: String,
-    /// The MCP URL on the listener, the same for the listener's whole life.
     pub mcp_url: String,
-    /// Pluto's start page, with the token that lets a browser in.
     pub page_url: String,
-    /// Its process, which tells it from the server's next runtime (the URLs
-    /// and the token stay the same).
     pub pid: u32,
-    /// It was already running; this connect didn't start it.
     pub reattached: bool,
-    /// The machine it runs on.
     pub node: String,
-    /// The cluster job it runs in.
     pub job: Option<wire::slurm::Job>,
-    /// The runtime's own port on `node`; none when the helper doesn't say.
     pub remote_port: Option<u16>,
-    /// The build that started it and its core's interface number (`core::INTERFACE`), as its record
-    /// says; none when the record or an older helper doesn't say.
     pub build: Option<String>,
     pub interface: Option<u32>,
 }
 
-/// Why a runtime went away.
 #[derive(Debug)]
 pub enum Notice {
-    /// Julia exited; the helper is still connected, so it can start again.
     Died(String),
-    /// The helper failed or the connection to it closed.
     Lost(String),
 }
 
-/// What a start asks for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StartOptions {
-    /// On a cluster, what to submit.
     pub job: Option<JobRequest>,
-    /// The notebook system (`wire::ENGINE_PLUTO`).
     pub engine: String,
-    /// The user agreed that the helper installs whatever this start needs
-    /// (`ToHelper::StartRuntime`'s `install`). Without it a start that needs
-    /// something ends with `StartError::NeedsInstall` and installs nothing.
     pub install: bool,
-    /// Never start a runtime (`ToHelper::StartRuntime`'s `attach_only`): attach to the one that runs or
-    /// is starting, else `StartError::NotRunning`.
     pub attach_only: bool,
 }
 
@@ -83,19 +51,14 @@ impl Default for StartOptions {
     }
 }
 
-/// Why `start_runtime` didn't give a runtime.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StartError {
-    /// The start needs these installed and `StartOptions::install` was false:
-    /// nothing was started or installed.
     NeedsInstall(Vec<wire::Item>),
-    /// `StartOptions::attach_only`, and no runtime runs or is starting.
     NotRunning,
     Failed(String),
 }
 
 impl StartError {
-    /// The words for an error, whichever it is.
     pub fn message(self) -> String {
         match self {
             StartError::NeedsInstall(items) => format!("{} Installing wasn't allowed, and an agreement to it (`StartOptions::install`) is for one start only.", wire::needs_text(&items, "that machine")),
@@ -105,24 +68,17 @@ impl StartError {
     }
 }
 
-/// What the helper says as soon as it runs.
 #[derive(Clone, Debug)]
 pub struct Hello {
-    /// The helper's `wire::PROTOCOL`; 0 for a helper that says none.
     pub protocol: u32,
     pub node: String,
-    /// The home folder on its machine, in that machine's rules ([`wire::server_path`]).
     pub home: String,
-    /// Slurm's commands are there: probably a cluster's login node.
     pub slurm: bool,
-    /// It can save attached files into a session's folder (`files::Request::Write`).
     pub uploads: bool,
-    /// How it runs the runtime on this connection (what `Launcher::Auto` became); None from a helper that doesn't say.
     pub launcher: Option<Launcher>,
 }
 
 impl Hello {
-    /// Why this helper can't be talked to, when it is of another protocol than this client.
     pub fn other_version(&self) -> Option<String> {
         (self.protocol != wire::PROTOCOL).then(|| {
             format!(
@@ -134,19 +90,13 @@ impl Hello {
     }
 }
 
-/// Where the answer to a request goes.
 struct Waiter {
     to: mpsc::Sender<ToApp>,
-    /// A `Stop`'s hold on the runtime's watcher (`Channel::leaving`), which its
-    /// answer `NotStopped` lets go of before anything after it is heard: the
-    /// runtime goes on, and so does its watcher.
     leaving: Option<Arc<AtomicU32>>,
 }
 
-/// The requests sent whose answer hasn't come, by id.
 type Waiting = Arc<Mutex<HashMap<u32, Waiter>>>;
 
-/// The wait for an answer to the request with this id, which ends when this is dropped.
 struct Registered {
     waiting: Waiting,
     id: u32,
@@ -158,7 +108,6 @@ impl Drop for Registered {
     }
 }
 
-/// A start under way on a channel, until this is dropped.
 struct Starting<'a>(&'a AtomicBool);
 
 impl Drop for Starting<'_> {
@@ -167,13 +116,10 @@ impl Drop for Starting<'_> {
     }
 }
 
-/// What a start or a stop says when the helper's connection ended under it.
 pub const CLOSED: &str = "The connection to Endeavor's helper closed.";
 
-/// The helper's input behind its lock; taking it out closes the helper's input.
 type SharedInput = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
 
-/// The helper's input, which the channel closes to let the helper see the end of it.
 struct Input(SharedInput);
 
 impl Write for Input {
@@ -186,45 +132,27 @@ impl Write for Input {
     }
 }
 
-/// The client's end of a helper's stdin/stdout, on this computer or over ssh. It
-/// lasts as long as the helper: runtimes start, die and stop on it.
 pub struct Channel {
     mux: Arc<Mux>,
     input: SharedInput,
-    /// Where control messages that answer no request go: to whoever waits on
-    /// the helper now (its hello, a start, or the runtime's watcher). Replacing
-    /// it ends the previous listener's wait.
     sink: Arc<Mutex<Option<mpsc::Sender<ToApp>>>>,
     hello: Mutex<Option<mpsc::Receiver<ToApp>>>,
     files: Arc<Mutex<HashMap<u32, mpsc::Sender<files::Reply>>>>,
     next_file: AtomicU32,
-    /// Set once the helper has exited (or its end of the channel closed).
     ended: Arc<(Mutex<bool>, Condvar)>,
-    /// The client let the helper go (a detach, a quit or dropping the channel), so its end is no drop.
     left: Arc<AtomicBool>,
-    /// The listener relaying to this channel, which forgets it when it ends.
     listener: Arc<Mutex<Option<Arc<Listener>>>>,
-    /// How many things keep the current runtime's watcher quiet: each stop under
-    /// way, and a client leaving the helper, which never ends.
     leaving: Mutex<Arc<AtomicU32>>,
-    /// A start is waiting for its answer.
     starting: AtomicBool,
-    /// Where the answer to each `StartRuntime` and `Stop` goes, by the id the
-    /// request carried. An answer with no entry (its waiter gave up) is dropped,
-    /// so it never reads as the answer to a later request. The reader hands
-    /// answers out, and `stop` gives up, under this lock.
     waiting: Waiting,
     next_id: AtomicU32,
 }
 
 impl Channel {
-    /// `output` is the helper's stdout, read up to its first frame.
     pub fn open(helper: Child, input: impl Write + Send + 'static, output: impl Read + Send + 'static) -> Channel {
         Channel::open_watched(helper, input, output, || {})
     }
 
-    /// `open`, and `exited` is called once the helper has exited and before it
-    /// is reaped, so its pid is still its own.
     pub fn open_watched(mut helper: Child, input: impl Write + Send + 'static, output: impl Read + Send + 'static, exited: impl FnOnce() + Send + 'static) -> Channel {
         let input: SharedInput = Arc::new(Mutex::new(Some(Box::new(input))));
         let mux = Mux::new(Input(input.clone()));
@@ -240,7 +168,6 @@ impl Channel {
             move || {
                 let result = mux.run(
                     output,
-                    // The client opens every stream; the helper never asks to.
                     |mux, id| drop(mux.send(&Frame::Close { id })),
                     |json| match serde_json::from_slice(json) {
                         Ok(ToApp::Files { id, reply }) => {
@@ -276,7 +203,6 @@ impl Channel {
                         listener.forget(&mux);
                     }
                 }
-                // Whoever waits hears the end.
                 sink.lock().unwrap().take();
                 files.lock().unwrap().clear();
                 waiting.lock().unwrap().clear();
@@ -305,10 +231,6 @@ impl Channel {
         }
     }
 
-    /// The answer to request `id`, to the returned receiver only; `progress` also
-    /// takes the control messages that answer no request from now on, in place of
-    /// whoever took them. Nothing is registered once the helper is gone, so the
-    /// receiver ends at once.
     fn register(&self, id: u32, leaving: Option<Arc<AtomicU32>>, progress: bool) -> (mpsc::Receiver<ToApp>, Registered) {
         let (tx, rx) = mpsc::channel();
         let mut sink = self.sink.lock().unwrap();
@@ -325,7 +247,6 @@ impl Channel {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Wait for the helper's hello; `vanished` says why when the helper just ends.
     pub fn wait_hello(&self, vanished: impl FnOnce() -> String) -> Result<Hello, String> {
         let Some(hello) = self.hello.lock().unwrap().take() else { return Err("Already said hello.".into()) };
         match hello.recv() {
@@ -343,7 +264,6 @@ impl Channel {
         }
     }
 
-    /// Ask the helper about its machine's files.
     pub fn files(&self, request: files::Request) -> Result<files::Reply, String> {
         let id = self.next_file.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
@@ -360,16 +280,8 @@ impl Channel {
         }
     }
 
-    /// Start the runtime (or attach to the running one) and relay `listener`'s
-    /// connections to it from now on. Blocks until it's ready; `on_message`
-    /// hears `Progress`, `Found`, `Submitted` and `Queued` meanwhile, and
-    /// `notice` the first word of the runtime going away later, unless the
-    /// client is the one stopping it. The helper is of this build, which knows
-    /// `StartOptions` (the bootstrap script runs the build's own and installs it
-    /// when it is missing).
     pub fn start_runtime(&self, listener: &Arc<Listener>, options: &StartOptions, on_message: &mut dyn FnMut(ToApp), notice: impl FnOnce(Notice) + Send + 'static) -> Result<Runtime, StartError> {
         let failed = StartError::Failed;
-        // A second start would take the first one's progress and its watcher.
         if self.starting.swap(true, Ordering::SeqCst) {
             return Err(failed("Endeavor is already starting.".into()));
         }
@@ -386,8 +298,6 @@ impl Channel {
                     let page_token = page_token.unwrap_or_else(|| token.clone());
                     *self.listener.lock().unwrap() = Some(listener.clone());
                     listener.attach(self.mux.clone(), token.clone(), build.is_some() || interface.is_some(), (!crate::usable_as_is(build.as_deref(), interface)).then_some(interface));
-                    // A helper that ended as this start heard `Ready` may have found no listener to
-                    // tell, or told it before this attach: the listener says it is away all the same.
                     if self.mux.has_ended() {
                         if self.left.load(Ordering::SeqCst) {
                             listener.left(&self.mux);
@@ -416,7 +326,6 @@ impl Channel {
                     Ok(ToApp::Died { status, log_tail }) => break Notice::Died(died_reason(&status, &log_tail)),
                     Ok(ToApp::Error { message }) => break Notice::Lost(message),
                     Ok(_) => continue,
-                    // The helper ended: `closed` tells of that.
                     Err(_) => return,
                 }
             };
@@ -431,18 +340,10 @@ impl Channel {
         self.leaving.lock().unwrap().fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Stop the runtime and wait until it's gone (blocks up to ~60 s). The
-    /// helper stays connected. If the helper says it didn't stop, the runtime is
-    /// still attached and is watched as before. A start under way on another
-    /// thread ends, with its own answer from the helper. A start another
-    /// connection began is left to finish, and the stop is refused.
     pub fn stop(&self) -> Result<(), String> {
         self.stop_as(false)
     }
 
-    /// `stop`, but a start another connection began is cancelled too, as
-    /// `endeavor stop --force` cancels it. A helper that predates this does
-    /// as `stop` does.
     pub fn force_stop(&self) -> Result<(), String> {
         self.stop_as(true)
     }
@@ -460,10 +361,7 @@ impl Channel {
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err(CLOSED.into()),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let mut waiting = self.waiting.lock().unwrap();
-                // The reader answers under this lock, so an answer that came as the wait ended is here.
                 answer.try_recv().map_err(|_| {
-                    // Whether the runtime stopped is unknown, and an answer from now on is dropped:
-                    // watched, a runtime that goes on is still heard of, and one that stopped sends nothing.
                     waiting.remove(&id);
                     leaving.fetch_sub(1, Ordering::SeqCst);
                 })
@@ -476,7 +374,6 @@ impl Channel {
         }
     }
 
-    /// Leave the runtime running and wait until the helper has gone.
     pub fn detach(&self) {
         self.leave();
         self.left.store(true, Ordering::SeqCst);
@@ -484,7 +381,6 @@ impl Channel {
         self.wait_end(Some(Duration::from_secs(30)));
     }
 
-    /// Block until the helper has gone, or `timeout` passes.
     fn wait_end(&self, timeout: Option<Duration>) {
         let (ended, changed) = &*self.ended;
         let ended = ended.lock().unwrap();
@@ -494,28 +390,19 @@ impl Channel {
         }
     }
 
-    /// The helper has gone, by itself or because the client let it go.
     pub fn is_closed(&self) -> bool {
         *self.ended.0.lock().unwrap()
     }
 
-    /// Block until the helper has gone, whether or not Julia runs: `Lost` if
-    /// it went by itself (ssh or the helper exited, or the network dropped and
-    /// ssh's keepalive gave up), None if the client let it go.
     pub fn closed(&self) -> Option<Notice> {
         self.wait_end(None);
         (!self.left.load(Ordering::SeqCst)).then(|| Notice::Lost("The connection closed unexpectedly.".into()))
     }
 
-    /// The app's Keep running setting changed: the helper of this computer's runtime leaves it, or stops
-    /// one it started, as the setting now says if the app goes without quitting (app #245).
     pub fn keep_running(&self, keep: bool) {
         let _ = self.mux.send(&ToHelper::OwnWithClient { on: !keep }.frame());
     }
 
-    /// The client is quitting: leave Julia running, or stop it, unless the
-    /// plugin works in it too (`ToHelper::Stop`'s `unless_shared`, app #232). The
-    /// helper does the rest after the client has gone.
     pub fn quit(&self, keep_running: bool) {
         self.leave();
         self.left.store(true, Ordering::SeqCst);
@@ -523,15 +410,11 @@ impl Channel {
             let _ = self.mux.send(&ToHelper::Detach.frame());
             return;
         }
-        // A start that may be under way ends with its own answer; the stop's is dropped.
         let _ = self.mux.send(&ToHelper::Stop { id: self.request_id(), force: false, unless_shared: true }.frame());
     }
 }
 
 impl Drop for Channel {
-    /// A channel nobody holds any more ends the helper's input, as a client that
-    /// vanished does, so the helper applies its own rule (`--quit-with-client`)
-    /// and ssh and the helper don't outlive a failed connect or a panic.
     fn drop(&mut self) {
         if !self.left.swap(true, Ordering::SeqCst) {
             self.leave();
@@ -540,8 +423,6 @@ impl Drop for Channel {
     }
 }
 
-/// Wait until `child` has exited without reaping it, so its pid is not given to
-/// another process yet.
 #[cfg(unix)]
 fn exit_unreaped(child: &mut Child) {
     loop {
@@ -556,13 +437,11 @@ fn exit_unreaped(child: &mut Child) {
     }
 }
 
-/// A process id stays its own while a handle to the process is open, which `child` holds.
 #[cfg(windows)]
 fn exit_unreaped(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Plain-language cause for common failures in Julia's log, if recognized.
 fn hint(log: &str) -> Option<&'static str> {
     if ["Could not resolve host", "failed to clone", "Couldn't connect", "network"]
         .iter()
@@ -578,11 +457,6 @@ fn hint(log: &str) -> Option<&'static str> {
     }
 }
 
-/// Why Julia stopped, in plain words, for "Julia on <host> stopped.": how a
-/// cluster job ended (the helper's sentence), else how the process exited,
-/// plus a cause from its log if one is recognized. A crash's log is mostly
-/// Pluto's startup banner, so only a recognized cause is shown. Empty when
-/// nothing is known.
 pub fn died_reason(status: &str, log_tail: &[String]) -> String {
     let how = if status.ends_with('.') {
         Some(status.to_owned())
@@ -597,7 +471,6 @@ pub fn died_reason(status: &str, log_tail: &[String]) -> String {
     how.into_iter().chain(hint(&log_tail.join("\n")).map(str::to_owned)).collect::<Vec<_>>().join(" ")
 }
 
-/// Plain-language cause for common failures, else the end of Julia's log.
 fn diagnose(tail: &[String]) -> String {
     let hint = hint(&tail.join("\n"));
     let recent: Vec<&str> = tail.iter().rev().take(12).rev().map(String::as_str).collect();

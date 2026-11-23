@@ -3,7 +3,6 @@ use std::net::TcpStream;
 
 use super::*;
 
-/// A listener for lab-server whose runtime has gone away.
 fn away() -> Arc<Listener> {
     let listener = Listener::start("lab-server").unwrap();
     let mux = Mux::new(std::io::sink());
@@ -12,7 +11,6 @@ fn away() -> Arc<Listener> {
     listener
 }
 
-/// The raw HTTP response to POST `body` to `/mcp` on the listener's port.
 fn post(listener: &Listener, token: &str, body: &str) -> String {
     let mut socket = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
     let request = format!(
@@ -79,7 +77,6 @@ fn restarting_julia_says_so() {
 fn a_restart_that_fails_says_so_instead_of_restarting_forever() {
     let listener = Listener::start("This Mac").unwrap();
     listener.attach(Mux::new(std::io::sink()), "secret".into(), true, None);
-    // Before restarting() ran, there's nothing to correct: still up, a no-op.
     listener.restart_failed();
     assert!(matches!(&*listener.upstream.lock().unwrap(), Upstream::Up { .. }));
     listener.restarting();
@@ -96,7 +93,6 @@ fn stopping_on_purpose_says_so_not_that_it_reconnects_by_itself() {
     listener.disconnected();
     let response = post(&listener, "secret", LIST);
     assert!(response.contains(r#""text":"Endeavor isn't connected to lab-server. Reconnect it to use its notebook again.""#), "{response}");
-    // The drop that follows a deliberate stop doesn't overwrite that with "reconnecting by itself".
     listener.forget(&mux);
     assert_eq!(post(&listener, "secret", LIST), response);
 }
@@ -131,7 +127,6 @@ fn julia() -> wire::Item {
 fn a_restart_that_needs_an_install_says_what_is_missing_not_to_restart_again() {
     let listener = Listener::start("lab-server").unwrap();
     listener.attach(Mux::new(std::io::sink()), "secret".into(), true, None);
-    // Before restarting() ran, there's nothing to correct: still up, a no-op.
     listener.restart_needs_install(&[julia()]);
     assert!(matches!(&*listener.upstream.lock().unwrap(), Upstream::Up { .. }));
     listener.restarting();
@@ -190,7 +185,6 @@ fn a_helper_the_client_let_go_is_not_reconnecting() {
     listener.left(&mux);
     let response = post(&listener, "secret", LIST);
     assert!(response.contains("Endeavor isn't connected to lab-server.") && !response.contains("reconnecting"), "{response}");
-    // Another channel's listener use isn't undone by an older channel's end.
     let (newer, older) = (Mux::new(std::io::sink()), Mux::new(std::io::sink()));
     listener.attach(newer, "secret".into(), true, None);
     listener.left(&older);
@@ -207,12 +201,9 @@ fn a_failing_accept_backs_off_up_to_a_second_and_starts_over_after_one_works() {
     assert_eq!(ms(backoff.failed()), (50, true), "reported again after a success");
 }
 
-/// The response to an MCP call to `tool` with `arguments` on the listener's port; empty when it was relayed
-/// (the stand-in runtime never answers), and "(closed unanswered)" when the listener closed it.
 fn call(listener: &Listener, tool: &str, arguments: &str) -> String {
     let body = format!(r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"{tool}","arguments":{arguments}}}}}"#);
     let mut socket = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
-    // A call that is relayed goes to a runtime that never answers: no answer in time is a call that wasn't refused.
     socket.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
     let mut response = String::new();
     let request = format!("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len());
@@ -224,7 +215,6 @@ fn call(listener: &Listener, tool: &str, arguments: &str) -> String {
     }
 }
 
-/// A client whose runs are held for the user's answer: it refuses code runs on a runtime too old to hold them.
 fn holding(refuse: Option<Refuse>) -> Arc<Listener> {
     let messages = Messages { no_run_gate: Some(|name| format!("Julia on {name} is too old to ask before a run. Restart Julia.")), ..Messages::default() };
     Listener::new("lab-server", refuse, messages).unwrap()
@@ -256,7 +246,6 @@ fn a_runtime_that_says_its_build_or_interface_runs_code_and_the_callers_rule_sti
     listener.attach(Mux::new(std::io::sink()), "secret".into(), true, None);
     assert_eq!(call(&listener, "execute_cell", r#"{"cell_id":"a"}"#), "", "relayed");
     assert!(call(&listener, "run_shell", r#"{"command":"ls"}"#).contains("No shell here."));
-    // With no gate, the built-in rule comes first and the caller's still covers the rest.
     listener.attach(Mux::new(std::io::sink()), "secret".into(), false, None);
     assert!(call(&listener, "execute_cell", r#"{"cell_id":"a"}"#).contains("too old"));
     assert!(call(&listener, "run_shell", r#"{"command":"ls"}"#).contains("too old"));
@@ -285,11 +274,9 @@ fn while_the_server_is_away_the_agent_can_still_ask_the_user_to_restart_it() {
 fn a_stopped_listeners_socket_goes_to_the_next_one_with_the_connections_that_wait() {
     for _ in 0..20 {
         let first = away();
-        // An agent's connection that stays open, as a keep-alive one does: a rebind of the port would fail on macOS.
         let held = TcpStream::connect(("127.0.0.1", first.port())).unwrap();
         let socket = first.hand_over().expect("the socket");
         assert!(first.hand_over().is_none(), "handed over once");
-        // A connection that comes before the next listener takes it waits for it.
         let mut early = TcpStream::connect(("127.0.0.1", first.port())).unwrap();
         let second = Listener::on_socket("lab-server", None, Messages::default(), Some(socket)).unwrap();
         assert_eq!(second.port(), first.port(), "the agents' MCP URL reaches the new listener");

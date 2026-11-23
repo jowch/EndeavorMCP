@@ -1,11 +1,3 @@
-//! One machine's connection and everything that hangs on it: signing in,
-//! starting the helper, starting the runtime or attaching to it, getting the
-//! connection back when it drops, and the one loopback port (`Listener`) that
-//! stays the same through all of it. A caller says what it wants (`Want`) and
-//! hears how it stands (`Outcome`); the work goes on in a thread of the
-//! `Session`, which ends when the session is closed or dropped. Closing
-//! detaches from the helper and never stops the runtime.
-
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,49 +14,31 @@ use super::listener::{Listener, Messages};
 use super::machines::{Launcher, Server};
 use super::ssh::{Auth, Cancel, ConnectError, Event, NeedsInstall, Options, Transport, connect, start};
 
-/// How long a reconnect waits after its first failure, doubling up to `RETRY_LAST`.
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_LAST: Duration = Duration::from_secs(30);
 
-/// A connection that stays lost this long is given up on (state `failed`).
 const RETRY_GIVE_UP: Duration = Duration::from_secs(10 * 60);
 
-/// How often `reattach` asks the helper whether the runtime is there, and how long it waits between.
 const REATTACH_TRIES: u32 = 3;
 const REATTACH_PAUSE: Duration = Duration::from_secs(1);
 
-/// Where a session stands, with what each state knows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum State {
-    /// Signing in and starting the helper, or getting the connection back.
     Connecting,
-    /// The helper is up and no runtime is asked for (or it was stopped).
     Connected,
-    /// The helper is up and no runtime runs: an attach (`Want::Attach`) found none, or the one
-    /// attached ended. Nothing was started.
     NothingRunning,
-    /// A runtime is starting or being attached to. On a cluster, `queue` is Slurm's word once the
-    /// job runs: its state `RUNNING`, and the node as its reason.
     Starting { queue: Option<QueueInfo> },
-    /// A cluster job waits in the queue.
     Queued(QueueInfo),
-    /// The runtime is attached and answers through the listener's port.
     Ready(RuntimeInfo),
-    /// Endeavor must install something on the machine first and the user hasn't agreed. Not a
-    /// failure, and not tried again by itself: asking again with `install`, or
-    /// `Session::allow_install` for the helper, goes on.
     NeedsInstall(InstallInfo),
-    /// The last step didn't work, in plain words. Asking again tries again.
     Failed(String),
 }
 
 impl State {
-    /// The runtime, once it is attached.
     pub fn runtime(&self) -> Option<&RuntimeInfo> {
         if let State::Ready(runtime) = self { Some(runtime) } else { None }
     }
 
-    /// Slurm's state and reason for the job, while it waits or Julia starts in it.
     pub fn queue(&self) -> Option<&QueueInfo> {
         match self {
             State::Queued(queue) | State::Starting { queue: Some(queue) } => Some(queue),
@@ -72,30 +46,23 @@ impl State {
         }
     }
 
-    /// Why it failed.
     pub fn error(&self) -> Option<&str> {
         if let State::Failed(why) = self { Some(why) } else { None }
     }
 }
 
-/// What Endeavor wants to install on the machine, and what it found there.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstallInfo {
-    /// What is needed, in the order it would be installed.
     pub items: Vec<wire::Item>,
-    /// Set exactly when Endeavor's helper is one of the items: the platform, where it
-    /// would go, its size and what runs there already.
     pub helper: Option<NeedsInstall>,
 }
 
 impl InstallInfo {
-    /// The helper is missing: the one item, with what was found on the machine.
     pub(crate) fn helper(found: NeedsInstall) -> InstallInfo {
         let item = wire::Item { kind: wire::KIND_HELPER.into(), name: "Endeavor's helper".into(), size_mb: found.bytes.map(|bytes| bytes.div_ceil(1_000_000).max(1)), place: Some(found.folder.clone()) };
         InstallInfo { items: vec![item], helper: Some(found) }
     }
 
-    /// Whether the helper is among them.
     pub fn needs_helper(&self) -> bool {
         self.helper.is_some()
     }
@@ -108,18 +75,12 @@ pub struct HelloInfo {
     pub home: String,
     pub slurm: bool,
     pub uploads: bool,
-    /// How the helper runs the runtime on this connection: "process" or "slurm"; None from a helper that doesn't say.
     pub launcher: Option<String>,
-    /// `uname`'s words for the machine, as `linux` and `x86_64`.
     pub os: Option<String>,
     pub arch: Option<String>,
-    /// This connect installed the helper there, or it was already installed.
     pub helper_installed: Option<bool>,
-    /// What the helper found to start the runtime with (Julia), once it has started one.
     pub found: Vec<FoundInfo>,
-    /// Slurm's partitions, on a machine that has Slurm.
     pub partitions: Option<Vec<Partition>>,
-    /// Asking Slurm for them failed, so `partitions` is empty.
     #[serde(default)]
     pub partitions_failed: bool,
     pub scratch: Option<String>,
@@ -127,46 +88,31 @@ pub struct HelloInfo {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FoundInfo {
-    /// "Julia".
     pub name: String,
     pub version: String,
     pub path: String,
 }
 
-/// How to reach the runtime that is attached.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeInfo {
-    /// The listener's port on this computer. It stays the same while the session lives.
     pub port: u16,
-    /// For `Authorization: Bearer` on every request to that port.
     pub token: String,
     pub mcp_url: String,
-    /// Pluto's start page, with the token that lets a browser in.
     pub page_url: String,
-    /// The token for the runtime's pages (`page_url` carries it), which the bearer token doesn't open: for
-    /// the app's own requests to a page, such as an export. For a runtime from before the pages had their
-    /// own it is the bearer token (the client falls back once, when the helper's `Ready` has none).
     #[serde(default)]
     pub page_token: String,
     pub node: String,
     pub pid: u32,
-    /// It was running already; this session didn't start it.
     pub reattached: bool,
     pub job: Option<wire::slurm::Job>,
-    /// The runtime's own port on `node`, where a server's user can forward it; none when an older helper doesn't say.
     pub remote_port: Option<u16>,
-    /// The build that started it, as its record says; none when the record or an older helper doesn't say.
     #[serde(default)]
     pub build: Option<String>,
-    /// The number for what its core offers callers (`CORE_INTERFACE`), as its record says; none when the
-    /// record or an older helper doesn't say.
     #[serde(default)]
     pub interface: Option<u32>,
 }
 
 impl RuntimeInfo {
-    /// This build's tools and calls work with it as it is: its core offers this build's interface
-    /// (`CORE_INTERFACE`), or this build started it. False when neither is known.
     pub fn usable_as_is(&self) -> bool {
         crate::usable_as_is(self.build.as_deref(), self.interface)
     }
@@ -176,10 +122,8 @@ impl RuntimeInfo {
 #[serde(default)]
 pub struct JobInfo {
     pub id: String,
-    /// "8 CPUs · 32 GB · 8 h".
     pub summary: Option<String>,
     pub node: Option<String>,
-    /// When Slurm will end it (Unix seconds).
     pub ends_at: Option<u64>,
 }
 
@@ -189,44 +133,25 @@ pub struct QueueInfo {
     pub reason: String,
 }
 
-/// Everything a session knows about its machine, read without changing anything.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Status {
-    /// The machine's id in the machines file.
     pub machine: String,
-    /// The name the agent knows it by.
     pub name: String,
     pub state: State,
-    /// The last progress line.
     pub step: Option<String>,
-    /// What the helper reported, once it is connected.
     pub hello: Option<HelloInfo>,
-    /// The cluster job, from the time it is submitted. It outlasts a lost connection, since the job goes on.
     pub job: Option<JobInfo>,
-    /// Why the runtime last went away, until a runtime is asked for again or is attached: the same
-    /// as `state`'s and `step`'s words say, for a caller to tell the cases apart without matching them.
     pub gone: Option<Gone>,
 }
 
-/// Why a runtime the session had, or was starting, went away (`Status::gone`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Gone {
-    /// It stopped by itself, or was stopped from another connection: why, as the helper said it
-    /// (empty when it didn't say).
     Died(String),
 }
 
-/// What a caller wants of the machine's runtime.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Want {
-    /// Attach to a runtime that runs (on a cluster, a job that waits or runs) and start nothing
-    /// otherwise. `install` is the user's agreement to the helper on the machine, if it lacks it.
     Attach { install: bool },
-    /// Start the runtime, or attach to the one running. `job` is what to submit on a cluster; on a
-    /// session that already has a runtime or a queued job it is not used, and the outcome is that
-    /// of what is there (a cluster has one job for each user, and the outcome says its size).
-    /// `install` is the user's agreement to what is missing on the machine: the helper, and for
-    /// this start only, whatever the helper finds the start needs (such as Julia).
     Start { job: Option<JobRequest>, install: bool },
 }
 
@@ -243,83 +168,45 @@ impl Want {
     }
 }
 
-/// How it stands with what was wanted.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
-    /// The runtime is attached and answers on `RuntimeInfo::port`.
     Ready(RuntimeInfo),
-    /// A cluster job waits in the queue.
     Queued { job: Option<JobInfo>, queue: QueueInfo },
-    /// An attach found no runtime, and nothing was started.
     NothingRunning,
-    /// Something must be installed first, and the user hasn't agreed.
     NeedsInstall(InstallInfo),
-    /// It didn't work, in plain words.
     Failed(String),
-    /// Not settled when the wait ran out: the step it is at.
     StillWorking(String),
 }
 
-/// The helper binary to send to a machine whose `uname -s` is `os` and `uname -m` is `arch` (`Options::helper`).
 pub type HelperFor = Box<dyn Fn(&str, &str) -> Result<PathBuf, String> + Send + Sync>;
 
-/// What a session tells its caller as it goes (`Config::on_event`). It comes on a thread of the
-/// session's, after the session has recorded it and with no lock of the session held, so the
-/// caller may ask the session for its status and sees the state the event brought. The callback
-/// should return quickly, and must not close or drop the session: it runs on the session's own
-/// threads. Not every change of state comes with an event (a runtime that is ready, or found not
-/// running, doesn't), so a caller that shows the state still reads `Session::status`.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum SessionEvent {
-    /// A step of connecting or starting, as the helper reported it.
     Step(Event),
-    /// Something that went wrong or waits on the user, in plain words: a lost connection, a start
-    /// that failed or needs an install, a wait for the agreement to install the helper, a runtime
-    /// that stopped.
     Trouble(String),
 }
 
-/// Where a session's events go (`Config::on_event`).
 pub type OnEvent = Box<dyn Fn(SessionEvent) + Send + Sync>;
 
-/// How a session reaches its machine.
 pub struct Config {
     pub server: Server,
     pub transport: Transport,
-    /// Where the helper is installed (`Options::root`); empty is the default.
     pub root: String,
-    /// The runtime's state folder on the machine (`Options::state`); empty is the default.
     pub state: String,
-    /// Julia's depot on the machine (`Options::depot`); empty is the default.
     pub depot: String,
-    /// The user agreed to installing the helper from the start. Without it a machine that lacks it
-    /// waits for `Session::allow_install` or a `Want` with `install`.
     pub allow_install: bool,
-    /// What the listener tells an agent whose runtime is away.
     pub messages: Messages,
     pub helper: HelperFor,
-    /// How the helper runs the runtime (`Options::launcher`); None is the record's way.
     pub launcher: Option<Launcher>,
-    /// How ssh signs in (`Options::auth`): `Auth::Batch` by default. A caller that answers ssh's
-    /// prompts itself passes `Auth::Env` with its askpass.
     pub auth: Auth,
-    /// A runtime this session starts ends itself once no notebook has been open for the idle limit
-    /// (`Options::exit_idle`); true by default.
     pub exit_idle: bool,
-    /// The runtime this session starts finds and starts Julia only when something needs it
-    /// (`Options::julia_when_needed`); false by default.
     pub julia_when_needed: bool,
-    /// Hears the session's events. The default writes each `Trouble` to stderr and drops the steps.
     pub on_event: OnEvent,
-    /// The socket the listener takes connections on: a closed session's (`Session::hand_over_port`),
-    /// so the agents that have its port in their MCP URL reach this session, as when a server's
-    /// connection settings change. None, the default: a free port.
     pub socket: Option<TcpListener>,
 }
 
 impl Config {
-    /// Over `ssh` to `server`, with the machine's default folders. `helper` finds the helper to send to a machine that lacks it.
     pub fn new(server: Server, helper: impl Fn(&str, &str) -> Result<PathBuf, String> + Send + Sync + 'static) -> Config {
         let transport = Transport::for_server(&server);
         let on_event: OnEvent = Box::new(|event| {
@@ -331,43 +218,25 @@ impl Config {
     }
 }
 
-/// What the supervisor is told.
 enum Msg {
-    /// A start request while it waits to connect, or after a failure.
     Kick,
-    /// The session is closing.
     Quit,
-    /// The helper of this connection ended by itself.
     Closed(u64),
-    /// A runtime start on this connection ended (`Inner::epoch` when it began, and whether it was allowed to install).
     Started(u64, u64, bool, Box<Result<Runtime, StartError>>),
-    /// The attached runtime went away.
     Notice(u64, Notice),
 }
 
-/// What a start asked for.
 #[derive(Clone, Debug, Default)]
 struct Wish {
-    /// On a cluster, what to submit.
     job: Option<JobRequest>,
-    /// Only attach: first ask the helper whether a runtime is there, and start nothing if not.
     attach: bool,
-    /// The helper may install what this start needs: the `install` of the
-    /// request, and not what was agreed for an earlier one. Never for a start
-    /// that only attaches.
     install: bool,
 }
 
-/// The start the session counts as under way. It is not the state: a start goes on while the state is
-/// `Failed` (a stop it refused, or a reattach that found the old runtime gone as a new start began), and
-/// one the runtime's end cut short must not end `Ready`.
 #[derive(PartialEq)]
 enum Run {
-    /// No start is under way.
     Idle,
-    /// A start is under way.
     Starting,
-    /// The runtime went away before the end of its start was handled: that end is not a success.
     Gone,
 }
 
@@ -376,7 +245,6 @@ impl Inner {
         matches!(self.run, Run::Starting | Run::Gone)
     }
 
-    /// A runtime is attached or a start is under way: nothing new is begun on the connection.
     fn busy(&self) -> bool {
         self.starting() || matches!(self.state, State::Ready(_))
     }
@@ -389,29 +257,16 @@ struct Inner {
     step: Option<String>,
     hello: Option<HelloInfo>,
     job: Option<JobInfo>,
-    /// The connection, while there is one, and its number.
     channel: Option<Arc<Channel>>,
     conn: u64,
-    /// What the runtime was asked for, from a start until a stop or a failure.
     wanted: Option<Wish>,
-    /// What an attached or starting runtime had been asked for when the
-    /// connection was lost: the next connection gets it back, if it is still there.
     resume: Option<Wish>,
-    /// Why the runtime had ended when the connection was lost, which the next
-    /// connection still says: it has nothing to bring back.
     ended: Option<String>,
     run: Run,
-    /// Counts the stops, so the end of a start that one cut short is ignored.
-    /// A stop counts before it asks the helper, which takes a while.
     epoch: u64,
-    /// The supervisor waits for a `Kick` or for the end of a pause, and none is in its inbox.
     may_kick: bool,
-    /// What the first helper settled `Launcher::Auto` as: a reconnect asks for the same, so the
-    /// session never changes how it runs the runtime (if Slurm was installed meanwhile, say).
     settled: Option<Launcher>,
-    /// The runtime (its pid) the caller was told came from another build: a reconnect to it says nothing again.
     told_other_build: Option<u32>,
-    /// `Status::gone`.
     gone: Option<Gone>,
 }
 
@@ -420,29 +275,18 @@ struct Shared {
     inbox: Sender<Msg>,
     listener: Arc<Listener>,
     inner: Mutex<Inner>,
-    /// Told after every change of `inner`.
     changed: Condvar,
-    /// The connect under way, which a close cancels.
     cancel: Mutex<Arc<Cancel>>,
     leaving: AtomicBool,
-    /// The user agreed to installing the helper on the machine (`Config::allow_install`,
-    /// `Session::allow_install`, or a `Want` with `install` while there is no connection). Kept
-    /// for as long as the session lives, so that a reconnect to a machine that lost the helper
-    /// doesn't need it again. Julia's download is not part of it: it is asked for by each start
-    /// (`Wish::install`).
     allow_install: AtomicBool,
 }
 
-/// One machine's connection. Closing it, or dropping it, detaches from the machine's helper
-/// and ends its thread; the runtime goes on.
 pub struct Session {
     shared: Arc<Shared>,
     supervisor: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Session {
-    /// Open the listener and begin connecting to the machine in a thread of its own; nothing is
-    /// asked of the runtime until `ensure`.
     pub fn new(mut config: Config) -> Result<Session, String> {
         let name = config.server.display_name();
         let listener = Listener::on_socket(&name, None, config.messages, config.socket.take())?;
@@ -485,17 +329,6 @@ impl Session {
         Ok(Session { shared, supervisor: Mutex::new(Some(supervisor)) })
     }
 
-    /// Ask for `want` and say how it stands, as soon as that is known or `wait` has passed
-    /// (`Outcome::StillWorking`). The work goes on meanwhile.
-    ///
-    /// What is asked for is judged from what the session holds, not from who asked: with a start or
-    /// an attach under way, or a runtime attached, the call only waits for it, so that any number of
-    /// callers can ask at once. `install: true` is an agreement and upgrades a start under way that
-    /// lacked it, and a start that ended `NeedsInstall` begins again with it. An `Attach` never
-    /// replaces a `Start` that is wanted or under way, and a `Start` is never answered
-    /// `NothingRunning`. A `Start` with a job on a session that already has a runtime or a queued job
-    /// gets what is there. A failure, and a need to install without `install`, is kept and given to every
-    /// call until one asks to `retry`, which begins again.
     pub fn ensure(&self, want: Want, wait: Duration, retry: bool) -> Outcome {
         let begin = self.shared.with(|i| {
             let kept = matches!(i.state, State::Failed(_)) || (matches!(i.state, State::NeedsInstall(_)) && !want.install());
@@ -507,17 +340,14 @@ impl Session {
         self.wait(wait)
     }
 
-    /// Ask for `want` as `ensure` does and return at once; `status` has the rest.
     pub fn request(&self, want: &Want) {
         self.shared.request_start(want);
     }
 
-    /// Where the session stands.
     pub fn status(&self) -> Status {
         status_of(&self.shared.inner())
     }
 
-    /// Where the session stands once `done` is true of it, or after `wait` if it never is.
     pub fn wait_for(&self, wait: Duration, done: impl Fn(&Status) -> bool) -> Status {
         let until = Instant::now().checked_add(wait);
         let mut inner = self.shared.inner();
@@ -531,92 +361,58 @@ impl Session {
         }
     }
 
-    /// Whether the runtime runs in Slurm jobs through this session: as the helper said, else as the
-    /// session was made. A launcher of `Auto` the helper hasn't settled yet counts as Slurm, so that
-    /// nothing takes it for a machine where a start runs Julia directly.
     pub fn cluster(&self) -> bool {
         let settled = self.shared.inner().settled;
         settled.or(self.shared.config.launcher).unwrap_or_else(|| self.shared.config.server.launcher()) != Launcher::Process
     }
 
-    /// Ask the machine's helper about its files (`Request`), once the session has connected or
-    /// `wait` has passed. None when it isn't connected by then: it is still connecting, the helper
-    /// isn't installed, or the connection failed (`status` says which).
     pub fn files(&self, request: Request, wait: Duration) -> Option<Result<Reply, String>> {
         self.wait_for(wait, |status| status.state != State::Connecting);
         let channel = self.shared.inner().channel.clone()?;
         Some(channel.files(request))
     }
 
-    /// Try to connect now: end the pause between tries after the connection was lost, or try again a
-    /// connection that failed, as a Try now or Reconnect does. Nothing while it is connected or
-    /// connecting, while it waits for the user's agreement to install the helper, or once it is closed.
     pub fn retry_now(&self) {
         self.shared.retry_now();
     }
 
-    /// Whether the helper is connected, which `stop` needs.
     pub fn connected(&self) -> bool {
         self.shared.inner().channel.is_some()
     }
 
-    /// Stop the runtime, for every client of it, and wait until it is gone (up to a minute and a
-    /// bit). The connection stays, and the error says why when the runtime didn't stop.
     pub fn stop(&self) -> Result<(), String> {
         self.shared.request_stop(false)
     }
 
-    /// `stop`, but a start under way that another connection began is cancelled too (`Channel::force_stop`).
     pub fn force_stop(&self) -> Result<(), String> {
         self.shared.request_stop(true)
     }
 
-    /// Stop the runtime and start it again (`job` and `install` as in `Want::Start`), then answer as
-    /// `ensure` does (a kept failure is tried again). It is the stop of `stop`: Julia ends for every
-    /// client of it, the plugin's too, whether or not it is busy, and the notebooks that were open are
-    /// not opened again in the new runtime. Calls to the listener's port meanwhile are told that Julia
-    /// is restarting, and, if the start fails, that it couldn't start (`Messages::restart_failed`),
-    /// rather than that the machine isn't connected. A stop that fails starts nothing and is the outcome.
     pub fn restart(&self, job: Option<JobRequest>, install: bool, wait: Duration) -> Outcome {
         if let Err(message) = self.shared.request_stop(false) {
             return Outcome::Failed(message);
         }
-        // After the stop, which says the machine isn't connected, and before the start can attach.
         self.shared.listener.restarting();
         self.ensure(Want::Start { job, install }, wait, true)
     }
 
-    /// The user agreed to install the helper on the machine, and nothing a start needs after it:
-    /// a session waiting for that connects again with it allowed. Returns at once.
     pub fn allow_install(&self) {
         self.shared.request_install();
     }
 
-    /// The listener's port on this computer, the same for the session's whole life. A new session can
-    /// have it after this one (`hand_over_port`).
     pub fn port(&self) -> u16 {
         self.shared.listener.port()
     }
 
-    /// Close the listener now and hand over its socket, for a new session to take connections on
-    /// (`Config::socket`) while `close`, which can wait on a connect being cut short, runs in a thread
-    /// of its own. The port is never free in between, and a connection that comes meanwhile waits for
-    /// the new session. Call `close` next: nothing else is of use after this. None when the listener
-    /// was closed already.
     pub fn hand_over_port(&self) -> Option<TcpListener> {
         self.shared.listener.hand_over()
     }
 
-    /// Let go of the machine's helper (which leaves the runtime running, and discards what an
-    /// upload had written part way), end the connection, close the listener and end the session's
-    /// thread. A connect that is under way is cancelled at once. Nothing begins after this, and calls
-    /// answer `Outcome::Failed`.
     pub fn close(&self) {
         let shared = &self.shared;
         if shared.leaving.swap(true, Ordering::SeqCst) {
             return;
         }
-        // The helper is told before ssh is ended, or it would only see its input end.
         let held = shared.with(|i| i.channel.take());
         if held.is_none() {
             shared.cancel.lock().unwrap().cancel();
@@ -629,7 +425,6 @@ impl Session {
         if let Some(supervisor) = self.supervisor.lock().unwrap().take() {
             let _ = supervisor.join();
         }
-        // A connection that came while this waited.
         if let Some(channel) = shared.with(|i| i.channel.take()) {
             let_go(channel);
         }
@@ -669,7 +464,6 @@ fn status_of(i: &Inner) -> Status {
     }
 }
 
-/// Tell the helper to let go, and wait a short time for it: a connection that is dead doesn't hold anything up.
 fn let_go(channel: Arc<Channel>) {
     let (done, waited) = mpsc::channel();
     std::thread::spawn(move || {
@@ -685,7 +479,6 @@ impl Drop for Session {
     }
 }
 
-/// How it stands, if that is settled.
 fn outcome(i: &Inner) -> Option<Outcome> {
     match &i.state {
         State::Ready(runtime) => Some(Outcome::Ready(runtime.clone())),
@@ -710,12 +503,10 @@ impl Shared {
         self.inner.lock().unwrap()
     }
 
-    /// Tell the caller something went wrong or waits on the user.
     fn trouble(&self, text: String) {
         (self.config.on_event)(SessionEvent::Trouble(text));
     }
 
-    /// Hear what connecting and starting say, and pass it on.
     fn on_event(&self, event: Event) {
         let step = SessionEvent::Step(event.clone());
         self.with(|i| match event {
@@ -742,11 +533,9 @@ impl Shared {
             }
             Event::Queued { job, state, reason } => {
                 i.step = Some(format!("The job is {} ({reason})", state.to_lowercase()));
-                // A job this session hasn't heard submitted, such as one it re-attached to, is known from here.
                 if i.job.as_ref().is_none_or(|known| known.id != job) {
                     i.job = Some(JobInfo { id: job, ..Default::default() });
                 }
-                // The helper reports the node, as `reason`, once the job runs.
                 if state == "RUNNING"
                     && let Some(job) = &mut i.job
                 {
@@ -763,8 +552,6 @@ impl Shared {
         (self.config.on_event)(step);
     }
 
-    /// Start the runtime on the connection if one is asked for and none is under
-    /// way or attached. Never called with the lock held.
     fn begin_start(self: &Arc<Shared>) {
         let begun = self.with(|i| {
             let (Some(channel), Some(wish)) = (i.channel.clone(), i.wanted.clone()) else { return None };
@@ -793,12 +580,8 @@ impl Shared {
         });
     }
 
-    /// For a start that only attaches: ask the helper whether a runtime runs or a job waits, and
-    /// give the wish to go on with. If not, end the start with nothing started, unless the wish
-    /// became a start meanwhile. None then, and when the answer was no use.
     fn runtime_is_there(&self, channel: &Channel, conn: u64, epoch: u64) -> Option<Wish> {
         let answer = channel.files(Request::Runtime);
-        // A stop or a close that came meanwhile has ended this start: nothing is attached to what it stopped.
         let current = |i: &Inner| i.conn == conn && i.epoch == epoch && !self.leaving.load(Ordering::SeqCst);
         match answer {
             Ok(Reply::Runtime { runtime: RuntimeState::Running { .. } | RuntimeState::Queued { .. } | RuntimeState::Starting }) => {
@@ -818,7 +601,6 @@ impl Shared {
                 i.step = Some(format!("No runtime is running on {}", i.name));
                 None
             }),
-            // The connection went: `Closed` follows and takes the wish along to the next one.
             Ok(_) | Err(_) if channel.is_closed() => None,
             other => {
                 let trouble = other.map_or_else(|e| e, |reply| format!("The helper answered {reply:?}."));
@@ -836,7 +618,6 @@ impl Shared {
         }
     }
 
-    /// The helper may be installed. A machine that lacks it has no connection, and is connected again.
     fn request_install(&self) {
         self.allow_install.store(true, Ordering::SeqCst);
         self.with(|i| {
@@ -852,7 +633,6 @@ impl Shared {
                 return;
             }
             match i.state {
-                // Waiting between tries (the supervisor may be woken) or connecting (it may not, and `kick` does nothing).
                 State::Connecting => self.kick(i),
                 State::Failed(_) => self.reconnect_now(i),
                 _ => {}
@@ -865,7 +645,6 @@ impl Shared {
         self.kick(i);
     }
 
-    /// Wake the supervisor if it waits. One wake-up is enough, and none while it connects.
     fn kick(&self, i: &mut Inner) {
         if i.may_kick {
             i.may_kick = false;
@@ -879,24 +658,17 @@ impl Shared {
         }
     }
 
-    /// Record what `want` asks for, under the lock. True when the runtime should be started on the
-    /// connection that is there (`begin_start`, called with no lock held).
     fn ask(&self, i: &mut Inner, want: &Want) -> bool {
-        // Checked under the lock, as a close that came meanwhile has ended the supervisor and taken the connection.
         if self.leaving.load(Ordering::SeqCst) {
             return false;
         }
-        // Only a start with no connection can mean the helper: with one, `install` is for what the start needs, and a
-        // yes to that mustn't be kept as one for the helper. Set under the lock, as the supervisor checks it.
         if want.install() && i.channel.is_none() {
             self.allow_install.store(true, Ordering::SeqCst);
         }
-        // What is wished, or held, is not asked for again: that would restart a start, or cut a pause between attempts short.
         let wished = i.wanted.is_some() || i.resume.is_some();
         if i.busy() || (wished && !matches!(i.state, State::Failed(_) | State::NeedsInstall(_))) {
             if let Some(wish) = i.wanted.as_mut().or(i.resume.as_mut()) {
                 match want {
-                    // A start replaces an attach that has not found out yet, and never the other way round.
                     Want::Start { job, install } if wish.attach => *wish = Wish { job: job.clone(), attach: false, install: *install },
                     _ => wish.install |= want.wish().install,
                 }
@@ -912,7 +684,6 @@ impl Shared {
         if i.channel.is_some() {
             return true;
         }
-        // No connection: the supervisor starts the runtime once it has one, and tries now if it was waiting.
         if matches!(i.state, State::Failed(_) | State::NeedsInstall(_)) {
             i.state = State::Connecting;
         }
@@ -921,7 +692,6 @@ impl Shared {
     }
 
     fn request_stop(&self, force: bool) -> Result<(), String> {
-        // Counted before the helper is asked: it takes a while, and the end of a start it cuts short is no failure.
         let Some((channel, mine)) = self.with(|i| {
             let channel = i.channel.clone()?;
             i.epoch += 1;
@@ -934,7 +704,6 @@ impl Shared {
             let same = i.channel.as_ref().is_some_and(|now| Arc::ptr_eq(now, &channel));
             match &stopped {
                 Ok(()) => {
-                    // A connection that comes later mustn't attach to what was stopped.
                     i.resume = None;
                     if same {
                         i.wanted = None;
@@ -946,7 +715,6 @@ impl Shared {
                     }
                 }
                 Err(message) => {
-                    // The runtime is still there, and the start that was under way goes on.
                     if i.epoch == mine {
                         i.epoch -= 1;
                     }
@@ -964,7 +732,6 @@ impl Shared {
     }
 }
 
-/// Why a stop can't reach the helper.
 fn not_connected_to_stop(i: &Inner) -> String {
     let name = &i.name;
     match &i.state {
@@ -974,7 +741,6 @@ fn not_connected_to_stop(i: &Inner) -> String {
     }
 }
 
-/// The connection and what hangs on it, until the session is closed: connects, starts what was asked for, and gets it back.
 fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
     let mut conn = 0;
     let mut reconnecting = false;
@@ -990,7 +756,6 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
             i.step = Some(format!("Connecting to {}", i.name));
             i.name.clone()
         });
-        // Wake-ups from before this connect are answered by it.
         while inbox.try_recv().is_ok() {}
         if shared.leaving.load(Ordering::SeqCst) {
             return;
@@ -1001,12 +766,10 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                     return;
                 }
                 if let Some(helper) = error.needs.clone() {
-                    // The permission may have come while this connect looked.
                     if shared.allow_install.load(Ordering::SeqCst) {
                         continue;
                     }
                     let parked = shared.with(|i| {
-                        // Checked with the lock held, so that a permission is never lost between the two.
                         if shared.allow_install.load(Ordering::SeqCst) {
                             return false;
                         }
@@ -1045,7 +808,6 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                     reconnecting = false;
                     lost_since = None;
                     delay = RETRY_FIRST;
-                    // The listener has been saying that the connection comes back by itself.
                     shared.listener.disconnected();
                     if !wait_for(inbox, Duration::MAX) {
                         return;
@@ -1071,10 +833,8 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
                     {
                         i.state = State::Failed(why);
                     }
-                    // A start asked for while the connection was away is the newer wish.
                     i.resume.take().filter(|_| i.wanted.is_none())
                 });
-                // A close that came during the connect detaches it, and nothing is started on it.
                 if shared.leaving.load(Ordering::SeqCst) {
                     return;
                 }
@@ -1095,11 +855,9 @@ fn supervise(shared: &Arc<Shared>, inbox: &Receiver<Msg>) {
     }
 }
 
-/// Ask a machine with Slurm about its partitions, for `hello`.
 fn find_partitions(shared: &Shared, channel: &Channel, conn: u64) {
     let found = match channel.files(Request::Slurm) {
         Ok(Reply::Slurm { scheduler }) => Some(scheduler),
-        // The connection ended: the next one asks again.
         Err(_) if channel.is_closed() => return,
         _ => None,
     };
@@ -1113,13 +871,8 @@ fn find_partitions(shared: &Shared, channel: &Channel, conn: u64) {
     });
 }
 
-/// After a reconnect, attach to the runtime that was asked for only if the
-/// helper says it is still there (running, starting, or a job that waits): a start would
-/// otherwise begin a new runtime, or on a cluster submit a job nobody asked for.
-/// An answer that isn't clear is asked for again, and then leaves the session `Failed`.
 fn reattach(shared: &Shared, channel: &Channel, wish: Wish) {
     let mut trouble = String::new();
-    // A stop or a close during the asking has ended what is brought back.
     let epoch = shared.inner().epoch;
     let current = |i: &Inner| i.epoch == epoch && !shared.leaving.load(Ordering::SeqCst);
     for attempt in 0..REATTACH_TRIES {
@@ -1150,7 +903,6 @@ fn reattach(shared: &Shared, channel: &Channel, wish: Wish) {
             Ok(other) => trouble = format!("The helper answered {other:?}."),
             Err(message) => trouble = message,
         }
-        // The connection went again: the next one tries, with the same wish.
         if channel.is_closed() {
             shared.with(|i| i.resume = Some(wish));
             return;
@@ -1171,7 +923,6 @@ fn reattach(shared: &Shared, channel: &Channel, wish: Wish) {
     shared.listener.disconnected();
 }
 
-/// Connect to the machine with the record the session was made with.
 fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
     let config = &shared.config;
     let allowed = shared.allow_install.load(Ordering::SeqCst);
@@ -1193,7 +944,6 @@ fn connect_now(shared: &Arc<Shared>) -> Result<Arc<Channel>, ConnectError> {
     Ok(Arc::new(channel))
 }
 
-/// Wait up to `time` for a start request. False when the session is closing.
 fn wait_for(inbox: &Receiver<Msg>, time: Duration) -> bool {
     let until = Instant::now().checked_add(time);
     loop {
@@ -1201,7 +951,6 @@ fn wait_for(inbox: &Receiver<Msg>, time: Duration) -> bool {
         match inbox.recv_timeout(left) {
             Ok(Msg::Kick) => return true,
             Ok(Msg::Quit) => return false,
-            // Ends of connections that are over.
             Ok(Msg::Closed(_) | Msg::Started(..) | Msg::Notice(..)) => {}
             Err(mpsc::RecvTimeoutError::Timeout) if until.is_some() => return true,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1210,8 +959,6 @@ fn wait_for(inbox: &Receiver<Msg>, time: Duration) -> bool {
     }
 }
 
-/// The runtime went away, for `why` (`gone` in words). A start it cut short failed; a runtime that was up and ended is
-/// just not running, and asking for one again starts one.
 fn gone(i: &mut Inner, why: String, gone: Gone) {
     i.gone = Some(gone);
     let starting = i.starting();
@@ -1221,7 +968,6 @@ fn gone(i: &mut Inner, why: String, gone: Gone) {
     i.state = if starting { State::Failed(why) } else { State::NothingRunning };
 }
 
-/// Follow connection number `conn` until it ends. False when the session is closing.
 fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> bool {
     loop {
         let Ok(message) = inbox.recv() else { return false };
@@ -1247,7 +993,6 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                     continue;
                 }
                 match *result {
-                    // It went before its runtime was heard of, and was handled as gone: it is not ready.
                     Ok(_) if shared.with(|i| i.run == Run::Gone) => shared.with(|i| i.run = Run::Idle),
                     Ok(runtime) => {
                         let untold = shared.with(|i| i.told_other_build.replace(runtime.pid) != Some(runtime.pid));
@@ -1282,16 +1027,13 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                             shared.trouble(text);
                         }
                     }
-                    // The connection ended under the start: `Closed` follows and takes the start along to the next one.
                     Err(StartError::Failed(message)) if message == CLOSED => {}
                     Err(_) if shared.with(|i| i.channel.as_ref().is_some_and(|c| c.is_closed())) => {}
                     Err(StartError::NeedsInstall(items)) => {
-                        // The agreement came after this start began: it goes on with it.
                         if !installed && shared.with(|i| i.wanted.as_ref().is_some_and(|w| w.install) && std::mem::replace(&mut i.run, Run::Idle) == Run::Starting) {
                             shared.begin_start();
                             continue;
                         }
-                        // What the listener tells callers names what is missing, not a restart that would only ask again.
                         shared.listener.restart_needs_install(&items);
                         let text = shared.with(|i| {
                             (i.run, i.job) = (Run::Idle, None);
@@ -1304,7 +1046,6 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                         shared.trouble(text);
                     }
                     Err(StartError::NotRunning) => {
-                        // The wish may have become a start while the attach waited.
                         let restart = shared.with(|i| {
                             i.run = Run::Idle;
                             if i.wanted.as_ref().is_some_and(|wish| !wish.attach) {
@@ -1342,7 +1083,6 @@ fn serve_connection(shared: &Arc<Shared>, inbox: &Receiver<Msg>, conn: u64) -> b
                     shared.trouble(text);
                     shared.listener.disconnected();
                 }
-                // The helper is gone; `Closed` follows.
                 Notice::Lost(message) => {
                     let name = shared.inner().name.clone();
                     shared.trouble(format!("{name}: the helper said: {message}"));

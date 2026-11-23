@@ -1,8 +1,3 @@
-//! The loopback port on this computer for one server's runtime: Pluto's page,
-//! the agent's MCP and the app's calls all go through it, and each connection
-//! is relayed to the runtime of the moment. The port stays the same while the
-//! runtime goes away and comes back.
-
 use std::collections::HashSet;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,34 +9,16 @@ use wire::relay::Mux;
 
 use crate::guard::{AskRestart, Older, Picture, Pictures, Snapshot};
 
-/// How long a connection that arrives while the runtime is away waits for it
-/// to come back, so a short drop goes unnoticed.
 const HOLD: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 2 });
 
-/// Why an agent's call is refused: its session key, the tool and its arguments.
 pub type Refuse = Box<dyn Fn(&str, &str, &Value) -> Option<String> + Send + Sync>;
 
-/// What a listener says when the runtime is away and nothing will bring it
-/// back by itself, as a function of the server's name. The default speaks in
-/// the app's words (its buttons); a caller with other controls says its own.
 #[derive(Clone, Copy)]
 pub struct Messages {
-    /// A restart that was announced (`restarting`) did not bring Julia back.
     pub restart_failed: fn(&str) -> String,
-    /// A restart that was announced did not bring Julia back because the start needs these installed,
-    /// and installing wasn't allowed: what is missing (`wire::needs_text`) and how the user agrees.
     pub restart_needs_install: fn(&str, &[wire::Item]) -> String,
-    /// The server was stopped or disconnected on purpose.
     pub not_connected: fn(&str) -> String,
-    /// Why a call that runs code is refused on a runtime too old to hold a run for the user's answer
-    /// (`Listener::attach`). None, the default: such a runtime runs code as any other. Only a client
-    /// whose runs are held for the user's answer (one that sends `endeavor/set_policy`, as the app
-    /// does) gains anything from the refusal; for any other, no runtime holds a run, old or new.
     pub no_run_gate: Option<fn(&str) -> String>,
-    /// On a runtime another build started that doesn't offer this build's interface, tell each agent
-    /// session so with its first tool result, and in every `session_status` (`guard::Older`). True, the
-    /// default, for the app, whose agent has no other way to know (#239); the plugin's front tells its
-    /// agent itself (`Relay::decorate`), so it turns this off.
     pub tell_other_build: bool,
 }
 
@@ -59,37 +36,22 @@ impl Default for Messages {
 
 pub struct Listener {
     port: u16,
-    /// The server, as the agent is told it.
     name: String,
     upstream: Mutex<Upstream>,
     changed: Condvar,
     closed: AtomicBool,
-    /// Without one (nor `snapshot`), connections are relayed without reading the HTTP in them.
     refuse: Option<Refuse>,
-    /// How the client draws a cell's output when the runtime has no picture of it (`set_snapshot`).
     snapshot: OnceLock<Box<Pictures>>,
-    /// How the client asks the user to restart the runtime when the agent calls `request_restart` (`set_restart`).
     restart: OnceLock<Box<AskRestart>>,
     messages: Messages,
-    /// Where the accept loop hands back its socket once it stops (`hand_over`).
     socket: Mutex<Option<std::sync::mpsc::Receiver<TcpListener>>>,
 }
 
-/// How long `hand_over` waits for the accept loop to stop.
 const STOP: Duration = Duration::from_secs(2);
 
-/// Where a listener's connections go.
 enum Upstream {
-    /// No runtime yet: a connection is closed.
     None,
-    /// `asks`: the runtime says its build or its interface, so it is new enough to hold a run for
-    /// the user's answer. One that says neither runs no code (`Messages::no_run_gate`). `other`: another
-    /// build started it, and it doesn't offer this build's interface (`crate::usable_as_is`); the interface
-    /// its core offers, if it says one. `told`: the agent sessions told so already (`guard::Older`).
     Up { mux: Arc<Mux>, token: String, asks: bool, other: Option<Option<u32>>, told: Arc<Mutex<HashSet<String>>> },
-    /// The runtime was up and is being got back. A connection waits for it up
-    /// to `HOLD`; then an MCP request is answered with `why`
-    /// (`serve_unreachable`), and anything else closed.
     Away { token: String, why: String },
 }
 
@@ -98,20 +60,14 @@ impl Listener {
         Listener::new(name, None, Messages::default())
     }
 
-    /// A listener that parses the agent's MCP calls and fails the ones `refuse`
-    /// gives a reason for (`serve_guarded`).
     pub fn with_refuse(name: &str, refuse: Refuse) -> Result<Arc<Listener>, String> {
         Listener::new(name, Some(refuse), Messages::default())
     }
 
-    /// A listener with `refuse` (if any) and its own wording for the messages it gives.
     pub fn new(name: &str, refuse: Option<Refuse>, messages: Messages) -> Result<Arc<Listener>, String> {
         Listener::on_socket(name, refuse, messages, None)
     }
 
-    /// As `new`, taking connections on `socket` when there is one: a stopped listener's
-    /// (`hand_over`), so the agents that have its port in their MCP URL reach this one, and a
-    /// connection that waits to be taken is taken here. Without one, on a free port.
     pub fn on_socket(name: &str, refuse: Option<Refuse>, messages: Messages, socket: Option<TcpListener>) -> Result<Arc<Listener>, String> {
         let socket = match socket {
             Some(socket) => socket,
@@ -132,12 +88,10 @@ impl Listener {
         });
         let accepting = listener.clone();
         std::thread::spawn(move || {
-            // A failed accept (no file descriptors left, a connection reset before it was taken) doesn't end the listener.
             let mut backoff = Backoff::default();
             loop {
                 let connection = socket.accept().map(|(connection, _)| connection);
                 if accepting.closed.load(Ordering::SeqCst) {
-                    // The socket goes to whoever stopped this, with the connections that still wait on it.
                     let _ = hand_back.send(socket);
                     return;
                 }
@@ -169,7 +123,6 @@ impl Listener {
             Upstream::Up { mux, asks, other, told, .. } => {
                 let (mux, asks, other, told) = (mux.clone(), *asks, *other, told.clone());
                 drop(upstream);
-                // The runtime runs code unless it doesn't ask and this client holds runs for the user's answer.
                 let no_run_gate = if asks { None } else { self.messages.no_run_gate };
                 if self.refuse.is_none() && no_run_gate.is_none() && self.snapshot.get().is_none() && restart.is_none() && other.is_none() {
                     drop(mux.open(connection));
@@ -204,42 +157,23 @@ impl Listener {
         }
     }
 
-    /// From now on, a `view_cell_output` the runtime has no picture for gets `snapshot`'s
-    /// (`serve_guarded`). Set once: a later one is ignored. Call it only where the client takes
-    /// pictures: every connection then goes through the guard, which on Windows doesn't notice an
-    /// agent hanging up during a stream (`wait_readable` isn't ported) until the wait times out.
     pub fn set_snapshot(&self, snapshot: Box<Snapshot>) {
         self.set_pictures(Box::new(move |session, notebook, cell| snapshot(session, notebook, cell).map(Picture::from)));
     }
 
-    /// `set_snapshot`, with pictures that say when they stop short of the output (`Picture::cut`).
     pub fn set_pictures(&self, pictures: Box<Pictures>) {
         let _ = self.snapshot.set(pictures);
     }
 
-    /// From now on, the agent has `request_restart`, and `ask` shows the user its request
-    /// (`guard::AskRestart`): only the user's yes restarts anything. Set once: a later one is
-    /// ignored. Every connection then goes through the guard, as with `set_snapshot`.
     pub fn set_restart(&self, ask: Box<AskRestart>) {
         let _ = self.restart.set(ask);
     }
 
-    /// Relay connections to `mux`'s runtime from now on. `asks`: its `Ready` gave its build or its
-    /// interface. A runtime that gives neither is from before runs were held for the user's answer
-    /// (EndeavorMCP b0cab29) or close to it, and the listener refuses its code runs when the client
-    /// asked for that (`Messages::no_run_gate`). The rule is set with the runtime, so no call reaches
-    /// it before the rule does. `other`: another build started it, and it doesn't offer this build's
-    /// interface, with the interface its core offers if it says one. Each agent session is then told so
-    /// once, `session_status` says it every time, and a refusal of an R notebook's path for want of R
-    /// notebooks says why (`guard::Older`).
     pub(super) fn attach(&self, mux: Arc<Mux>, token: String, asks: bool, other: Option<Option<u32>>) {
         *self.upstream.lock().unwrap() = Upstream::Up { mux, token, asks, other, told: Arc::default() };
         self.changed.notify_all();
     }
 
-    /// The runtime is away while `why` holds, if it was up and is `mux`'s. A
-    /// runtime that is already away keeps the reason it has: a drop never
-    /// replaces a deliberate one.
     fn dropped(&self, why: String, mux: &Arc<Mux>) {
         let mut upstream = self.upstream.lock().unwrap();
         if let Upstream::Up { mux: up, token, .. } = &*upstream
@@ -249,8 +183,6 @@ impl Listener {
         }
     }
 
-    /// The runtime is away on purpose while `why` holds, whether it was away
-    /// for another reason or, if `from_up`, up.
     fn deliberately(&self, why: String, from_up: bool) {
         let mut upstream = self.upstream.lock().unwrap();
         let token = match &*upstream {
@@ -261,17 +193,14 @@ impl Listener {
         *upstream = Upstream::Away { token, why };
     }
 
-    /// The runtime is being restarted.
     pub fn restarting(&self) {
         self.deliberately(format!("Endeavor is restarting Julia on {}. Try again in a moment.", self.name), true);
     }
 
-    /// The restart `restarting` announced didn't work out: Julia didn't come back.
     pub fn restart_failed(&self) {
         self.deliberately((self.messages.restart_failed)(&self.name), false);
     }
 
-    /// The restart `restarting` announced didn't work out because the start needs `items` installed.
     pub fn restart_needs_install(&self, items: &[wire::Item]) {
         self.deliberately((self.messages.restart_needs_install)(&self.name, items), false);
     }
@@ -280,23 +209,18 @@ impl Listener {
         (self.messages.not_connected)(&self.name)
     }
 
-    /// The server was stopped or disconnected on purpose: nothing will
-    /// reconnect it by itself, unlike a drop (`forget`).
     pub fn disconnected(&self) {
         self.deliberately(self.not_connected(), true);
     }
 
-    /// `mux`'s helper has gone, unexpectedly.
     pub(super) fn forget(&self, mux: &Arc<Mux>) {
         self.dropped(format!("Endeavor lost the connection to {} and is reconnecting by itself. Try again in a moment.", self.name), mux);
     }
 
-    /// `mux`'s helper has gone because the client let it go, so nothing will reconnect it.
     pub(super) fn left(&self, mux: &Arc<Mux>) {
         self.dropped(self.not_connected(), mux);
     }
 
-    /// Whether the runtime it relays to may run code (`attach`); none while there is no runtime.
     #[cfg(test)]
     pub(super) fn asks(&self) -> Option<bool> {
         if let Upstream::Up { asks, .. } = &*self.upstream.lock().unwrap() { Some(*asks) } else { None }
@@ -306,14 +230,10 @@ impl Listener {
         self.port
     }
 
-    /// Stop taking connections and close the port. A connection already relayed goes on until its ends close.
     pub fn close(&self) {
         drop(self.hand_over());
     }
 
-    /// Close as `close` does, but keep the socket and give it back, for a new listener to take
-    /// connections on (`on_socket`): the port is never free in between, so nothing else can have it.
-    /// None when the listener was closed already, or its accept loop didn't stop within `STOP`.
     pub fn hand_over(&self) -> Option<TcpListener> {
         if self.closed.swap(true, Ordering::SeqCst) {
             return None;
@@ -321,24 +241,19 @@ impl Listener {
         *self.upstream.lock().unwrap() = Upstream::None;
         self.changed.notify_all();
         let handed = self.socket.lock().unwrap().take()?;
-        // The accept loop is woken by a connection of its own.
         let _ = TcpStream::connect(("127.0.0.1", self.port));
         handed.recv_timeout(STOP).ok()
     }
 
-    /// The MCP URL the agent's config carries; the same for the listener's whole life.
     pub(super) fn mcp_url(&self) -> String {
         format!("http://127.0.0.1:{}/mcp", self.port)
     }
 
-    /// Pluto's start page: the core trades `token` (the pages' token) in the URL for a cookie, and drops it from the URL.
     pub(super) fn page_url(&self, token: &str) -> String {
         format!("http://127.0.0.1:{}/?token={token}", self.port)
     }
 }
 
-/// How long the accept loop waits after a failed accept: 50 ms, doubling at each
-/// failure in a row up to a second, and 50 ms again once one succeeds.
 struct Backoff {
     pause: Duration,
     failing: bool,
@@ -354,7 +269,6 @@ impl Backoff {
     const FIRST: Duration = Duration::from_millis(50);
     const LAST: Duration = Duration::from_secs(1);
 
-    /// How long to wait now, and whether this is the first failure of a run, which is the one to report.
     fn failed(&mut self) -> (Duration, bool) {
         let first = !self.failing;
         let pause = self.pause;
@@ -368,11 +282,9 @@ impl Backoff {
     }
 }
 
-/// Two ends of a loopback connection: one to read and write here, one for the relay.
 fn loopback_pair() -> std::io::Result<(TcpStream, TcpStream)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let ours = TcpStream::connect(listener.local_addr()?)?;
-    // Another process may reach the temporary port first.
     let theirs = loop {
         let (theirs, from) = listener.accept()?;
         if from == ours.local_addr()? {
@@ -384,9 +296,6 @@ fn loopback_pair() -> std::io::Result<(TcpStream, TcpStream)> {
     Ok((ours, theirs))
 }
 
-/// What the agent is told of a runtime on `name` that another build started, whose core offers
-/// `interface`; `how` is how it gets restarted. As the plugin's front says it (`other_version_text`),
-/// with this client's way to restart in place of `stop_machine`.
 fn older_notice(name: &str, interface: Option<u32>, how: &str) -> String {
     format!(
         "Endeavor on {name} was started by {} version, and it keeps running as it is. Some notebook tools may not work as described, or may be refused. If that happens: {how}",

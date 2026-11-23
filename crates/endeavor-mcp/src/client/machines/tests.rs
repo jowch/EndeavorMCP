@@ -254,7 +254,6 @@ fn fields_this_version_lacks_survive_a_rewrite_and_go_with_a_removed_machine() {
     file.save(changed).unwrap();
     let now = raw(&path);
     assert_eq!((now["machines"][0]["port"].clone(), now["machines"][0]["color"].clone(), now["machines"][1]["color"].clone()), (json!(2222), json!("red"), json!("blue")), "{now}");
-    // A record built anew for a known id keeps the file's own extra fields.
     file.save(machine("b", "b")).unwrap();
     assert_eq!(raw(&path)["machines"][1]["color"], "blue");
 
@@ -325,7 +324,6 @@ fn a_save_that_expected_another_list_writes_nothing() {
     file.save_expecting(machine("a", "lab"), None, &by_name("lab")).unwrap();
     file.save(machine("b", "other")).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
-    // A new machine whose id is taken now, and one whose name now picks another record.
     assert!(file.save_expecting(machine("b", "lab2"), None, &by_name("lab2")).unwrap_err().contains("changed while Endeavor was connecting"));
     assert!(file.save_expecting(machine("c", "lab"), None, &by_name("lab")).unwrap_err().contains("changed"));
     assert!(file.save_expecting(machine("b", "other"), Some("a"), &by_name("other")).unwrap_err().contains("changed"));

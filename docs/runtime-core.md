@@ -244,6 +244,263 @@ and 3), and for the app:
   app can tell a runtime from an older build and hold back what that runtime
   can't do.
 
+## How the core runs (`core.rs`)
+
+### Its process and its record
+
+- The helper starts `endeavor core …` with `ENDEAVOR_TOKEN`,
+  `ENDEAVOR_LAUNCHER` and `ENDEAVOR_BUILD` (the app build it came from, which
+  it reports to the app) in its environment. Its stdout and stderr are the
+  runtime's log, which Julia shares. Secrets go in the environment, not argv,
+  which `ps` shows to every user.
+- Started without the app (`standalone`), the environment also has
+  `ENDEAVOR_FOLDER` (the notebooks' folder) or `ENDEAVOR_NO_FOLDER` (work in
+  the home folder), `ENDEAVOR_PORT`, `ENDEAVOR_HOST_TOOLS` (the host name
+  under which every session gets the host tools) and `ENDEAVOR_IDLE_HOURS`
+  (48 when not set). `ENDEAVOR_EXIT_IDLE` ends the runtime once no notebook
+  has been open that long; a client asks for it on a runtime it starts in the
+  background, which has no one else to stop it.
+- The core holds the start lock until `runtime.json` is written, so a client
+  can tell a start under way from one that died: whoever sees the lock free
+  and no record knows the start died. Everything a reader of the record needs
+  is set before it is written. The record is written whole and readable only
+  by this user, so a reader never sees half of it and nobody else sees the
+  token.
+- The record has the core's pid and start time (which tell it from a later
+  process given its pid), its port, launcher, node, job (so a reconnect can
+  find the job with `squeue`), tokens, `exits_when_idle` and the network
+  settings it started with.
+- Relative paths in the tools, and Julia's, start in the notebooks' folder,
+  never in the client's working folder, which may be one a plugin update
+  removes.
+- The engines' key is made at each start and kept in no file. Julia's and R's
+  bridges run cells without the core's run gate, so they take neither the MCP
+  bearer token, which an agent's config carries, nor the pages' token.
+
+### The interface number
+
+`INTERFACE`, recorded as `interface`, numbers what a core offers the
+processes that use it: the notebook tools' names and arguments at `/mcp`,
+the app's `/endeavor/call`s and `/endeavor/events`, and the record's own
+fields. A caller of another build uses a runtime with the same number as it
+is, and treats one with another number, or none, as another build's.
+
+Two builds with one number must take each other's calls both ways: a newer
+front meets an older core as often as the reverse. So raise it with any
+change a caller of the build before would get wrong, additions included (a
+tool, an argument, a call), and with a change in what one returns or does
+while its arguments stay the same. A record field older callers ignore and
+newer ones do without (`network`) doesn't count, nor do descriptions or
+changes inside the core. Tests in `mcp.rs` fail when the tools' names or
+arguments change, or a call or record field is added, removed or renamed.
+Nothing catches a change in what a call or the events stream returns.
+
+### Julia
+
+Julia (`julia boot.jl`, with Pluto) is the core's child, on private ports
+the core picks (Pluto's and Julia's bridge, both held at once so the OS can't
+hand out the same port twice).
+
+- **When it starts.** Without `--julia-when-needed`, at once, and
+  `runtime.json` is written once Julia is ready. With it, the first time
+  something needs it (see "Processes" above). A warm start, which nothing
+  asked for yet, never downloads Julia. A cluster job submitted before any
+  notebook needed Julia is handed the one the login node found or downloaded
+  (`endeavor/use_julia`, #80).
+- **Its flags** must keep the compile cache's key the same as
+  `standalone::precompile_command`'s, or that background precompile is
+  wasted.
+- **One thread runs every start**, for the core's life: on Linux a process
+  ends with the thread that started it (`PR_SET_PDEATHSIG`), and a request's
+  thread ends with its connection.
+- **No console.** Julia is a console program, and the core may have none to
+  give it (in the app, the core is the app's own GUI program), so on Windows
+  it starts with no window. Pluto's workers share Julia's.
+- **The wait.** A call that needs Julia waits up to 30 s (`JULIA_WAIT`), well
+  within the 45 s an agent's call waits, and less if the call already waited
+  (for the user's answer, say), so the notebook's open has some of the 45 s.
+  Then it is told the step, how long so far, and to call again now: each call
+  is the wait. An agent told to try again "in a minute", with no way to
+  pause, gave up after a dozen tries (#153).
+- **A stall.** A start with no sign of progress (a new step, or new lines in
+  the log) for 30 minutes fails, and Julia is ended so the next call starts
+  it afresh. A first start installs and compiles Pluto's packages for
+  minutes, logging each one. The longest quiet stretch is compiling Pluto
+  itself: 75 s on a Linux cloud machine with Julia 1.12.6 (2026-10-10). 30
+  minutes leaves room for a machine twenty times slower, such as Windows with
+  antivirus scanning each file. It may be stuck on anything (a lock, a network
+  share, a hung precompile).
+- **Failures** are said once to the next call that needs Julia, and that call
+  tries again after. `endeavor/julia_status` reads where Julia is without
+  starting it, and doesn't count as saying a failure. The app's Retry is
+  `endeavor/start_julia`.
+- **Once it ran**, Julia ending ends the core, so there is never a second
+  `Ready`. Pluto's page is told the notebooks' folder before Julia counts as
+  ready, since whoever opens a notebook next may rely on it.
+- **Windows pids.** A pid alone may name another process once Julia has gone,
+  so Julia is killed only through its pid and start time
+  (`winproc::start_time`, #464).
+
+### Stopping
+
+- Julia shares the core's process group, which the helper made, so the
+  helper's signals to the group reach both. The core blocks the stop signals
+  before any thread starts, for one thread to take, and keeps the mask it
+  had for Julia and R.
+- A stop signal to the core alone goes on to Julia. A Julia that is ready is
+  first asked to shut down through its bridge, and signalled only if that
+  fails or it still runs `stop_grace` (10 s) later: a SIGTERM while Julia
+  compiles can hang its exit for good (#509). A Julia still starting has no
+  bridge and gets the signal. A second signal (a second Ctrl-C) is passed
+  straight on.
+- If a signal passed on doesn't end Julia (#316: once a core went on after a
+  SIGTERM; a real Julia with two notebooks ends in about 4 s), the core asks
+  it to shut down as `endeavor stop` does, then kills it. A runtime that
+  ends on its own (idle, or left and no longer wanted) does the same (#458).
+- The core exits the way Julia did, so the helper reports the same status.
+- **The lifeline.** With `--lifeline FD` (from `connect --own-with-client`),
+  until the helper says "k" the core watches a pipe from it. Its end without
+  "k" means the start was abandoned: the core ends itself, Julia and its
+  process group as the helper's own cancel would, and SIGKILLs the group if
+  the core still runs ten seconds later. A helper that is killed outright
+  can't stop the start it began, and an ssh server may kill it when its
+  client goes instead of ending its input (#95). On Windows the lifeline is
+  an inherited handle and the core's Job Object takes Julia along (#144).
+  After "k", a killed helper leaves the runtime running, as a detach does.
+- **When the core dies abruptly** (an OOM kill, `kill -9`), nothing is left to
+  stop Julia. Linux sends it SIGTERM (`PR_SET_PDEATHSIG`), which can hang it
+  mid-compile (#509), and macOS has no such signal. So a shell waits on a
+  pipe whose other end only the core holds: a line on it means Julia ended,
+  its end without one that the core died. Then it signals Julia (macOS) and
+  kills it `stop_grace` later if the same pid with the same start time still
+  runs. On Windows the core's job ends Julia with it.
+
+### R
+
+R's adapter (`runtime/r/adapter.R`, with Ember) starts the first time an R
+notebook is opened.
+
+- **Ember** comes from its r-universe repository, which builds Ember's latest
+  main, into a folder of Endeavor's own (one for Endeavor's own R, kept apart
+  from the user's R, and one for any other), unless the core has
+  `--r-library`. Each start updates it if r-universe has a newer build. If the
+  adapter doesn't start with a new build, it starts with the one before, and
+  that build is not tried again; the agent is told with its next notebook.
+  `ember.dcf` records the build in use, the one before and the ones that
+  failed. A build replaced is dated for `install.R`'s cleanup a week later,
+  since another runtime may have it loaded.
+- **Waiting.** A first install takes minutes (packages build from source),
+  longer than an agent's call may wait. A call waits as long as Julia's
+  start, then answers `r_installing`, and the install goes on. A call made
+  while it runs waits for it too (#175). A first install that ends after its
+  call stopped waiting starts R at once, so the next call finds it ready and
+  `r_status` never reads `not_started` in between (#148). An update that
+  takes long goes on too, and R starts with the Ember installed.
+- **A failed install** is said to every call for `retry_after` (60 s), then
+  the next call tries again: long enough that agents retrying at once don't
+  each start one (six in a minute, #183), short enough that what the user
+  fixed (the network, a compiler) is tried without a restart. The words say
+  nothing was tried for this call, or an agent whose user just installed a
+  compiler says it is still missing.
+- **Endeavor's own R** is offered only with `--own-r`, on the user's own
+  computer and only on a Mac. A `serve` or `mcp` runtime is always standalone,
+  and a server's never gets it. Through `endeavor mcp` the agent installs it
+  with `use_machine` once the user agrees; the app's agents have none, so
+  there the user installs it from the notebook pane or Settings. R starts
+  once for every caller of a runtime the app and the plugin share, so its
+  offer is worded for whoever started the runtime.
+- **A compiler.** On a Mac the core asks whether the developer tools are
+  installed without running `cc`, which opens an installer on a Mac without
+  them. Elsewhere it looks for `cc` and `make` on the PATH.
+- **The user's settings.** R isn't run `--vanilla`: notebooks run in it, so
+  they get the user's ~/.Renviron and ~/.Rprofile (a library in R_LIBS_USER,
+  a repos option, GITHUB_PAT) and the site's. R reads the home files only when
+  the folder it starts in has none, so the core names the home .Renviron, or
+  a project's (renv's, say) would be read and could take Ember's libraries
+  away. On Windows R looks in R_USER (Documents), so it keeps its own rules.
+  An error in a profile stops Rscript before the adapter runs, so R reads an
+  empty profile and the adapter runs the user's, where an error is logged and
+  R goes on. Endeavor's own R keeps its own settings.
+- **The signal mask.** R starts with the mask the core was started with, not
+  the core's, which blocks Ctrl-C, SIGTERM and SIGHUP. R would pass a blocked
+  mask to Ember's workers, where a cell's interrupt and the supervisor's
+  SIGTERM then wait forever (#161).
+- **Output.** What R prints goes to the log, never to the core's stdout,
+  which is the MCP channel for `endeavor mcp`. R's last stderr lines say why
+  it ended. A killed process can close its stderr a moment before it can be
+  reaped, so its exit is waited for, within the same second.
+- **Ember's page secret** is the core's to make and is handed to R: hex,
+  since it goes into URLs and a cookie, and 32 random bytes, more than
+  Ember's own `random_secret(32)`. Ember takes it in the query, the only way
+  its WebSocket does, and the Host stays the browser's, since Ember refuses a
+  WebSocket whose Origin isn't its Host.
+- Ember, its install and R's adapter haven't been tried on Windows.
+
+### Python
+
+Python notebooks' adapter (`runtime/marimo/adapter.py`, which runs marimo)
+starts the first time a Python notebook is opened or made. uv runs it, with
+the packages in `requirements.txt`, and each notebook gets its own uv
+environment from its header. uv is found on the PATH, where its installer
+puts it, or in Homebrew's folder.
+
+- The first start may download Python and marimo. A call waits as long as
+  Julia's start, then answers `python_installing`, and the start goes on for
+  up to 300 s (`MARIMO_START`) for the next call to wait on.
+- Only a runtime on this computer starts it: the plugin's, or the app's
+  (`--own-r`). A server's runtime has no uv set up (#354). The app's own
+  sessions are refused per caller (#358, `mcp::PYTHON_NOT_IN_APP`).
+- It stops with SIGTERM first: the adapter stops marimo, which stops each
+  notebook's kernel.
+- marimo serves under `/marimo` itself (`--base-url`) and takes its token as a
+  bearer, so the browser's cookie and authorization go no further. Its
+  terminal and its file and home listings are refused: they reach the user's
+  computer beyond the notebook. A page or WebSocket for a file that isn't an
+  open notebook allowed to run is refused, since marimo would build its
+  environment, which runs code (safe preview). marimo decodes the path before
+  it routes it, and takes the last `file` of a query, so the core decodes
+  both first, refuses a path that decodes to something odd, and allows only
+  one `file`.
+
+### Left to the plugin
+
+- **The app quits** (`endeavor/leave_to_plugin`, app #232): if the plugin is
+  in the runtime (`Notebooks::shared`), it is left running, marked as ending
+  when idle so the plugin's fronts treat it as theirs, and ends once the
+  plugin has been out of it for `LEFT_GRACE` (10 minutes): long enough for
+  Claude Code to restart and open its notebook again. An idle limit of Never
+  counts as 48 hours there (`LEFT_IDLE_HOURS`), since the user asked for it to
+  stop with the app.
+- **The app's helper leaves it running** (`endeavor/end_when_idle`, app
+  #274): its notebooks go on until each is idle for the idle limit, and once
+  none is open the runtime ends `LEFT_GRACE` later.
+- **The app is back** (`endeavor/keep_for_app`): the runtime goes back to the
+  lifetime it started with, and the watch ends (a generation number moves on),
+  so no front of another build stops it as the plugin's own.
+
+### Serving the port
+
+- A thread per client; there are only a few, the helper's relayed streams. A
+  failed accept doesn't close the port, and a pause keeps a lasting failure
+  from spinning.
+- `/mcp` has no server-initiated stream, and a session lasts as long as the
+  runtime: DELETE doesn't end one.
+- The runtime's own link (`/`) before anything asked for Julia doesn't start
+  it, since that can mean a download: it waits for a click.
+  `/?start-julia` is any other Pluto page as far as Julia goes, and a browser
+  opening one starts Julia and sees how that goes until it's ready.
+- A browser without the cookie gets a page naming `endeavor open`, since the
+  link in a tool result has no token. On Windows the command is in
+  PowerShell's form (`& "C:\…\endeavor.exe" …`), since a quoted path alone is
+  a string there.
+- Who may reach which route is in [one-port.md](one-port.md). Loopback isn't
+  private on a shared machine, so the tokens keep other local users out, and
+  a DNS-rebinding page sends a foreign Host.
+- While the app can't reach the runtime, its listener answers one request
+  and closes (`serve_unreachable`). The agent's MCP client gets an answer
+  instead of a reset, which Claude Code counts toward giving up on the
+  server for good.
+
 ## Next
 
 1. **Ember and its adapter** (the build order in Ember's repository).

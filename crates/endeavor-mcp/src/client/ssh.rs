@@ -1,12 +1,3 @@
-//! Reaching a runtime on a server over SSH: one system `ssh` runs a short
-//! bootstrap script that installs the helper and `runtime/` if this build's
-//! aren't there yet, then becomes `endeavor connect`, whose frames use the
-//! rest of ssh's stdin and stdout. From there on it's the same channel as a
-//! helper on this computer's (`Channel`). Unless `Options::allow_install`, a
-//! server without the helper is only looked at: nothing is written there.
-//! Installing what a start needs (such as Julia) is not part of that: it is
-//! asked for with each start (`StartOptions::install`).
-
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -23,51 +14,28 @@ use super::listener::Listener;
 use crate::paths::PICK_STATE_DIR_SH;
 use super::machines::{Launcher, Server};
 
-/// What happened so far while connecting.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
-    /// The bootstrap script answered: ssh is in.
     Connected { os: String, arch: String },
-    /// The helper and runtime for this build were just installed (or already there).
     Helper { installed: bool },
-    /// What the runtime starts with, such as Julia.
     Found { name: String, version: String, path: String },
-    /// A line of Julia's download or the runtime's boot log.
     Progress(String),
-    /// A cluster job for Julia was submitted.
     Submitted { job: String, summary: String },
-    /// The job `job` waits in the queue (Slurm's state and reason); once it runs, state RUNNING and the
-    /// node as `reason`.
     Queued { job: String, state: String, reason: String },
-    /// The runtime is up (or was already running) and its bridge answered through the listener.
     Started { node: String, reattached: bool },
-    /// `test` on a cluster: what Slurm says there.
     Slurm(wire::slurm::Scheduler),
-    /// `test` is done with it: stopped, or left running as it was found.
     Finished { stopped: bool },
 }
 
-/// How ssh signs in.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Auth {
-    /// `-o BatchMode=yes`: ssh fails instead of asking anything. Keys, the
-    /// agent and `~/.ssh/config` do the signing in.
     Batch,
-    /// No batch mode, and these variables set on ssh: for a caller that answers
-    /// ssh's prompts itself (through `SSH_ASKPASS`; `Asker::env` gives them). On
-    /// Windows `SSH_ASKPASS_REQUIRE` is always `force`, so variables without an
-    /// `SSH_ASKPASS` make a sign-in that needs an answer fail rather than wait.
     Env(Vec<(String, String)>),
 }
 
-/// How the bootstrap script reaches the server.
 #[derive(Clone, Debug)]
 pub enum Transport {
     Ssh { host: String, port: Option<u16> },
-    /// The script through a local `sh`, parsed the way a login shell on the
-    /// server parses ssh's command: a stand-in for ssh in tests. `ask` is a
-    /// shell line that runs first and has to succeed, as ssh's prompts and
-    /// refusals come before the script.
     Shell { env: Vec<(String, String)>, ask: Option<String> },
 }
 
@@ -82,21 +50,11 @@ impl Transport {
             Transport::Ssh { host, port } => {
                 valid_host(host)?;
                 let mut command = Command::new(ssh_program());
-                // A keepalive every 10 s of silence, and ssh quits after two go
-                // unanswered: a dead link ends the helper's channel within
-                // about 30 s, even while nothing else is sent.
                 command.args(["-T", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2"]);
-                // A host that doesn't answer is given up on after 20 s. Not on Windows: its
-                // ssh then stops at the first address that refuses (IPv6 `localhost`, say)
-                // instead of trying the next (#35). There, Windows' own connect gives up on
-                // each address that doesn't answer after about 21 s. What that doesn't cover
-                // is a server that takes the connection and then says nothing (#462).
                 if !cfg!(windows) {
                     command.args(["-o", "ConnectTimeout=20"]);
                 }
                 command.args(["-o", "ForwardX11=no"]);
-                // Windows' ssh has no connection sharing: a ControlMaster line in a
-                // config copied from a Mac would make the connect fail there.
                 if cfg!(windows) {
                     command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
                 }
@@ -118,7 +76,6 @@ impl Transport {
         };
         if let Auth::Env(env) = auth {
             command.envs(env.iter().map(|(k, v)| (k, v)));
-            // Windows' ssh uses SSH_ASKPASS only when forced; otherwise it waits on a console nobody sees.
             if cfg!(windows) {
                 command.env("SSH_ASKPASS_REQUIRE", "force");
             }
@@ -134,9 +91,6 @@ impl Transport {
         }
     }
 
-    /// What to type in a terminal to sign in to the server by hand, with the ssh
-    /// Endeavor runs (`ssh_program`): on Windows its path, with forward slashes
-    /// so that PowerShell, cmd and Git Bash all take it.
     fn login_command(&self) -> String {
         let ssh = ssh_program().display().to_string().replace('\\', "/");
         match self {
@@ -147,10 +101,6 @@ impl Transport {
     }
 }
 
-/// The ssh to run: on Windows, Windows' own OpenSSH when it is installed, and
-/// otherwise the first `ssh` on the PATH. In Git Bash that first one is Git's,
-/// which signs in with the Windows user name as it is spelled (`JDoe`) where
-/// Windows' lowercases it, and may read another `~/.ssh` than `%USERPROFILE%\.ssh`.
 fn ssh_program() -> PathBuf {
     #[cfg(windows)]
     {
@@ -164,11 +114,6 @@ fn ssh_program() -> PathBuf {
     PathBuf::from("ssh")
 }
 
-/// On Windows, start `command` without a console window: ssh is a console
-/// program, and from the app, which has no console, each one would open a window.
-/// The same goes for the curl or wget that fetches a server's helper (`release`),
-/// and for Julia, which the core starts (in the app, the core has no console either).
-/// The app uses it for the console programs it starts itself. Elsewhere it does nothing.
 #[cfg(windows)]
 pub fn no_window(command: &mut Command) {
     use std::os::windows::process::CommandExt;
@@ -178,10 +123,6 @@ pub fn no_window(command: &mut Command) {
 #[cfg(not(windows))]
 pub fn no_window(_command: &mut Command) {}
 
-/// Whether `host` can be given to ssh as the destination: an alias, a name,
-/// an address (IPv6 has colons) or `user@host`, where the user, which may hold
-/// an `@` itself, and the host are not empty. A leading `-` would be an option
-/// to ssh, and anything else is not a host name.
 pub fn valid_host(host: &str) -> Result<(), String> {
     if host.is_empty() {
         return Err("Enter an SSH host: an alias from ~/.ssh/config, or user@host.".into());
@@ -190,7 +131,6 @@ pub fn valid_host(host: &str) -> Result<(), String> {
         Some((user, name)) => (Some(user), name),
         None => (None, host),
     };
-    // A name with a colon is an IPv6 address, which has at least two.
     let address = !name.contains(':') || name.matches(':').count() >= 2;
     if host.starts_with('-') || !host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | ':')) || name.is_empty() || user == Some("") || !address {
         return Err(format!("\"{host}\" isn't an SSH host name."));
@@ -198,71 +138,22 @@ pub fn valid_host(host: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// What `connect` needs besides the server.
 pub struct Options<'a> {
     pub auth: Auth,
-    /// Where the helper and `runtime/` are installed on the server, in a
-    /// folder named for this build. A leading `~/` is the server's home.
-    /// Empty is `~/.cache/endeavor`.
     pub root: String,
-    /// The runtime's state folder on the server: an absolute path, or one
-    /// relative to `root`; a leading `~/` is the server's home. `Server::launcher`
-    /// has the app's name for it.
-    /// Empty is the helper's own default, the folder `serve` and `mcp` use.
     pub state: String,
-    /// Julia's `JULIA_DEPOT_PATH` on the server. A leading `~/` in its first
-    /// entry is the server's home. Empty is `<root>/depot:`.
     pub depot: String,
-    /// A runtime this connect starts ends itself once no notebook has been
-    /// open for the idle limit (`endeavor connect --exit-idle`). One that is
-    /// already running is left as it was started.
     pub exit_idle: bool,
-    /// The runtime this connect starts finds and starts Julia only when something needs it
-    /// (`endeavor connect --julia-when-needed`). The plugin's machines ask for it; the app doesn't yet.
     pub julia_when_needed: bool,
-    /// The user agreed that Endeavor installs its helper on the server. Without
-    /// it a server that lacks this build's helper is only looked at, and
-    /// `connect` ends with `ConnectError::needs`. The app, which asks its user
-    /// itself, passes true. (What a start needs is asked for by each start, `StartOptions::install`; `test` uses this for both.)
     pub allow_install: bool,
-    /// How the helper runs the runtime; None is the server record's way (`Server::launcher`).
-    /// `Hello::launcher` says what an `Auto` became.
     pub launcher: Option<Launcher>,
-    /// The helper binary to send to a server whose `uname -s` is `os` and
-    /// `uname -m` is `arch`, as `linux` and `x86_64` (`arm64` as `aarch64`).
-    /// Asked only when the server has no helper of this build yet and
-    /// `allow_install` is true.
     pub helper: &'a (dyn Fn(&str, &str) -> Result<PathBuf, String> + Sync),
 }
 
-/// Why a server can't be set up when `Options::helper` has no binary for it.
 pub fn no_helper(os: &str, arch: &str) -> String {
     format!("Endeavor has no runtime helper for {os} {arch} servers.")
 }
 
-/// The script ssh runs on the server, as one line: the server's login shell
-/// (sh, bash, zsh, fish or csh) gets it inside single quotes, so it holds no
-/// quote, backslash, `!` or newline.
-///
-/// It reads eight lines (the install root, the state folder, the depot, the
-/// helper's Julia flag and its value, its launcher, and its R flag and value;
-/// see `Options` for the empty ones), settles a launcher of `auto` (`PICK_LAUNCHER_SH`), and prints `ENDEAVOR <os> <arch> have`, or when this build's
-/// helper isn't installed `ENDEAVOR <os> <arch> need <seen> <older|first> <folder>`,
-/// the folder being the rest of the line:
-/// `seen` is `none`, or for a runtime recorded in the state folder the helper
-/// would use (read with `sh`, `cat`, `kill`, `ps` and `squeue` alone, as the
-/// helper isn't there to ask): `process:PID` (alive, and its command is a
-/// core's), `process-recorded:PID` (alive, and `ps` couldn't say what it is),
-/// `job:ID` (Slurm lists it as pending or running) or `job-recorded:ID` (no
-/// `squeue`, or it didn't answer). `older` says that a complete helper of
-/// another build is installed, and `folder` where this build's would go. If it
-/// needs the install, it then reads a byte count and that many bytes of tar,
-/// unless the client ends it first. Then it becomes the helper. The values come
-/// over stdin and not in the script, so no path can break it; the line is
-/// written with `printf %s`, which reads no escapes, and the ids are checked to
-/// be digits. `exit_idle` adds the helper's `--exit-idle`, `julia_when_needed` its `--julia-when-needed`,
-/// and `own_with_client` its `--own-with-client`; being fixed words, they are in the script and not in the
-/// lines it reads.
 pub fn bootstrap_script(version: &str, exit_idle: bool, julia_when_needed: bool, own_with_client: bool) -> String {
     [
         &format!("v={version}"),
@@ -291,12 +182,8 @@ pub fn bootstrap_script(version: &str, exit_idle: bool, julia_when_needed: bool,
     .join("; ")
 }
 
-/// Shell for the bootstrap script: a launcher (`$ln`) of `auto` becomes `slurm` when `sinfo` is
-/// a file in a folder of `$PATH` or of `wire::slurm::FOLDERS` (where `wire::slurm::has` looks), else
-/// `process`, as the helper itself would settle it. The helper is then started with the settled one.
 pub(crate) const PICK_LAUNCHER_SH: &str = r#"if [ "$ln" = auto ]; then ln=process; pp="$PATH:/usr/bin:/usr/local/bin:/opt/slurm/bin"; while [ -n "$pp" ]; do pb=${pp%%:*}; if [ -n "$pb" ] && [ -f "$pb/sinfo" ]; then ln=slurm; fi; case "$pp" in *:*) pp=${pp#*:};; *) pp=;; esac; done; fi"#;
 
-/// The eight lines the script reads first.
 fn preamble(server: &Server, options: &Options) -> Result<Vec<u8>, String> {
     let [flag, value] = server.julia_args();
     let [r_flag, r_value] = server.r_args();
@@ -319,13 +206,10 @@ fn preamble(server: &Server, options: &Options) -> Result<Vec<u8>, String> {
     Ok(lines.iter().map(|(_, line)| format!("{line}\n")).collect::<String>().into_bytes())
 }
 
-/// The files of `runtime/`, built into this crate, as (path in the tar,
-/// contents, executable), sorted.
 fn runtime_files() -> Vec<(String, Vec<u8>, bool)> {
     crate::embedded::RUNTIME_FILES.iter().map(|(path, contents)| ((*path).to_owned(), contents.to_vec(), false)).collect()
 }
 
-/// A tar stream (ustar) of the helper as `endeavor` plus `runtime/`.
 fn install_tar(helper: &Path) -> Result<Vec<u8>, String> {
     let helper_bytes = std::fs::read(helper).map_err(|e| format!("{}: {e}", helper.display()))?;
     let mut entries = vec![("endeavor".to_owned(), helper_bytes, true)];
@@ -333,7 +217,6 @@ fn install_tar(helper: &Path) -> Result<Vec<u8>, String> {
     let mut tar = Vec::new();
     let mut dirs: Vec<String> = Vec::new();
     for (path, contents, executable) in &entries {
-        // Parent folders first, each once.
         let mut at = 0;
         while let Some(slash) = path[at..].find('/') {
             let dir = &path[..at + slash];
@@ -380,13 +263,8 @@ fn tar_entry(tar: &mut Vec<u8>, path: &str, contents: &[u8], mode: u32, kind: u8
     Ok(())
 }
 
-/// Lets another thread give up on a connect and what follows on its channel
-/// (`start`, `test`), killing its ssh.
 #[derive(Default)]
 pub struct Cancel {
-    /// The ssh the connect started, from then until it has exited and before it
-    /// is reaped (the channel's reader does that), so the pid is never another
-    /// process's.
     pid: Arc<Mutex<Option<u32>>>,
     cancelled: AtomicBool,
 }
@@ -404,7 +282,6 @@ impl Cancel {
         !self.cancelled.load(Ordering::SeqCst)
     }
 
-    /// ssh `pid` has exited, and it is no longer this connect's to kill.
     fn finished(pid_slot: &Mutex<Option<u32>>, pid: u32) {
         let mut slot = pid_slot.lock().unwrap();
         if *slot == Some(pid) {
@@ -413,15 +290,12 @@ impl Cancel {
     }
 }
 
-/// ssh runs in its own process group, which ends with it: the askpass it may
-/// be waiting on, or the shells of `Transport::Shell`.
 #[cfg(unix)]
 fn kill_group(pid: u32) {
     // SAFETY: plain syscall.
     unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
 }
 
-/// The child is moved into the channel's thread, so only its pid is left.
 #[cfg(windows)]
 fn kill_group(pid: u32) {
     let mut taskkill = Command::new("taskkill");
@@ -430,51 +304,32 @@ fn kill_group(pid: u32) {
     let _ = taskkill.status();
 }
 
-/// `uname`'s words as the helper's folders name platforms: `linux` and `aarch64`.
 fn platform(os: &str, arch: &str) -> (String, String) {
     (os.to_lowercase(), if arch == "arm64" { "aarch64" } else { arch }.to_owned())
 }
 
-/// This computer's platform in the same words (`darwin` for macOS), as
-/// `Options::helper` is asked for a server's.
 pub fn this_platform() -> (String, String) {
     (if cfg!(target_os = "macos") { "darwin" } else { std::env::consts::OS }.to_owned(), std::env::consts::ARCH.to_owned())
 }
 
-/// A runtime recorded on a server, found without the helper.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Running {
-    /// A process, by its pid on the server. `checked`: its command is a
-    /// runtime's; false when `ps` couldn't say, so that it is only known to be alive.
     Process { pid: u32, checked: bool },
-    /// A Slurm job recorded for the cluster, by its id. `listed`: Slurm lists it
-    /// as pending or running; false when `squeue` wasn't there or didn't answer,
-    /// so that it is only known to be recorded.
     Job { id: String, listed: bool },
 }
 
-/// What a connect found on a server that lacks this build's helper, when it
-/// wasn't allowed to install it (`Options::allow_install`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NeedsInstall {
-    /// `uname`'s words for the server, as `Linux` and `x86_64`.
     pub os: String,
     pub arch: String,
-    /// Where this build's helper would be installed on the server.
     pub folder: String,
-    /// About how much would be sent there, in bytes. Not known for a server of
-    /// another platform than this computer's, whose helper isn't fetched before
-    /// the install is allowed.
     pub bytes: Option<u64>,
-    /// A helper of another build is installed there already; this one goes beside it.
     pub update: bool,
-    /// A runtime recorded in the folder the helper would use.
     pub running: Option<Running>,
 }
 
-/// `seen` of the script's `need` line.
 fn parse_seen(seen: &str) -> Option<Option<Running>> {
     let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
     match seen.split_once(':') {
@@ -487,36 +342,23 @@ fn parse_seen(seen: &str) -> Option<Option<Running>> {
     }
 }
 
-/// About what an install sends from this computer: the helper as it runs
-/// here and the runtime's files.
 fn this_copy_bytes() -> Option<u64> {
     let helper = std::fs::metadata(std::env::current_exe().ok()?).ok()?.len();
     Some(helper + crate::embedded::RUNTIME_FILES.iter().map(|(_, contents)| contents.len() as u64).sum::<u64>())
 }
 
-/// Why a connect failed, and whether trying again by itself could help: it
-/// can't when the user has to act first (a key to add, a host to accept) or
-/// the request itself is wrong, and can when the network or the server was
-/// the trouble, a name that doesn't resolve (a laptop that just woke up) included.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConnectError {
     pub message: String,
     pub retry: bool,
-    /// Set when nothing failed but the server needs the helper installed first
-    /// and that wasn't allowed: nothing was written there, and `retry` is false.
     pub needs: Option<NeedsInstall>,
 }
 
-/// Run the bootstrap on `server` and wait for the helper's hello. The runtime
-/// starts later, when the channel is asked to (`start`). A failure says whether
-/// retrying could help.
 pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), ConnectError> {
     connect_as(server, transport, options, false, cancel, on)
 }
 
-/// `connect`; with `own_with_client`, a runtime this connection starts is stopped if the connection
-/// ends without a Stop or Detach, while it starts or after (`endeavor connect --own-with-client`).
-#[allow(clippy::result_large_err)] // as `connect`'s, which callers already take
+#[allow(clippy::result_large_err)]
 fn connect_as(server: &Server, transport: &Transport, options: &Options, own_with_client: bool, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), ConnectError> {
     let wrong = |message: String| ConnectError { message, retry: false, needs: None };
     let preamble = preamble(server, options).map_err(wrong)?;
@@ -546,10 +388,8 @@ fn connect_as(server: &Server, transport: &Transport, options: &Options, own_wit
         }
     };
 
-    // The script reads these before it says anything; a failed write shows as the script's end.
     let _ = stdin.write_all(&preamble).and_then(|_| stdin.flush());
 
-    // Login scripts may print things before the script's own line.
     let (os, arch, found) = loop {
         let mut bytes = Vec::new();
         match stdout.read_until(b'\n', &mut bytes) {
@@ -619,11 +459,6 @@ fn connect_as(server: &Server, transport: &Transport, options: &Options, own_wit
     }
 }
 
-/// Start the runtime on a connected server's channel; `on` hears what was
-/// found, the job queueing, and the runtime's log. `notice` hears if the runtime
-/// goes away later. `options` says what to submit on a cluster, and whether the
-/// helper may install what the start needs: if not, `StartError::NeedsInstall`
-/// lists it.
 pub fn start(channel: &Channel, listener: &Arc<Listener>, options: &StartOptions, on: &dyn Fn(Event), notice: impl FnOnce(Notice) + Send + 'static) -> Result<Runtime, StartError> {
     let runtime = channel.start_runtime(
         listener,
@@ -641,14 +476,6 @@ pub fn start(channel: &Channel, listener: &Arc<Listener>, options: &StartOptions
     Ok(runtime)
 }
 
-/// Test connection: connect, check the runtime answers through a listener,
-/// then stop it (or leave it running if it already was). A runtime it found
-/// running may not have started Julia yet, so it has that start Julia, and
-/// fails with why Julia can't start, if it can't. On a cluster, only
-/// ask Slurm about itself: starting Julia there means a job. What the start needs
-/// installed is installed only if `options.allow_install`; else the test fails
-/// naming it. A cancel ends ssh, and the helper then stops the runtime this test
-/// was starting; one that was already running or starting for someone else is left.
 pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(), String> {
     let (channel, hello) = connect_as(server, transport, options, true, cancel, on).map_err(|e| e.message)?;
     if hello.launcher.map_or(server.cluster.is_some(), |l| l == Launcher::Slurm) {
@@ -665,8 +492,6 @@ pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &
     let listener = test_listener()?;
     let runtime = start(&channel, &listener, &StartOptions { install: options.allow_install, ..StartOptions::default() }, on, |_| {}).map_err(|e| or_cancelled(cancel, e.message()))?;
     let answered = bridge_ping(listener.port(), &runtime.token);
-    // A runtime the test found running may start Julia only once a notebook needs it, so the ping says
-    // nothing about Julia: have it start Julia now, and wait for that (app #169).
     let julia = match (&answered, runtime.reattached) {
         (Ok(()), true) => julia_starts(listener.port(), &runtime.token, options.allow_install, cancel, on),
         _ => Ok(()),
@@ -680,12 +505,10 @@ pub fn test(server: &Server, transport: &Transport, options: &Options, cancel: &
     Ok(())
 }
 
-/// What a failure of `test` after its connect reads as: a cancel kills ssh, which shows as the connection closing.
 fn or_cancelled(cancel: &Cancel, error: String) -> String {
     if cancel.cancelled.load(Ordering::SeqCst) { "Cancelled.".into() } else { error }
 }
 
-/// One listener for every `test` (they run one at a time).
 fn test_listener() -> Result<Arc<Listener>, String> {
     static LISTENER: OnceLock<Arc<Listener>> = OnceLock::new();
     if let Some(listener) = LISTENER.get() {
@@ -695,16 +518,10 @@ fn test_listener() -> Result<Arc<Listener>, String> {
     Ok(LISTENER.get_or_init(|| listener).clone())
 }
 
-/// The bridge's `ping`, through a local port.
 fn bridge_ping(port: u16, token: &str) -> Result<(), String> {
     bridge_call(port, token, "ping").map(|_| ())
 }
 
-/// Have the runtime start Julia (`endeavor/start_julia`), and wait until it is ready or has failed,
-/// passing on each step it is at. `install`: it may download Endeavor's own Julia, as a test's own start
-/// may (`Options::allow_install`, which the app gives: an empty Julia field means Endeavor's); without it,
-/// a Julia that would need a download is reported as not there. Why it can't start, as the end of a
-/// sentence ("but …"), on failure.
 fn julia_starts(port: u16, token: &str, install: bool, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(), String> {
     let (mut said, mut asked_again) = (String::new(), false);
     if install {
@@ -714,13 +531,10 @@ fn julia_starts(port: u16, token: &str, install: bool, cancel: &Cancel, on: &dyn
     loop {
         match status["state"].as_str() {
             Some("ready") => return Ok(()),
-            // Only without `install`. The runtime's words are for the agent.
             Some("failed") if status["code"] == "julia_not_found" => {
                 return Err("Julia isn't installed there, and this test may not download Endeavor's own.".into());
             }
             Some("failed") => return Err(format!("Julia there can't start: {}", status["message"].as_str().unwrap_or("it gave no reason."))),
-            // A start sets `starting` before it answers, so this is a runtime that won't start Julia: one that
-            // is stopping. Asked once more, in case a start ahead of a notebook had just given up.
             Some("not_started") if asked_again => return Err("it didn't start Julia; it may be stopping. Test again in a moment.".into()),
             Some("not_started") => {
                 asked_again = true;
@@ -743,7 +557,6 @@ fn julia_starts(port: u16, token: &str, install: bool, cancel: &Cancel, on: &dyn
     }
 }
 
-/// One of the app's calls to the runtime (`/endeavor/call`), through a local port: its `result`.
 fn bridge_call(port: u16, token: &str, method: &str) -> Result<serde_json::Value, String> {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
     socket.set_read_timeout(Some(Duration::from_secs(20))).map_err(|e| e.to_string())?;
@@ -765,7 +578,6 @@ fn bridge_call(port: u16, token: &str, method: &str) -> Result<serde_json::Value
     Ok(serde_json::from_str::<serde_json::Value>(body).map(|reply| reply["result"].clone()).unwrap_or_default())
 }
 
-/// ssh's stderr: logged, and its last lines kept to say what went wrong.
 struct Stderr {
     lines: Arc<Mutex<Vec<String>>>,
     done: Mutex<mpsc::Receiver<()>>,
@@ -778,7 +590,6 @@ impl Stderr {
         std::thread::spawn({
             let lines = lines.clone();
             move || {
-                // Bytes, decoded as they come: a line that isn't UTF-8 (a banner in Latin-1) doesn't end the reading.
                 let mut stderr = BufReader::new(stderr);
                 let mut bytes = Vec::new();
                 while let Ok(n) = stderr.read_until(b'\n', &mut bytes) {
@@ -799,37 +610,25 @@ impl Stderr {
         Stderr { lines, done: Mutex::new(done) }
     }
 
-    /// Everything it said, once it's done (or after a short wait).
     fn finish(&self) -> Vec<String> {
         let _ = self.done.lock().unwrap().recv_timeout(Duration::from_secs(2));
         self.lines.lock().unwrap().clone()
     }
 }
 
-/// What went wrong, in plain words, from ssh's stderr. In batch mode ssh can't
-/// ask, so the sign-in failures say what to do instead. ssh exits with 255 for
-/// its own failures (sign-in, network, host key) and otherwise with the remote
-/// command's status, so those explanations apply only to a 255 or an unknown
-/// status (ssh was killed, or the status isn't known), and never once
-/// `signed_in`: what the server's script said then is shown as it is.
 #[cfg(test)]
 fn explain(transport: &Transport, auth: &Auth, stderr: &[String], status: Option<ExitStatus>, cancelled: bool, signed_in: bool) -> String {
     explain_retry(transport, auth, stderr, status, cancelled, signed_in).0
 }
 
-/// How to put a key in the ssh agent. Windows ships the agent's service
-/// turned off, and `ssh-add` fails until an administrator turns it on.
 const ADD_KEY: &str = if cfg!(windows) {
     "run `ssh-add` in a terminal to add it. If that says it can't connect to the agent, turn the agent on once, in PowerShell run as administrator: `Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent`, then run `ssh-add` again"
 } else {
     "run `ssh-add` in a terminal to add it"
 };
 
-/// What an askpass writes on ssh's stderr when it ends without an answer because the server stopped
-/// waiting for the sign-in (sshd's LoginGraceTime): the app's does (its `askpass_watch`).
 pub const SIGN_IN_GAVE_UP: &str = "the server stopped waiting for the sign-in.";
 
-/// `explain`, and whether trying again by itself could help (`ConnectError`).
 fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: Option<ExitStatus>, cancelled: bool, signed_in: bool) -> (String, bool) {
     if cancelled {
         return ("Cancelled.".into(), false);
@@ -850,9 +649,6 @@ fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: 
     } else if said("Host key verification failed") {
         Some((format!("{host}'s identity (host key) wasn't confirmed, so Endeavor didn't connect."), false))
     } else if stderr.iter().any(|l| l.trim() == SIGN_IN_GAVE_UP) {
-        // Nobody refused anything: the user wasn't there to answer. ssh's own words after it depend
-        // on what it asked ("Permission denied" when a key's passphrase went unanswered, a closed
-        // connection after a password), so this is said first, and a reconnect tries again either way (#64).
         Some((format!("{host} stopped waiting for the sign-in."), true))
     } else if said("Permission denied") && batch {
         Some((format!("{host} refused the sign-in. Either your key isn't accepted there, or it has a passphrase and isn't in your ssh agent ({}). Or the server asks for a password or a code, and Endeavor couldn't open a page in a browser here to ask for it.", ADD_KEY), false))
