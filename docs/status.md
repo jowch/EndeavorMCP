@@ -646,7 +646,11 @@ Next:
   (another call, a Stop, a change of mode), and for 5 minutes after the user's yes
   (Endeavor #90). Under Claude Code, `endeavor mcp`'s session key comes from the
   conversation's id, so a resumed conversation keeps its reads and its notebook
-  (#176). The plugin's `serve`, `mcp` and machines
+  (#176). Its subagents share that key, and Claude Code passes nothing per
+  subagent (a tool call's `_meta` has only its `toolUseId`), so two that work in
+  one notebook at once count as one reader and get no `stale_read` or
+  `run_conflict` from each other. The skill tells agents not to do that (#252).
+  The plugin's `serve`, `mcp` and machines
   pass the flag; on Slurm the login node still finds or downloads Julia, as
   before, and only starting it waits. Test connection (`client::test`) that
   finds a runtime already running has it start Julia and waits for it, so it
