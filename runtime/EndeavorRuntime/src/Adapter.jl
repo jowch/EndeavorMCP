@@ -702,10 +702,20 @@ function _wrap_bond_runs!()
 end
 
 function _run_reactive_with_staged!(session, nb, to_run; kwargs...)
+    # Pluto picks the readers of the bound names from its own topology, so a staged cell that
+    # reads one only since its edit isn't among them; it is, as a run from the page would reach it.
+    pluto_picked = length(to_run)
+    names = Set{Symbol}(first(pair) for pair in get(kwargs, :bond_value_pairs, ()))
+    if !isempty(names)
+        topology = current_topology(nb)
+        staged = lock(() -> (s = get(_STAGED, nb.notebook_id, nothing); s === nothing ? Pluto.Cell[] : collect(s.cells)), _NOTIFY_LOCK)
+        readers = [c for c in staged if !(c in to_run) && haskey(topology.nodes, c) && !isdisjoint(topology.nodes[c].references, names)]
+        isempty(readers) || (to_run = vcat(to_run, readers))
+    end
     roots = _with_staged_downstream(nb, to_run)
     old = nb.topology
-    length(roots) == length(to_run) && return Pluto.run_reactive_async!(session, nb, old, old, to_run; kwargs...)
-    new = nb.topology = Pluto.updated_topology(old, nb, roots[length(to_run)+1:end])
+    length(roots) == pluto_picked && return Pluto.run_reactive_async!(session, nb, old, old, roots; kwargs...)
+    new = nb.topology = Pluto.updated_topology(old, nb, roots[pluto_picked+1:end])
     Pluto.update_dependency_cache!(nb)
     # Saved, unlike Pluto's bond runs: the file's cells go in the order of what they now define and use.
     return Pluto.run_reactive_async!(session, nb, old, new, collect(roots); kwargs..., save=true)

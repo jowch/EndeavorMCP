@@ -316,10 +316,18 @@ end
         @test cells[5].errored && occursin("more", string(cells[5].output.body))
         @test !staged()
 
+        # A staged edit that newly reads the knob: Pluto's own readers of `w` don't include it, but
+        # the knob moving runs it, as a run from the page would.
+        EndeavorRuntime.apply!(session, nb, [Dict("op" => "set_code", "cell_id" => id(cells[5]), "code" => "w + 100")])
+        nb.bonds[:w] = Pluto.BondValue(8)
+        Pluto.set_bond_values_reactive(; session, notebook=nb, bound_sym_names=[:w], run_async=false)
+        @test !cells[5].errored && cells[5].output.body == "108"
+        @test !staged()
+
         # With nothing staged, both run as Pluto's own do.
         nb.bonds[:w] = Pluto.BondValue(7)
         Pluto.set_bond_values_reactive(; session, notebook=nb, bound_sym_names=[:w], run_async=false)
-        @test cells[4].output.body == "15" && nb.cells_dict[UUID(inserted)].output.body == "150"
+        @test cells[4].output.body == "15" && nb.cells_dict[UUID(inserted)].output.body == "150" && cells[5].output.body == "107"
         page_run(cells[3])
         settle()
         @test cells[3].output.body == "14" && !cells[3].errored
