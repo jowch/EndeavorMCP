@@ -1779,11 +1779,14 @@ impl Call<'_> {
         let nb = self.notebook()?;
         let stopped = self.nbs.stop_notebook(&nb.path)?;
         let path = canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone());
-        self.nbs.unbind(self.owner, &path);
         // Not stopped: it was no longer open (its engine ended meanwhile).
         if stopped["stopped"] != true {
+            self.nbs.unbind(self.owner, &path);
             return Err(argument_error(&format!("notebook_not_found::{} is no longer open.", nb.path)));
         }
+        // Closing its own notebook doesn't free the session for another (#520).
+        self.nbs.closed_by(self.owner, &path);
+        self.nbs.unbind(self.owner, &path);
         Ok(json!({ "notebook_id": nb.id, "path": nb.path, "closed": true }))
     }
 

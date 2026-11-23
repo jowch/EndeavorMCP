@@ -2857,9 +2857,20 @@ fn close_notebook_ends_its_own_notebook_and_no_other() {
     assert_eq!(closed, json!({ "notebook_id": mine, "path": paths[0], "closed": true }));
     let open: Vec<String> = s.notebooks.snapshots().unwrap().into_iter().map(|nb| nb.path).collect();
     assert_eq!(open, [paths[1].clone()]);
-    // The session has no notebook now, so it may open another.
-    assert_eq!(s.notebooks.bound("a"), None);
+    // Closing it doesn't free the session for another notebook: Haiku closed the user's notebook
+    // to get round one_notebook (#520). It may open its own again.
+    assert_eq!(s.notebooks.bound("a").as_ref(), Some(&paths[0]));
+    let other = format!("{}-other.jl", paths[0].trim_end_matches(".jl"));
+    for (tool, args) in [("new_notebook", json!({})), ("new_notebook", json!({ "path": &other })), ("open_notebook", json!({ "path": &paths[1] }))] {
+        let refused = s.call("a", tool, args).unwrap_err();
+        assert!(refused.starts_with("ArgumentError: one_notebook::") && refused.contains("You closed it") && refused.contains("open_notebook with its path opens it again"), "{tool}: {refused}");
+    }
     assert!(s.call("a", "open_notebook", json!({ "path": &paths[0] })).is_ok());
+    assert_eq!(s.notebooks.bound("a").as_ref(), Some(&paths[0]));
+    // Open again, it closes as any notebook does: closed some other way, it frees the session.
+    s.notebooks.stop_notebook(&paths[0]).unwrap();
+    assert!(s.call("a", "open_notebook", json!({ "path": &paths[1] })).is_ok());
+    assert_eq!(s.notebooks.bound("a").as_ref(), Some(&paths[1]));
 }
 
 #[test]
