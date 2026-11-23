@@ -683,9 +683,9 @@ fn a_cluster_job_is_submitted_without_asking_about_julia_that_no_notebook_needs_
     // #80: an R-only user on a cluster isn't asked to download Julia on the login node. The job's
     // core looks for Julia when a notebook needs one; the user's yes then gets it on the login node.
     let slurm = FakeSlurm::new("no-julia-yet");
-    // A login shell with no julia on its PATH, and no Endeavor's own Julia in the place's home.
+    // A login shell whose PATH has nothing on it (a runner may have /usr/bin/julia), and no Endeavor's own Julia in the place's home.
     let shell = slurm.dir.join("no-julia-shell");
-    common::write_executable(&shell, "#!/bin/sh\n[ \"$1\" = -lc ] && shift && set -- -c \"$@\"\nPATH=/usr/bin:/bin exec /bin/sh \"$@\"\n");
+    common::write_executable(&shell, "#!/bin/sh\n[ \"$1\" = -lc ] && shift && set -- -c \"$@\"\nPATH=/nonexistent exec /bin/sh \"$@\"\n");
     let place = Place::with("no-julia-yet", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string()), ("SHELL", shell.to_str().unwrap())]);
     place.add_hpc();
     let mut record = place.machines().find_by_name("hpc").unwrap().unwrap();
@@ -706,7 +706,7 @@ fn a_cluster_jobs_core_without_julia_gets_the_login_nodes_on_the_users_yes() {
     // (or download) one, and the job's core is told where it is, so the next notebook call starts it.
     let slurm = FakeSlurm::new("julia-from-login");
     let no_julia = slurm.dir.join("no-julia-shell");
-    common::write_executable(&no_julia, "#!/bin/sh\n[ \"$1\" = -lc ] && shift && set -- -c \"$@\"\nPATH=/usr/bin:/bin exec /bin/sh \"$@\"\n");
+    common::write_executable(&no_julia, "#!/bin/sh\n[ \"$1\" = -lc ] && shift && set -- -c \"$@\"\nPATH=/nonexistent exec /bin/sh \"$@\"\n");
     let place = Place::with("julia-from-login", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
     place.add_hpc();
     let mut front = lazy_front(&place, &[]);
