@@ -52,6 +52,31 @@ and where Endeavor keeps its files.
   (`prune-helpers.sh`), since an installed binary's build was on the release
   once. The error then says so.
 
+## Updating (`update.rs`)
+
+`endeavor update` replaces this binary with the build main's
+`scripts/release-key` pins, checked against the checksums there: the build
+the plugins run. When main can't be read, or its pin has no checksums,
+nothing changes, unless `ENDEAVOR_PIN_URL=none` says to take the newest build
+the Helpers release's `LATEST` names, checked against the release's own
+checksum file. A release tampered with so that `LATEST` and its checksum file
+agree still loses to main's pin.
+
+- `endeavor --version` prints the package version and build, `release <key>`
+  on a release build, and `interface <n>` (`core::INTERFACE`), which `update`
+  reads from the new binary: a runtime that offers it is used as it is.
+- A copy the app installed, or one cargo installed, is left to the app, to
+  cargo or to a plugin. The app installs its helper as
+  `~/.cache/endeavor/<version>/endeavor` and reinstalls only when that folder
+  is missing, so a replaced file there would run under the wrong version's
+  name. Run as the app's helper (`--helper update`), the binary is the app
+  itself, and replacing it would swap the app for this build (Endeavor #200).
+- The new binary goes in by a rename within its folder, which is atomic, and
+  a process running the old one (a runtime's core) keeps the file it started
+  from. Windows can rename a running exe but not replace it, so the old one
+  is moved aside under a name of its own first, and put back if the new one
+  can't be moved in. Asides no process runs from any more are removed later.
+
 ## Removing old builds (`old_builds.rs`, #97)
 
 Two folders keep one build each: a server's `~/.cache/endeavor/<build>/`

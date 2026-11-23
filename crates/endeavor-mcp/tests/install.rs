@@ -1,8 +1,3 @@
-//! `scripts/install.sh` run as a user runs it, against a release that is a
-//! folder under `target/tmp` (`ENDEAVOR_RELEASE_URL=file://…`), with `HOME`
-//! there too. `ENDEAVOR_TEST_SH` names the shell that runs the script (default
-//! `sh`).
-
 #![cfg(unix)]
 
 #[path = "common/exec.rs"]
@@ -21,7 +16,6 @@ fn sha(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The platform `install.sh` picks on this computer.
 fn platform() -> String {
     let os = if cfg!(target_os = "macos") { "darwin" } else { "linux" };
     format!("{os}-{}", std::env::consts::ARCH)
@@ -40,7 +34,6 @@ impl Place {
         Place { dir }
     }
 
-    /// A release holding NEW for this platform, the checksum file saying `sum`.
     fn release(&self, sum: &str) {
         let name = format!("endeavor-{KEY}-{}", platform());
         self.publish(&format!("{KEY}\n"), &format!("{}  endeavor-{KEY}-other-platform\n{sum}  {name}\n", sha(b"other")));
@@ -69,7 +62,6 @@ impl Place {
         (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
     }
 
-    /// What is in `dir`, apart from the binary.
     fn others(dir: &Path) -> Vec<String> {
         std::fs::read_dir(dir).map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n != "endeavor").collect()).unwrap_or_default()
     }
@@ -158,7 +150,6 @@ fn a_release_without_this_platform_says_so() {
     assert!(stderr.contains(&format!("the newest build ({KEY}) has no binary for {}", platform())), "{stderr}");
     assert!(!bin.join("endeavor").exists());
 
-    // Listed, but the file isn't on the release.
     place.publish(&format!("{KEY}\n"), &format!("{}  endeavor-{KEY}-{}\n", sha(NEW), platform()));
     let (ok, _, stderr) = place.run(&["--dir", bin.to_str().unwrap()], &[]);
     assert!(!ok);
@@ -196,8 +187,6 @@ fn an_unknown_argument_is_refused() {
     assert!(!ok && stderr.contains("unknown argument --sudo"), "{stderr}");
 }
 
-/// Main's release-key in the place's folder, naming `key` with `sum` for this platform, and the
-/// variable that points install.sh at it.
 fn main_pin(place: &Place, key: &str, sum: &str) -> (&'static str, String) {
     let file = place.dir.join("main-release-key");
     std::fs::write(&file, format!("{key}\n{}  endeavor-{key}-other-platform\n{sum}  endeavor-{key}-{}\n", sha(b"other"), platform())).unwrap();
@@ -206,7 +195,6 @@ fn main_pin(place: &Place, key: &str, sum: &str) -> (&'static str, String) {
 
 #[test]
 fn run_by_hand_it_installs_the_build_main_pins_checked_against_mains_checksums() {
-    // The release was tampered with: its binary and its checksum file agree, and main's pin has the real build's checksum.
     let place = Place::new("main-pin");
     let tampered: &[u8] = b"#!/bin/sh\necho tampered\n";
     place.release(&sha(tampered));
@@ -217,7 +205,6 @@ fn run_by_hand_it_installs_the_build_main_pins_checked_against_mains_checksums()
     assert!(!ok && stderr.contains("doesn't match the checksum main pins") && stderr.contains("nothing was installed"), "{stderr}");
     assert!(!bin.join("endeavor").exists());
 
-    // Main pins an older build than LATEST: that one is installed, and the release's checksum file for it isn't needed.
     let pinned = "00000000aaaa";
     std::fs::write(place.dir.join(format!("release/endeavor-{pinned}-{}", platform())), NEW).unwrap();
     let pin = main_pin(&place, pinned, &sha(NEW));
@@ -226,7 +213,6 @@ fn run_by_hand_it_installs_the_build_main_pins_checked_against_mains_checksums()
     assert!(stdout.contains(&format!("Installed endeavor (build {pinned}, ")), "{stdout}");
     assert_eq!(std::fs::read(bin.join("endeavor")).unwrap(), NEW);
 
-    // --key with another build than main's: main's checksums aren't for it, so only the release's are checked, and it says so.
     let (ok, _, stderr) = place.run(&["--dir", bin.to_str().unwrap(), "--key", KEY], &[pin]);
     assert!(ok, "{stderr}");
     assert!(stderr.contains(&format!("main pins build {pinned}, not {KEY}, so build {KEY} is checked only against the release's own checksum file")), "{stderr}");
@@ -243,7 +229,6 @@ fn a_pin_that_cant_be_read_or_holds_no_checksums_installs_nothing_unless_skipped
     assert!(!ok && stderr.contains("couldn't read the build main pins") && stderr.contains("Nothing was installed") && stderr.contains("ENDEAVOR_PIN_URL=none"), "{stderr}");
     assert!(!bin.join("endeavor").exists());
 
-    // A pin from before checksums were written (the key alone), or a page that isn't a pin.
     for (name, text) in [("old-pin", "00000000aaaa\n"), ("html", "<html>blocked</html>\n")] {
         std::fs::write(place.dir.join(name), text).unwrap();
         let pin = ("ENDEAVOR_PIN_URL", format!("file://{}", place.dir.join(name).display()));
@@ -252,7 +237,6 @@ fn a_pin_that_cant_be_read_or_holds_no_checksums_installs_nothing_unless_skipped
         assert!(!bin.join("endeavor").exists());
     }
 
-    // ENDEAVOR_PIN_URL=none: LATEST, checked against the release's checksum file.
     let (ok, stdout, stderr) = place.run(&["--dir", bin.to_str().unwrap()], &[("ENDEAVOR_PIN_URL", "none".into())]);
     assert!(ok, "{stderr}");
     assert!(stdout.contains(&format!("Installed endeavor (build {KEY}, ")), "{stdout}");

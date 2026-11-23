@@ -3,7 +3,9 @@
 Notes on separating the runtime core into its own product, EndeavorMCP, that
 the app depends on and that other agents can use through a plugin. Nothing
 here is decided or built except where marked. It builds on the core in
-[runtime-core.md](runtime-core.md).
+[runtime-core.md](runtime-core.md). How the MCP server behaves as built is in
+[mcp-server.md](mcp-server.md), and the notebook tools' rules in
+[notebook-tools.md](notebook-tools.md).
 
 _Drafted 2026-09-28_
 

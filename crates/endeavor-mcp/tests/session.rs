@@ -1,9 +1,3 @@
-//! `client::Session` against the helper binary, with a local `sh` standing in
-//! for ssh (`Transport::Shell`) and a stand-in Julia under the real core, so
-//! neither sshd nor Julia is needed: what `ensure` answers, getting the
-//! connection back on the same port, closing, and two sessions in one process.
-//! Every folder is under `target/tmp`.
-
 #![cfg(unix)]
 
 mod common;
@@ -16,11 +10,9 @@ use std::time::{Duration, Instant};
 use common::{FakeBridge, TOKEN, julia_pids, pid_alive, serving_julia, wait_for, write_executable};
 use endeavor_mcp::client::{Auth, Config, Event, Gone, Launcher, Outcome, RuntimeInfo, Server, Session, SessionEvent, State, Status, Transport, Want};
 
-/// One machine called `lab-NAME` whose helper and runtime live in a folder of the test's own.
 struct Place {
     dir: PathBuf,
     server: Server,
-    /// The helper's state folder, where its runtime keeps `runtime.json`.
     state: PathBuf,
     _bridge: FakeBridge,
 }
@@ -40,7 +32,6 @@ impl Place {
         Place { dir, server, state, _bridge: bridge }
     }
 
-    /// A session for the machine. `install`: the user agreed to the helper. `ask` runs before each sign-in.
     fn session_with(&self, install: bool, ask: Option<String>) -> Session {
         Session::new(self.config(install, ask)).expect("a session")
     }
@@ -58,7 +49,6 @@ impl Place {
         self.session_with(true, None)
     }
 
-    /// The pids of the helpers (`endeavor connect`) of this machine.
     fn helpers(&self) -> Vec<i32> {
         let found = Command::new("pgrep").arg("-f").arg("--").arg(format!("connect --state-dir {}", self.state.display())).output().unwrap();
         String::from_utf8_lossy(&found.stdout).split_whitespace().filter_map(|p| p.parse().ok()).collect()
@@ -68,13 +58,11 @@ impl Place {
         self.state.join("julia.args").exists()
     }
 
-    /// The pid of the runtime's core, once it runs.
     fn runtime(&self) -> Option<i32> {
         let state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(self.state.join("runtime.json")).ok()?).ok()?;
         state["pid"].as_i64().map(|p| p as i32)
     }
 
-    /// End the helpers of the machine, as a network failure would.
     fn drop_connection(&self) {
         for pid in self.helpers() {
             // SAFETY: plain syscall, on a helper this test's session started.
@@ -89,9 +77,6 @@ impl Drop for Place {
     }
 }
 
-/// End the runtime a test of `dir` started (the core, Julia and its workers are one process group). The
-/// cores are found by their command line, which holds this test's own state folder, not by a pid read
-/// from a file: a record or a lock left behind by an earlier run may name a pid that is another program's now.
 fn end_runtime(dir: &Path) {
     let cores = Command::new("pgrep").arg("-f").arg("--").arg(format!("core --state-dir {} ", dir.join("runtime-state").display())).output().unwrap();
     for pid in String::from_utf8_lossy(&cores.stdout).split_whitespace().filter_map(|p| p.parse::<i32>().ok()).filter(|&p| p > 1) {
@@ -113,12 +98,10 @@ fn ready(outcome: Outcome) -> RuntimeInfo {
     }
 }
 
-/// Whether anything takes a connection on `port`.
 fn listening(port: u16) -> bool {
     TcpStream::connect(("127.0.0.1", port)).is_ok()
 }
 
-/// Whether the process has a thread called `name`.
 #[cfg(target_os = "linux")]
 fn has_thread(name: &str) -> bool {
     std::fs::read_dir("/proc/self/task").unwrap().flatten().any(|task| std::fs::read_to_string(task.path().join("comm")).is_ok_and(|comm| comm.trim() == name))
@@ -148,7 +131,6 @@ fn an_attach_with_nothing_running_says_so_and_a_start_after_it_starts() {
     assert_eq!(session.status().state, State::NothingRunning);
     let runtime = ready(session.ensure(start(), LONG, false));
     assert!(matches!(session.status().state, State::Ready(_)), "a start clears it");
-    // Another session attaches to what runs, and is not told that nothing does.
     drop(session);
     let second = place.session();
     let attached = ready(second.ensure(Want::Attach { install: false }, LONG, false));
@@ -163,7 +145,6 @@ fn a_machine_without_the_helper_needs_the_agreement_and_the_agreement_installs_i
     assert_eq!(needs.items.iter().map(|i| i.kind.as_str()).collect::<Vec<_>>(), [wire::KIND_HELPER]);
     assert!(needs.needs_helper());
     assert!(!place.dir.join("root").exists() && place.helpers().is_empty(), "nothing was installed");
-    // Asked again with the agreement, it installs and starts.
     ready(session.ensure(start(), LONG, false));
     assert!(place.dir.join("root").exists());
     assert!(matches!(session.status().state, State::Ready(_)));
@@ -184,7 +165,6 @@ fn a_failed_sign_in_is_kept_for_every_call_and_only_a_call_that_asks_tries_again
         assert_eq!(session.ensure(want, LONG, false), Outcome::Failed(why.clone()), "every call is told, and none tries again");
     }
     assert_eq!(attempts(), 1);
-    // A call that asks to try again does, and the answer is not in yet.
     assert!(matches!(session.ensure(start(), Duration::ZERO, true), Outcome::StillWorking(_)));
     wait_for("the second attempt to fail", || attempts() == 2 && matches!(session.status().state, State::Failed(_)));
     assert_eq!((session.ensure(start(), LONG, false), attempts()), (Outcome::Failed(why.clone()), 2));
@@ -232,7 +212,6 @@ fn retry_now_ends_the_pause_after_a_lost_connection_and_does_nothing_while_conne
     let place = Place::new("retry-now");
     let (up, tries) = (place.dir.join("up"), place.dir.join("tries"));
     std::fs::write(&up, "").unwrap();
-    // The server is out of reach while `up` isn't there, as ssh says it.
     let ask = format!(
         "echo x >> '{}'; [ -e '{}' ] || {{ echo 'ssh: connect to host lab port 22: Connection refused' >&2; exit 255; }}",
         tries.display(),
@@ -250,7 +229,6 @@ fn retry_now_ends_the_pause_after_a_lost_connection_and_does_nothing_while_conne
     let count = || std::fs::read_to_string(&tries).map_or(0, |t| t.lines().count());
     let first = count();
     place.drop_connection();
-    // Three failed tries wait 1, 2 and 4 s; the fourth begins a pause of 8 s.
     wait_for("four tries to fail", || count() >= first + 4);
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(session.status().state, State::Connecting);
@@ -266,7 +244,6 @@ fn retry_now_ends_the_pause_after_a_lost_connection_and_does_nothing_while_conne
 fn retry_now_tries_a_failed_connection_again() {
     let place = Place::new("retry-failed");
     let up = place.dir.join("up");
-    // Refused, which isn't tried again by itself, until `up` is there.
     let ask = format!("[ -e '{}' ] || {{ echo 'Permission denied (publickey).' >&2; exit 255; }}", up.display());
     let session = place.session_with(true, Some(ask));
     let failed = session.wait_for(LONG, |status| matches!(status.state, State::Failed(_)));
@@ -292,25 +269,20 @@ fn closing_leaves_the_runtime_running_and_ends_everything_else() {
     assert!(!has_thread(&format!("session-{}", runtime.port)), "the session's thread ended");
     assert!(matches!(session.ensure(start(), LONG, false), Outcome::Failed(why) if why.contains("closed")));
     session.close();
-    // The runtime is still there for the next.
     let second = place.session();
     assert_eq!(ready(second.ensure(Want::Attach { install: false }, LONG, false)).pid, runtime.pid);
 }
 
 #[test]
 fn a_handed_over_port_goes_to_the_next_session_while_the_old_one_still_closes() {
-    // As when a server's connection settings change: the app closes the old session in a thread of
-    // its own, so it hands the port over first.
     let place = Place::new("hand-over");
     let session = place.session();
     let runtime = ready(session.ensure(start(), LONG, false));
-    // An agent's connection that stays open meanwhile.
     let held = TcpStream::connect(("127.0.0.1", runtime.port)).unwrap();
     let mut config = place.config(true, None);
     config.socket = Some(session.hand_over_port().expect("the socket"));
     let second = Session::new(config).expect("a session");
     assert_eq!(second.port(), runtime.port);
-    // The old session's close, after the new one has the port, leaves it alone.
     std::thread::spawn(move || session.close()).join().unwrap();
     let again = ready(second.ensure(Want::Attach { install: false }, LONG, false));
     assert_eq!((again.port, again.pid, again.mcp_url.as_str()), (runtime.port, runtime.pid, runtime.mcp_url.as_str()));
@@ -329,7 +301,6 @@ fn a_dropped_session_ends_its_thread_helper_and_port_and_stops_nothing() {
     wait_for("the port to close", || !listening(runtime.port));
     #[cfg(target_os = "linux")]
     assert!(!has_thread(&format!("session-{}", runtime.port)));
-    // One that never got a connection ends too, however far it got.
     let slow = Place::new("drop-connecting");
     let started = Instant::now();
     let connecting = slow.session_with(true, Some("sleep 30".into()));
@@ -352,7 +323,6 @@ fn two_sessions_in_one_process_leave_each_other_alone() {
     assert_eq!(first.status().state, State::Connected);
     assert!(matches!(second.status().state, State::Ready(_)));
     assert!(pid_alive(b.pid as i32) && listening(b.port));
-    // The second goes on after the first is closed, and the first starts again.
     first.close();
     assert_eq!(ready(second.ensure(start(), Duration::ZERO, false)), b);
     drop(first);
@@ -364,7 +334,6 @@ fn two_sessions_in_one_process_leave_each_other_alone() {
 #[test]
 fn an_agreement_goes_to_a_start_that_waits_for_it_and_to_one_that_was_refused() {
     let place = Place::new("agreement");
-    // The helper is missing and the agreement comes with a later call, while the first still connects.
     let session = place.session_with(false, Some("sleep 1".into()));
     let plain = Want::Start { job: None, install: false };
     assert!(matches!(session.ensure(plain.clone(), Duration::ZERO, false), Outcome::StillWorking(_)));
@@ -372,7 +341,6 @@ fn an_agreement_goes_to_a_start_that_waits_for_it_and_to_one_that_was_refused() 
     assert_eq!(session.status().hello.and_then(|h| h.helper_installed), Some(true));
     drop(session);
 
-    // Refused and told; the agreement given on its own, then the same call goes on.
     let place = Place::new("agreement-apart");
     let session = place.session_with(false, None);
     assert!(matches!(session.ensure(plain.clone(), LONG, false), Outcome::NeedsInstall(needs) if needs.needs_helper()));
@@ -399,7 +367,6 @@ fn an_attach_never_replaces_a_start_and_a_start_is_never_told_nothing_runs() {
     let (started, attached) = (ready(starter), ready(attacher));
     assert_eq!(started, attached, "the attach waited for the start");
 
-    // Asked at the same moment, the start is the one that decides, whichever comes first.
     let place = Place::new("attach-and-start");
     let session = place.session();
     for _ in 0..3 {
@@ -464,7 +431,6 @@ fn a_stop_ends_the_runtime_and_a_start_after_it_works_on_the_same_port() {
     assert!(session.stop().is_ok(), "nothing runs, and the helper says so");
 }
 
-/// What a tool call to the listener on `port` is answered.
 fn call(port: u16, token: &str) -> String {
     use std::io::{Read, Write};
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_notebooks","arguments":{}}}"#;
@@ -504,7 +470,6 @@ fn a_restart_whose_start_fails_tells_calls_julia_couldnt_start() {
     let hold = place.state.join("hold");
     std::fs::write(&hold, "").unwrap();
     assert!(matches!(session.restart(None, true, Duration::from_millis(1500)), Outcome::StillWorking(_)));
-    // The new start fails: its core is killed while Julia waits.
     let core = Command::new("pgrep").arg("-f").arg("--").arg(format!("core --state-dir {} ", place.state.display())).output().unwrap();
     let cores: Vec<i32> = String::from_utf8_lossy(&core.stdout).split_whitespace().filter_map(|p| p.parse().ok()).collect();
     assert_eq!(cores.len(), 1, "{cores:?}");
@@ -553,7 +518,6 @@ fn a_runtime_that_ends_says_so_as_a_typed_reason_until_one_is_asked_for_again() 
     assert!(matches!(status.gone, Some(Gone::Died(_))), "{status:?}");
     assert_eq!(status.state, State::NothingRunning, "{status:?}");
     assert!(status.step.as_deref().is_some_and(|step| step.starts_with("Julia on lab stopped.")), "the words say the same: {status:?}");
-    // A stop asked for here afterwards is no runtime that went away.
     session.stop().expect("stop");
     let stopped = session.status();
     assert_eq!((stopped.state, stopped.gone), (State::Connected, None));
@@ -567,7 +531,6 @@ fn a_runtime_that_ends_says_so_as_a_typed_reason_until_one_is_asked_for_again() 
 
 #[test]
 fn a_runtime_that_ended_while_the_connection_was_lost_is_told_to_every_call_and_not_started_again() {
-    // Connecting waits while `gate` exists, so that the runtime ends while the connection is away.
     let place = Place::new("ended-away");
     let gate = place.dir.join("gate");
     let session = place.session_with(true, Some(format!("while [ -e {} ]; do sleep 0.1; done", gate.display())));
@@ -584,7 +547,6 @@ fn a_runtime_that_ended_while_the_connection_was_lost_is_told_to_every_call_and_
     assert!(why.contains("Julia on lab"), "{why}");
     assert_eq!(session.ensure(Want::Attach { install: false }, LONG, false), Outcome::Failed(why), "every call is told");
     assert!(!pid_alive(before.pid as i32) && place.runtime().is_none_or(|pid| pid == before.pid as i32), "nothing started a new one");
-    // Asked again, it starts a new one.
     let mut next = None;
     wait_for("a new runtime", || {
         next = Some(session.ensure(start(), Duration::from_millis(200), true));
@@ -595,7 +557,6 @@ fn a_runtime_that_ended_while_the_connection_was_lost_is_told_to_every_call_and_
 
 #[test]
 fn a_connection_lost_while_the_runtime_starts_is_resumed_after_the_reconnect() {
-    // Connecting waits while `gate` exists, so that the runtime is up before the connection is back.
     let place = Place::new("lost-starting");
     let (hold, gate) = (place.state.join("hold"), place.dir.join("gate"));
     std::fs::write(&hold, "").unwrap();
@@ -614,8 +575,6 @@ fn a_connection_lost_while_the_runtime_starts_is_resumed_after_the_reconnect() {
 
 #[test]
 fn a_connection_lost_and_back_while_the_core_still_starts_sees_the_start_and_waits_for_it() {
-    // The core holds `starting.lock` and has no record from before the connection drops until the reconnect
-    // is over: `hold` keeps Julia from being ready, and `gate` keeps the connection from coming back.
     let place = Place::new("lost-starting-held");
     let (hold, gate) = (place.state.join("hold"), place.dir.join("gate"));
     std::fs::write(&hold, "").unwrap();
@@ -656,7 +615,6 @@ fn an_attach_waits_for_a_start_under_way_and_when_it_dies_says_nothing_runs_and_
     let core: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(place.state.join("starting.lock")).unwrap()).unwrap();
     let core = core["pid"].as_i64().unwrap() as i32;
 
-    // Another session only attaches: it waits for the start, and it dies.
     let second = place.session();
     assert!(matches!(second.ensure(Want::Attach { install: false }, Duration::from_millis(1500), false), Outcome::StillWorking(_)), "a start under way is something to wait for");
     // SAFETY: plain syscall, on the core this test's session started and what it started.
@@ -673,7 +631,6 @@ fn asking_again_while_connecting_makes_no_other_attempt() {
     let place = Place::new("asked-again");
     let asked = place.dir.join("asked");
     let attempts = || std::fs::read_to_string(&asked).map_or(0, |text| text.lines().count());
-    // The sign-in takes 2 s and then fails.
     let session = place.session_with(true, Some(format!("echo x >> {}; sleep 2; exit 1", asked.display())));
     for _ in 0..5 {
         let _ = session.ensure(start(), Duration::ZERO, false);
@@ -689,7 +646,6 @@ fn a_reconnect_installs_the_helper_again_when_it_was_agreed_to_and_asks_when_it_
     let root = place.dir.join("root");
     let session = place.session();
     let before = ready(session.ensure(start(), LONG, false));
-    // The helper goes from the machine and the connection with it: the reconnect installs it again, with no new question.
     let lost = place.helpers();
     std::fs::remove_dir_all(&root).unwrap();
     place.drop_connection();
@@ -697,7 +653,6 @@ fn a_reconnect_installs_the_helper_again_when_it_was_agreed_to_and_asks_when_it_
     assert!(root.join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists(), "installed again by the reconnect");
     assert_eq!(ready(session.ensure(start(), LONG, false)).pid, before.pid);
 
-    // An agreement given to a start with the helper there is for what the start needs, and is not kept for the helper.
     let place = Place::new("agreement-not-kept");
     let root = place.dir.join("root");
     common::install_helper(&root);
@@ -756,7 +711,6 @@ fn an_attach_that_found_nothing_looks_again_and_finds_what_has_come_up_since() {
     assert_eq!(ready(session.ensure(Want::Attach { install: false }, LONG, false)).pid, started.pid);
 }
 
-/// The `--launcher` the helper of this connection was started with.
 fn helper_launcher(place: &Place) -> Vec<String> {
     helper_args(place).iter().map(|args| args.split_whitespace().skip_while(|a| *a != "--launcher").nth(1).unwrap_or_default().to_owned()).collect()
 }
@@ -764,7 +718,6 @@ fn helper_launcher(place: &Place) -> Vec<String> {
 #[test]
 fn an_auto_launcher_counts_as_slurm_until_the_helper_says_otherwise() {
     let place = Place::new("auto-unsettled");
-    // The sign-in takes 2 s, so the helper hasn't said yet when it is asked.
     let mut config = place.config(true, Some("sleep 2".into()));
     config.launcher = Some(Launcher::Auto);
     let session = Session::new(config).expect("a session");
@@ -792,7 +745,6 @@ fn a_reconnect_asks_for_the_launcher_the_first_helper_settled_on() {
     assert_eq!(session.status().hello.and_then(|h| h.launcher).as_deref(), Some("slurm"), "sinfo is on the PATH");
     assert_eq!(helper_launcher(&place), ["slurm"]);
 
-    // Slurm goes from the PATH and the connection drops: the reconnect still asks for Slurm, not auto again.
     std::fs::remove_file(&sinfo).unwrap();
     let lost = place.helpers();
     place.drop_connection();
@@ -806,8 +758,6 @@ fn a_reconnect_asks_for_the_launcher_the_first_helper_settled_on() {
 #[test]
 fn a_session_tells_its_caller_its_steps_and_its_trouble_as_events() {
     use std::sync::{Arc, Mutex, OnceLock};
-    // Each event is heard with the session's status as it was then: asked from the callback, which
-    // holds no lock of the session's, it already shows what the event brought.
     type Heard = Arc<Mutex<Vec<(SessionEvent, Option<Status>)>>>;
     fn listen(config: &mut Config) -> (Heard, Arc<OnceLock<Arc<Session>>>) {
         let heard: Heard = Arc::default();
@@ -832,8 +782,6 @@ fn a_session_tells_its_caller_its_steps_and_its_trouble_as_events() {
     assert!(events.iter().any(|e| matches!(e, SessionEvent::Step(Event::Started { .. }))), "{events:?}");
     assert!(!events.iter().any(|e| matches!(e, SessionEvent::Trouble(_))), "{events:?}");
     assert!(events.iter().any(|e| matches!(e, SessionEvent::Step(Event::Connected { .. }))), "{events:?}");
-    // A connection made again, after the handle is set, clears what the last one said: the
-    // status asked on its Connected step already shows the system the step names.
     let before = steps.len();
     place.drop_connection();
     let connected = || heard.lock().unwrap()[before..].iter().find_map(|(e, s)| if let SessionEvent::Step(Event::Connected { .. }) = e { Some(s.clone()) } else { None });
@@ -841,7 +789,6 @@ fn a_session_tells_its_caller_its_steps_and_its_trouble_as_events() {
     let status = connected().flatten().expect("heard with a status");
     assert!(status.hello.as_ref().is_some_and(|h| h.os.is_some()), "the status shows the step: {status:?}");
 
-    // A sign-in that is refused is told as trouble, once the session shows it failed.
     let place = Place::new("events-refused");
     let mut config = place.config(true, Some("echo 'jc@lab: Permission denied (publickey).' >&2; exit 255".into()));
     let (heard, handle) = listen(&mut config);
@@ -857,7 +804,6 @@ fn a_session_tells_its_caller_its_steps_and_its_trouble_as_events() {
 
 #[test]
 fn a_session_signs_in_and_ends_its_runtime_as_its_config_says() {
-    // `auth` sets ssh's variables: the sign-in here passes only with the one it names.
     let place = Place::new("auth-env");
     let ask = Some("[ \"$ASKPASS_OK\" = yes ] || { echo 'jc@lab: Permission denied (password).' >&2; exit 255; }".to_owned());
     let mut config = place.config(true, ask.clone());
@@ -870,7 +816,6 @@ fn a_session_signs_in_and_ends_its_runtime_as_its_config_says() {
     let refused = Session::new(place.config(true, ask)).expect("a session");
     assert!(matches!(refused.ensure(start(), LONG, false), Outcome::Failed(why) if why.contains("refused the sign-in")), "without the variable it names");
 
-    // `exit_idle` false: the helper isn't asked to end the runtime it starts.
     let place = Place::new("no-exit-idle");
     let mut config = place.config(true, None);
     config.exit_idle = false;
@@ -880,7 +825,6 @@ fn a_session_signs_in_and_ends_its_runtime_as_its_config_says() {
     assert_eq!(helper_args(&place).iter().filter(|a| a.contains("--exit-idle")).count(), 0);
 }
 
-/// The command lines of the helpers of this machine.
 fn helper_args(place: &Place) -> Vec<String> {
     place.helpers().into_iter().map(|pid| {
         let args = Command::new("ps").args(["-o", "args=", "-p", &pid.to_string()]).output().unwrap();
@@ -919,7 +863,6 @@ fn a_session_reports_the_runtimes_build_and_interface_and_tells_trouble_once_for
     assert!(!attached.usable_as_is());
     assert!(matches!(second.status().state, State::Ready(r) if r == attached), "the status carries them");
     ready(second.ensure(Want::Attach { install: false }, LONG, false));
-    // A connection made again to the same runtime says nothing again.
     place.drop_connection();
     wait_for("the connection to come back", || !place.helpers().is_empty() && matches!(second.status().state, State::Ready(_)));
     assert_eq!(ready(second.ensure(Want::Attach { install: false }, LONG, false)).pid, started.pid);

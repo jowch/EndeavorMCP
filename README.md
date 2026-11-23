@@ -250,9 +250,10 @@ The message names what you picked, not its contents: Claude reads the cell or
 its output with its tools, as it is now. Lines you drag over go with their
 text. A box you draw goes with a picture of the images, plots and drawings in
 it (not text, and not 3D plots), which Claude looks at with `view_cell_output`.
-A message holds at most 8,000 characters: if your comment, the lines you
-dragged over or the number of picks make it too long, the view says so and
-gives your pick back.
+A message holds at most 8,000 characters. When it would be longer, the
+longest lines you dragged over go by their line numbers only, and Claude reads
+them. If your comment or the number of picks still makes it too long, the view
+says so and gives your pick back.
 
 **Find** (the magnifier, or ⌘F / Ctrl+F with the cursor in the notebook)
 searches the cells' code and outputs. ↩ and ⇧↩ step through the matches, and

@@ -29,6 +29,65 @@ like a flake. A child process writes the file, so the test process never
 holds it open. The crate's own tests reach the same file as
 `crate::test_exec`.
 
+On Windows, where the tests' `#!/bin/sh` stand-in Julia can't run,
+`examples/stand_in_julia.rs` stands in, copied to `julia.exe` by
+`tests/windows.rs`. Like the shell one it says it is 1.12, records its
+arguments, token and pid in `STAND_IN_DIR`, writes the state boot.jl would
+(naming the stand-in bridge and Pluto, `STAND_IN_MCP_PORT` and
+`STAND_IN_PLUTO_PORT`), and stays up, waiting first while `hold` is in that
+folder. Asked for `Sys.BINDIR`, it names its own folder, so the core's look
+for the real julia.exe behind a launcher finds it. It ships in no build.
+
+## Endeavor's own Julia for real
+
+`tests/own_julia.rs` downloads Endeavor's own Julia (`--julia own`) into the
+cache folder and adds it to juliaup, each test with a HOME of its own in the
+target folder. They download about 300 MB each, so they're ignored by
+default:
+
+```sh
+ENDEAVOR_TEST_JULIAUP=/path/to/juliaup cargo test -p endeavor-mcp --test own_julia -- --ignored --nocapture --test-threads 1
+```
+
+The juliaup tests copy the folder of `ENDEAVOR_TEST_JULIAUP` (juliaup and its
+`julialauncher`, as juliaup's release tarball has them) into that HOME's
+`.juliaup/bin`, where juliaup's installer puts them, and add the `release`
+channel as the installer does, so 1.12.6 isn't juliaup's default.
+
+## Quirks the tests work around
+
+- Just after a spawn the kernel may not have set the new command line, and
+  `ps` shows `[sleep]`, so a test waits until it shows the core's.
+- An ended process whose parent is gone stays a zombie until PID 1 reaps it,
+  and `kill -0` still finds it. Containers whose PID 1 doesn't reap (the
+  cloud VMs') keep them, so the tests' "is it running" counts a zombie as
+  gone, as the runtime does (`unixproc::start_time`); a process group's
+  zombies don't count either. Without `/proc` (macOS, where launchd reaps)
+  it is `kill -0`.
+- macOS has no `setsid` command, so the shell transport starts the helper in
+  a session of its own with perl's.
+- Julia ends with its core: on Linux by `PR_SET_PDEATHSIG`, on macOS by the
+  watcher the core starts with it. Which comes first, that or the next start,
+  is a race, so a test accepts either.
+- A login shell's profile can put a julia back on PATH (GitHub's Ubuntu
+  image has `/usr/bin/julia`), so tests that need none empty it.
+- Windows PowerShell wraps an error's message at the console's width, so
+  `install_ps1` compares messages with whitespace taken out.
+- A Windows checkout can give `release-key` CRLF line ends.
+- Windows' `python3` may be the Store's stand-in, which runs nothing, so the
+  Python adapter tests skip there.
+- A HOME with juliaup and no channels yet is how the Microsoft Store leaves it
+  on Windows.
+- A test that holds a start lock unlocks it before it drops it (#212). A
+  child another test spawns at that moment holds a copy of the descriptor
+  until it execs, and a flock lasts until every copy is closed; an unlock
+  ends it for all of them.
+- The never-answering runtime port (`silent()` in `tests/connect.rs`) stays
+  bound for the whole test run (#253). A port bound and let go at once could
+  be taken by a test running beside it, and then the silent runtime answers.
+- `ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS` slows the marimo install so a
+  test can see it under way.
+
 ## Trying the plugin before a release
 
 The plugin's launcher gets its binary from the Helpers release, which holds no

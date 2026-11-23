@@ -1,10 +1,3 @@
-//! The local start on Windows, with a stand-in Julia (`examples/stand_in_julia.rs`, copied in as
-//! `julia.exe`) and the stand-in bridge and Pluto of `common`: `endeavor serve` with a given Julia and
-//! with the one on the PATH, the state folder (`runtime.json`, `runtime.log`, `starting.lock` with the
-//! core's pid readable while it holds the lock), a Julia that ends, `endeavor stop`, and an agent's
-//! call through `endeavor mcp` on this computer. The Unix tests cover the same with a `#!/bin/sh`
-//! stand-in, which Windows can't run (EndeavorMCP #9).
-
 #![cfg(windows)]
 
 mod common;
@@ -20,7 +13,6 @@ use common::front::Front;
 use common::*;
 use serde_json::json;
 
-/// The stand-in Julia, as `julia.exe` in `dir`'s `fakebin`.
 fn stand_in(dir: &Path) -> PathBuf {
     let built = Path::new(env!("CARGO_BIN_EXE_endeavor")).parent().unwrap().join("examples").join("stand_in_julia.exe");
     assert!(built.is_file(), "{} isn't built: `cargo test` builds the examples", built.display());
@@ -31,8 +23,6 @@ fn stand_in(dir: &Path) -> PathBuf {
     julia
 }
 
-/// What the stand-in and the runtime are given: where the stand-in records what it was run with, the
-/// stand-in bridge's ports, and the account's folders, all in `dir`.
 fn env_for(command: &mut Command, dir: &Path, bridge: &FakeBridge) {
     for folder in ["profile", "local", "roaming"] {
         std::fs::create_dir_all(dir.join(folder)).unwrap();
@@ -46,8 +36,6 @@ fn env_for(command: &mut Command, dir: &Path, bridge: &FakeBridge) {
         .env("APPDATA", dir.join("roaming"));
 }
 
-/// What a test that fails part way leaves running, ended when it unwinds: `endeavor stop --force` on
-/// its state folder, then each process it started, with what they started.
 struct Cleanup {
     dir: PathBuf,
     pids: Vec<u32>,
@@ -64,7 +52,6 @@ impl Drop for Cleanup {
         if !std::thread::panicking() {
             return;
         }
-        // What the runtime was doing, for the failure's report.
         let log = std::fs::read_to_string(self.dir.join("runtime.log")).unwrap_or_default();
         let lines: Vec<&str> = log.lines().collect();
         eprintln!("runtime.log, last lines:\n{}", lines[lines.len().saturating_sub(80)..].join("\n"));
@@ -75,10 +62,7 @@ impl Drop for Cleanup {
     }
 }
 
-/// `endeavor serve` with its state in `dir` and `julia` (none: it looks on the PATH, with `dir`'s
-/// `fakebin` first), once it has said how to connect.
 fn serve(dir: &Path, bridge: &FakeBridge, julia: Option<&Path>, cleanup: &mut Cleanup) -> Child {
-    // The stand-in bridge takes only its own token.
     std::fs::write(dir.join("token"), TOKEN).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
     command.arg("serve").arg("--state-dir").arg(dir).arg("--depot").arg(dir.join("depot")).arg("--folder").arg(dir);
@@ -94,7 +78,6 @@ fn serve(dir: &Path, bridge: &FakeBridge, julia: Option<&Path>, cleanup: &mut Cl
     env_for(&mut command, dir, bridge);
     let mut serve = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     cleanup.pids.push(serve.id());
-    // Read on a thread, so a serve that hangs before it is up fails the test rather than the job.
     let out = BufReader::new(serve.stdout.take().unwrap());
     let (tx, lines) = mpsc::channel();
     std::thread::spawn(move || {
@@ -113,19 +96,16 @@ fn serve(dir: &Path, bridge: &FakeBridge, julia: Option<&Path>, cleanup: &mut Cl
     }
 }
 
-/// Wait for `serve` to end: its exit code and the last line it wrote to stderr.
 fn ended(serve: Child) -> (Option<i32>, String) {
     let output = serve.wait_with_output().unwrap();
     let said = String::from_utf8(output.stderr).unwrap();
     (output.status.code(), said.lines().last().unwrap_or_default().to_owned())
 }
 
-/// A page of the runtime's, as a browser with the pages' token asks for it.
 fn page(port: u16, pages: &str, target: &str) -> String {
     let mut page = TcpStream::connect(("127.0.0.1", port)).unwrap();
     page.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     write!(page, "GET {target} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAccept: text/html\r\nAuthorization: Bearer {pages}\r\n\r\n").unwrap();
-    // HTTP/1.0: the reply ends with the connection.
     let mut said = Vec::new();
     if let Err(why) = page.read_to_end(&mut said) {
         panic!("GET {target}: the connection didn't end within 20 s ({why}); so far: {}", String::from_utf8_lossy(&said));
@@ -133,7 +113,6 @@ fn page(port: u16, pages: &str, target: &str) -> String {
     String::from_utf8_lossy(&said).into_owned()
 }
 
-/// Start Julia from the runtime's page and wait until the stand-in Pluto answers through it: Julia's pid.
 fn start_julia(dir: &Path) -> u32 {
     let record = read_json(&dir.join("runtime.json"));
     let (port, pages) = (record["port"].as_u64().unwrap() as u16, record["page_token"].as_str().unwrap().to_owned());
@@ -159,7 +138,6 @@ fn serve_starts_julia_when_asked_and_stop_ends_both() {
     let serve = serve(&dir, &bridge, Some(&julia), &mut cleanup);
     let core = read_json(&dir.join("runtime.json"))["pid"].as_u64().unwrap();
     assert!(dir.join("runtime.log").is_file(), "the log is there");
-    // The core lets go of the start lock just after it writes runtime.json, which serve may report first.
     wait_for("the core to empty the start lock", || std::fs::read_to_string(dir.join("starting.lock")).unwrap_or_default().is_empty());
     assert!(!dir.join("julia.pids").exists(), "serve starts no Julia until something needs it");
 
@@ -201,10 +179,6 @@ fn julia_ending_ends_serve_with_an_error() {
     assert_eq!(ended(serve), (Some(1), format!("Endeavor stopped. Its log is {}.", dir.join("runtime.log").display())));
 }
 
-/// A core that waits for Julia before it records itself (no `--julia-when-needed`) holds starting.lock
-/// meanwhile: a reader sees it held (`runtime::lock_state` asks for a shared lock over the whole file)
-/// and still reads the core's pid, because the core locks one byte past what the file holds. Once
-/// `runtime.json` is written it lets go and empties the file.
 #[test]
 fn the_core_holds_starting_lock_with_its_pid_readable_until_it_is_recorded() {
     let dir = state_dir("windows-start-lock");
@@ -221,7 +195,6 @@ fn the_core_holds_starting_lock_with_its_pid_readable_until_it_is_recorded() {
     wait_for("Julia to be started", || !julia_pids(&dir).is_empty());
     let lock = std::fs::File::open(dir.join("starting.lock")).unwrap();
     assert!(lock.try_lock_shared().is_err(), "a reader sees the start under way");
-    // The core empties the file before it writes it, so read until it parses.
     let mut said = serde_json::Value::Null;
     wait_for("starting.lock to name the core", || {
         said = std::fs::read_to_string(dir.join("starting.lock")).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
@@ -233,7 +206,6 @@ fn the_core_holds_starting_lock_with_its_pid_readable_until_it_is_recorded() {
     std::fs::remove_file(dir.join("hold")).unwrap();
     wait_for("the core to record itself", || dir.join("runtime.json").exists());
     wait_for("the core to empty the lock file", || std::fs::read_to_string(dir.join("starting.lock")).unwrap_or_default().is_empty());
-    // It empties the file and then lets go of the lock.
     wait_for("the core to let go of the lock", || lock.try_lock_shared().is_ok());
     drop(lock);
     let stop = Command::new(env!("CARGO_BIN_EXE_endeavor")).arg("stop").arg("--state-dir").arg(&dir).output().unwrap();
@@ -241,8 +213,6 @@ fn the_core_holds_starting_lock_with_its_pid_readable_until_it_is_recorded() {
     core.wait().unwrap();
 }
 
-/// What failed for the Antigravity plugin on Windows before #10: an agent's notebook call through
-/// `endeavor mcp` on this computer, which starts the runtime and Julia and reaches Pluto.
 #[test]
 fn an_agents_notebook_call_through_the_front_reaches_julia() {
     require_debug_build();
@@ -260,13 +230,11 @@ fn an_agents_notebook_call_through_the_front_reaches_julia() {
     command.args(["mcp", "--skills", "plugin", "--folder"]).arg(&project).arg("--julia").arg(&julia).arg("--depot").arg(dir.join("depot")).arg("--state-dir").arg(&state);
     command.current_dir(&project).env("ENDEAVOR_START_WAIT_SECS", "30");
     env_for(&mut command, &dir, &bridge);
-    // The stand-in records what it was run with next to the state, where the bridge looks for its token.
     command.env("STAND_IN_DIR", &state);
     let mut front = Front::spawn(command);
     front.initialize();
     assert_eq!(front.ok("use_machine", json!({ "machine": "local" }))["state"], "ready", "{:?}", front.said());
     let (_, said) = front.call("open_notebook", json!({ "path": "a.jl" }));
-    // The stand-in Pluto opens nothing it wasn't given, so its own answer shows the call reached it.
     assert!(said.to_string().contains("not a notebook here"), "{said}; the front said:\n{}", front.said().join("\n"));
     let opened = bridge.seen().iter().any(|s| s.line.starts_with("POST /adapter") && String::from_utf8_lossy(&s.body).contains(r#""method":"open""#));
     assert!(opened, "the open reached the bridge");
@@ -274,8 +242,6 @@ fn an_agents_notebook_call_through_the_front_reaches_julia() {
     let _ = Command::new(env!("CARGO_BIN_EXE_endeavor")).arg("stop").arg("--state-dir").arg(&state).output();
 }
 
-/// A helper with `--own-with-client` that is killed while its start is under way, as some ssh servers kill it
-/// when the client goes, can't stop that start; the core stops it itself, Julia with it (#144, as #95 on Unix).
 #[test]
 fn a_start_of_its_own_ends_when_its_helper_is_killed_before_the_app_has_it() {
     let dir = state_dir("windows-start-own-killed");

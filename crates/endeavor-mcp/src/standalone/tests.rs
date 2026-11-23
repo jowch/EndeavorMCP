@@ -44,8 +44,6 @@ fn serve_without_flags_uses_this_folder_and_per_host_state() {
     );
 }
 
-/// `mcp` lives long and starts its runtime again after a stop: with no `--state-dir` it uses the app's older
-/// folder only while a runtime there is alive, and the plugin's folder once it stops (#434).
 #[cfg(unix)]
 #[test]
 fn mcp_without_a_state_dir_asks_again_which_folder_before_each_use() {
@@ -203,7 +201,6 @@ fn a_runtime_from_another_build_is_named() {
     assert!(message.contains("(build 0.1.0-0000000000000000; this is build ") && message.contains("run `endeavor stop`, then start it again"), "{message}");
     write(json!({ "pid": 1 }));
     assert!(other_build(&dir).unwrap().contains("(an earlier build; this is build "));
-    // Another build that offers this build's interface is used as it is; one that offers another isn't.
     write(json!({ "pid": 1, "build": "0.1.0-0000000000000000", "interface": crate::core::INTERFACE }));
     assert_eq!(other_build(&dir), None, "the same interface");
     assert!(other_build_than(&dir, embedded::BUILD_VERSION, None).is_some(), "compared by build when the interface isn't known");
@@ -223,11 +220,9 @@ fn the_runtime_unpacks_once_per_version() {
     let first = unpack(&cache, "0.1.0-aaaa", files).unwrap().join("runtime");
     assert_eq!(first, cache.join("0.1.0-aaaa/runtime"));
     assert_eq!(std::fs::read(first.join("EndeavorRuntime/src/A.jl")).unwrap(), b"a");
-    // A second run leaves the folder as it is (Julia may have written to it).
     std::fs::write(first.join("boot.jl"), "changed").unwrap();
     assert_eq!(unpack(&cache, "0.1.0-aaaa", files).unwrap().join("runtime"), first);
     assert_eq!(std::fs::read_to_string(first.join("boot.jl")).unwrap(), "changed");
-    // Another version gets its own folder, next to the first.
     let second = unpack(&cache, "0.1.0-bbbb", files).unwrap().join("runtime");
     assert_eq!(std::fs::read_to_string(second.join("boot.jl")).unwrap(), "boot");
     assert_eq!(names(&cache), ["0.1.0-aaaa", "0.1.0-bbbb"]);
@@ -236,8 +231,6 @@ fn the_runtime_unpacks_once_per_version() {
 
 #[test]
 fn threads_unpacking_at_once_each_get_the_whole_folder() {
-    // A server unpacks for its runtime while its precompile thread unpacks too (#363): with one
-    // staging folder per process, one thread cleared it while the other moved it into place.
     let files: Vec<(String, Vec<u8>)> = (0..400).map(|i| (format!("runtime/f{i}.txt"), vec![b'x'; 4096])).collect();
     let files: &'static [(&'static str, &'static [u8])] = Box::leak(files.iter().map(|(p, c)| (&*Box::leak(p.clone().into_boxed_str()), &*Box::leak(c.clone().into_boxed_slice()))).collect::<Vec<_>>().into_boxed_slice());
     for round in 0..10 {
@@ -259,7 +252,6 @@ fn threads_unpacking_at_once_each_get_the_whole_folder() {
 #[test]
 fn an_unpack_that_fails_leaves_no_staging_folder() {
     let cache = scratch("unpack-fails");
-    // The second file needs a folder where the first is a file, so the unpack fails part way.
     let files: &[(&str, &[u8])] = &[("runtime/a", b"a"), ("runtime/a/b", b"b")];
     assert!(unpack(&cache, "0.1.0-fail", files).is_err());
     assert!(names(&cache).is_empty(), "{:?}", names(&cache));
@@ -272,7 +264,6 @@ fn names(dir: &Path) -> Vec<String> {
     names
 }
 
-/// As if `version`'s folder was last unpacked or used two days ago.
 fn last_used_two_days_ago(cache: &Path, version: &str) {
     let marker = std::fs::OpenOptions::new().write(true).open(cache.join(version).join("in-use")).unwrap();
     marker.set_modified(SystemTime::now() - Duration::from_secs(2 * 24 * 3600)).unwrap();
@@ -285,7 +276,6 @@ fn a_new_version_removes_older_folders_no_runtime_uses() {
     unpack(&cache, "0.1.0-aaaa", files).unwrap();
     let running = lease(&unpack(&cache, "0.1.0-bbbb", files).unwrap()).expect("an unpacked folder can be leased");
     unpack(&cache, "0.1.0-cccc", files).unwrap();
-    // Unpacked by a build from before leases.
     std::fs::create_dir_all(cache.join("0.0.9-legacy/runtime")).unwrap();
     assert!(lease(&cache.join("0.0.9-legacy")).is_none());
     last_used_two_days_ago(&cache, "0.1.0-aaaa");
@@ -294,10 +284,8 @@ fn a_new_version_removes_older_folders_no_runtime_uses() {
     unpack(&cache, "0.1.0-dddd", files).unwrap();
     assert_eq!(names(&cache), ["0.0.9-legacy", "0.1.0-bbbb", "0.1.0-cccc", "0.1.0-dddd"]);
 
-    // The runtime from bbbb stopped.
     drop(running);
     unpack(&cache, "0.1.0-eeee", files).unwrap();
-    // A child another test is starting holds a copy of the lease until it execs.
     for _ in 0..100 {
         if !cache.join("0.1.0-bbbb").exists() {
             break;
@@ -346,7 +334,6 @@ fn the_binary_carries_plugin_folder() {
     std::fs::remove_dir_all(&cache).unwrap();
 }
 
-/// Lines a relay wrote to its stdout.
 #[derive(Clone, Default)]
 struct Out(Arc<Mutex<Vec<u8>>>);
 
@@ -369,17 +356,12 @@ impl Out {
     }
 }
 
-/// A stand-in for the runtime's `/mcp`: answers `tools/call` `session_status` as JSON,
-/// `list_notebooks` as an event stream (a progress notification, then the reply), and
-/// a notification with `202`. What each request's head and body were.
 fn fake_core() -> FakeCore {
     fake_core_listing("ran")
 }
 
-/// The stand-in's port, and what it was sent.
 type FakeCore = (u16, Arc<Mutex<Vec<(Head, String)>>>);
 
-/// `fake_core`, with `list_notebooks`' text `listed`.
 fn fake_core_listing(listed: &str) -> FakeCore {
     let listed = listed.to_owned();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -407,7 +389,6 @@ fn fake_core_listing(listed: &str) -> FakeCore {
                     http::write_chunk(&mut client, b"").unwrap();
                 }
                 _ => {
-                    // Pretty-printed, as some servers send it: stdio needs it on one line.
                     let reply = serde_json::to_string_pretty(&json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [] } })).unwrap();
                     http::respond(&mut client, "200 OK", Some("application/json"), reply.as_bytes(), false).unwrap();
                 }
@@ -429,15 +410,12 @@ fn relay_from(line: &str, skills_plugin: bool, state_dir: PathBuf) -> (Arc<Relay
     (Arc::new(Relay::new(options, "stdio-7".into(), Box::new(out.clone()))), out)
 }
 
-/// A relay on this computer whose runtime is the stand-in on `port`, found as a recorded one is.
 fn ready_relay(port: u16, seen: &Mutex<Vec<(Head, String)>>, skills_plugin: bool) -> (Arc<Relay>, Out) {
     ready_relay_from("mcp", port, seen, skills_plugin)
 }
 
-/// `ready_relay` for the front the command `line` starts.
 fn ready_relay_from(line: &str, port: u16, seen: &Mutex<Vec<(Head, String)>>, skills_plugin: bool) -> (Arc<Relay>, Out) {
     let dir = crate::client::scratch(&format!("relay-{port}"));
-    // Windows takes a recorded process for alive only with the time it started.
     #[cfg(windows)]
     let started = crate::winproc::own_start_time();
     #[cfg(not(windows))]
@@ -451,7 +429,6 @@ fn ready_relay_from(line: &str, port: u16, seen: &Mutex<Vec<(Head, String)>>, sk
         crate::client::Outcome::NothingRunning => panic!("the recorded runtime wasn't found: nothing running"),
         _ => panic!("the recorded runtime wasn't found"),
     }
-    // The first call to a runtime tells it the session's folder.
     assert!(relay.route(machines::Need::Look, machines::Deadline::after(Duration::from_secs(5))).is_ok());
     seen.lock().unwrap().clear();
     (relay, out)
@@ -489,7 +466,6 @@ fn the_relay_says_claude_codes_auto_mode_as_its_hook_last_saw_it() {
     let (port, seen) = fake_core();
     let (mut relay, _out) = ready_relay(port, &seen, true);
     let modes = crate::client::scratch("claude-modes");
-    // This test process stands for the front, under its real parent.
     let parent = std::os::unix::process::parent_id();
     let files = claude_mode::Files::of(&modes, Some("conv-1"), Some(parent));
     files.register();
@@ -504,7 +480,6 @@ fn the_relay_says_claude_codes_auto_mode_as_its_hook_last_saw_it() {
     assert_eq!(mode_sent(2).as_deref(), Some("auto"));
     hook("conv-1", "default");
     assert_eq!(mode_sent(3), None);
-    // After `/clear` the hook names a new conversation; the front still hears it (#505).
     hook("conv-2", "auto");
     assert_eq!(mode_sent(4).as_deref(), Some("auto"));
 }
@@ -516,7 +491,6 @@ fn a_runtime_replaced_by_another_process_is_noticed_and_the_new_one_is_found() {
     let (relay, _) = ready_relay(port, &seen, true);
     let crate::client::State::Ready(before) = target::Provider::status(&*relay.local).state else { panic!("the runtime was found") };
     assert_eq!(before.pid, std::process::id());
-    // Another process has taken its place in the state folder: the parent of this test is one that is alive.
     let other = std::os::unix::process::parent_id();
     let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": other, "started": null, "token": "other", "port": port });
     std::fs::write(relay.options.state_dir.join("runtime.json"), record.to_string()).unwrap();
@@ -525,8 +499,6 @@ fn a_runtime_replaced_by_another_process_is_noticed_and_the_new_one_is_found() {
     assert_eq!((after.pid, after.token.as_str()), (other, "other"));
 }
 
-/// `mcp` keeps the folder of the runtime it uses while it uses it: one that an app of before #110 starts in
-/// the older folder meanwhile doesn't make it look gone. Once it is gone, the folder is decided again (#434).
 #[cfg(unix)]
 #[test]
 fn mcp_keeps_its_runtimes_folder_while_ready_and_decides_again_once_it_is_gone() {
@@ -562,7 +534,6 @@ fn the_relay_passes_on_an_event_stream_event_by_event() {
             r#"{"id":"a","jsonrpc":"2.0","result":{"content":[{"text":"ran","type":"text"}]}}"#,
         ]
     );
-    // The session id the runtime gave goes back with the next request.
     relay.handle(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"session_status","arguments":{}}}"#);
     assert_eq!(seen.lock().unwrap()[1].0.header("Mcp-Session-Id"), Some("s-1"));
     assert!(seen.lock().unwrap()[0].0.header("X-Endeavor-Skills").is_none(), "no plugin, no header");
@@ -634,7 +605,6 @@ fn a_front_with_no_folder_takes_the_project_folder_codex_names_in_a_call() {
     }
     assert!(!refused(&out.lines()[3]), "{:?}", out.lines());
 
-    // The same folder again isn't told again; a call naming none keeps it; a string of the object is read too.
     call(5, json!({ "x-codex-turn-metadata": { "workspaces": { project.clone(): {} } } }));
     call(6, json!({}));
     call(7, json!({ "x-codex-turn-metadata": json!({ "workspaces": { other.clone(): {} } }).to_string() }));
@@ -684,7 +654,6 @@ fn a_claude_code_conversation_keeps_its_session_key_across_a_resume() {
     assert_eq!(session_key(Some(id), true), None, "an agent started from Claude Code's shell isn't that conversation");
 }
 
-/// A scratch folder for the background-precompile tests, emptied first.
 fn precompile_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("endeavor-precompile-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -741,14 +710,11 @@ fn the_background_precompile_runs_once_per_runtime_folder_and_only_where_julia_r
 
 #[test]
 fn approve_install_asks_the_user_first_where_the_client_can() {
-    // Haiku 4.5 approved large R downloads before the user said yes (#285): a client that can show a
-    // form gets Endeavor's own question first, and a no never reaches the runtime.
     let nb = "1b2c3d4e-0000-4000-8000-000000000001";
     let listed = json!([{ "notebook_id": nb, "path": "/data/leukemia.R", "execution_allowed": true, "packages": { "step": "asking", "download": { "bytes": 11385380, "packages": [{ "package": "ALL", "version": "1.44.0", "bytes": 11385380 }] } } }]);
     let (port, seen) = fake_core_listing(&listed.to_string());
     let (relay, out) = ready_relay(port, &seen, true);
     relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{"form":{}}},"clientInfo":{"name":"claude-code"}}}"#);
-    // The tool says Endeavor asks, so the agent doesn't ask in the chat too.
     relay.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
     let tools: Value = serde_json::from_str(out.lines().last().unwrap()).unwrap();
     let approve = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "approve_install").unwrap().clone();
@@ -777,12 +743,10 @@ fn approve_install_asks_the_user_first_where_the_client_can() {
     assert_eq!(declined["result"]["isError"], true, "{declined}");
     assert!(declined["result"]["content"][0]["text"].as_str().unwrap().contains("said no"), "{declined}");
     assert_eq!(approvals(), 0, "a no doesn't reach the runtime");
-    // A yes passes the call on, as it came; the answer itself goes nowhere.
     ask(6, "accept");
     assert_eq!(approvals(), 1);
     assert!(!seen.lock().unwrap().iter().any(|(_, b)| b.contains("\"action\"")));
 
-    // A call the client cancels while the dialog is up downloads nothing, even on a later yes, and gets no reply.
     let calling = { let relay = relay.clone(); let line = call(7, nb); std::thread::spawn(move || relay.handle(&line)) };
     let asked = question();
     relay.handle(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#);
@@ -795,7 +759,6 @@ fn approve_install_asks_the_user_first_where_the_client_can() {
     assert!(!seen.lock().unwrap().iter().any(|(_, b)| b.contains("notifications/cancelled")), "the runtime never saw that call");
     out.clear();
 
-    // A notebook with no download waiting gets no question: the runtime answers the call itself.
     relay.handle(&call(8, "1b2c3d4e-0000-4000-8000-000000000002"));
     assert!(!out.lines().iter().any(|l| l.contains("elicitation/create")), "{:?}", out.lines());
     assert_eq!(approvals(), 2);
@@ -803,8 +766,6 @@ fn approve_install_asks_the_user_first_where_the_client_can() {
 
 #[test]
 fn a_yes_to_new_packages_passes_on_the_names_the_dialog_showed() {
-    // The yes is to what the question named (#418): the runtime approves only those, so a package
-    // the notebook came to need after the question asks again.
     let nb = "1b2c3d4e-0000-4000-8000-000000000001";
     let listed = json!([{ "notebook_id": nb, "path": "/data/a.jl", "execution_allowed": true, "packages": { "step": "asking", "new": true, "download": { "bytes": null, "packages": [{ "package": "CSV" }] } } }]);
     let (port, seen) = fake_core_listing(&listed.to_string());
@@ -829,10 +790,7 @@ fn a_yes_to_new_packages_passes_on_the_names_the_dialog_showed() {
         bodies.last().unwrap()["params"]["arguments"].clone()
     };
     assert_eq!(forwarded(json!({ "notebook_id": nb }))["packages"], json!(["CSV"]));
-    // The agent's own list can narrow the yes, never widen it.
     assert_eq!(forwarded(json!({ "notebook_id": nb, "packages": ["CSV", "JSON"] }))["packages"], json!(["CSV"]));
-    // Nothing waited when the front looked, so no one was asked: the call names no packages, and one
-    // held since approves nothing unseen.
     relay.handle(&json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": { "name": "approve_install", "arguments": { "notebook_id": "1b2c3d4e-0000-4000-8000-000000000002", "packages": ["JSON"] } } }).to_string());
     assert!(!out.lines().iter().any(|l| l.contains("elicitation/create")));
     let last: Value = serde_json::from_str(&seen.lock().unwrap().iter().rfind(|(_, b)| b.contains("approve_install")).unwrap().1).unwrap();
@@ -842,13 +800,10 @@ fn a_yes_to_new_packages_passes_on_the_names_the_dialog_showed() {
 #[cfg(unix)]
 #[test]
 fn approve_install_asks_when_the_runtime_cant_be_looked_at() {
-    // A runtime the front can't reach now may be by the call itself, which reconnects: the front can't
-    // tell that nothing waits, so it asks, without the sizes.
     let (port, seen) = fake_core();
     let (relay, out) = ready_relay(port, &seen, true);
     relay.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}},"clientInfo":{"name":"claude-code"}}}"#);
     out.clear();
-    // The runtime was replaced by one whose port answers nothing.
     let gone = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let record = json!({ "launcher": "process", "node": crate::hostname(), "pid": std::os::unix::process::parent_id(), "started": null, "token": "other", "port": gone });
     std::fs::write(relay.options.state_dir.join("runtime.json"), record.to_string()).unwrap();
@@ -871,15 +826,12 @@ fn a_staging_folder_an_unpack_left_goes_after_a_day() {
     let cache = scratch("staging");
     let files: &[(&str, &[u8])] = &[("runtime/boot.jl", b"boot")];
     unpack(&cache, "0.1.0-aaaa", files).unwrap();
-    // Left by unpacks that crashed before their rename (#365): one a while ago, one perhaps still going.
-    // And a user's own folders, in a cache that `--cache` put among them (#126).
     for name in ["0.1.0-bbbb.part.1234.0", "0.1.0-cccc.part.5678.0", "notes.part.1", "draft.removing.2", "v1.2-x.part.3.0"] {
         std::fs::create_dir_all(cache.join(name).join("runtime")).unwrap();
     }
     let mut old = std::fs::OpenOptions::new();
     #[cfg(unix)]
     old.read(true);
-    // A folder opens on Windows only with FILE_FLAG_BACKUP_SEMANTICS.
     #[cfg(windows)]
     std::os::windows::fs::OpenOptionsExt::custom_flags(old.write(true), 0x0200_0000);
     for name in ["0.1.0-bbbb.part.1234.0", "notes.part.1", "v1.2-x.part.3.0"] {

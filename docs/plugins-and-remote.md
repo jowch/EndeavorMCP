@@ -2,7 +2,8 @@
 
 How EndeavorMCP ships as a plugin for Claude Code, Codex and Antigravity, and
 how an agent on your computer works on notebooks that run on a server or a
-cluster. A design; what is built is marked.
+cluster. A design; what is built is marked. How the front behaves as built
+is in [front.md](front.md).
 
 _Drafted 2026-10-05, rewritten the same day after reading the Endeavor app's
 remote code ([remote-sessions.md](https://github.com/jowch/Endeavor/blob/main/docs/remote-sessions.md)).

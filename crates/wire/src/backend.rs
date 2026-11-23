@@ -54,9 +54,9 @@ impl Backend {
         (read && first == header.as_bytes()).then_some(backend)
     }
 
-    pub fn notebook_url(self, root: &str, id: &str) -> String {
+    pub fn notebook_url(self, root: &str, id: &str, path: &str) -> String {
         match self {
-            Backend::Marimo => root.replacen("/?", &format!("{}/?file={}&", self.prefix(), query_value(id)), 1),
+            Backend::Marimo => root.replacen("/?", &format!("{}/?file={}&", self.prefix(), query_value(path)), 1),
             _ => root.replacen("/?", &format!("{}/edit?id={id}&", self.prefix()), 1),
         }
     }
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn pluto_notebook_urls() {
-        let url = Backend::Pluto.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc");
+        let url = Backend::Pluto.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc", "/w/a.jl");
         assert_eq!(url, "http://127.0.0.1:1234/edit?id=abc&token=t0k3n");
         assert_eq!(Backend::Pluto.notebook_id(&url), Some("abc"));
         assert_eq!(Backend::Pluto.notebook_id("http://127.0.0.1:1234/edit?id=abc"), Some("abc"), "once the token has gone from the URL");
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn ember_pages_are_under_their_own_prefix() {
-        let url = Backend::Ember.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc");
+        let url = Backend::Ember.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc", "/w/a.R");
         assert_eq!(url, "http://127.0.0.1:1234/ember/edit?id=abc&token=t0k3n");
         assert_eq!(Backend::Ember.notebook_id(&url), Some("abc"));
         assert_eq!(Backend::Pluto.notebook_id(&url), None, "an Ember page isn't a Pluto one");
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn marimo_pages_are_under_their_own_prefix() {
-        let url = Backend::Marimo.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "/w/a b&c.py");
+        let url = Backend::Marimo.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc", "/w/a b&c.py");
         assert_eq!(url, "http://127.0.0.1:1234/marimo/?file=/w/a%20b%26c.py&token=t0k3n", "marimo's page names its notebook by path");
         assert_eq!(Backend::Marimo.notebook_id(&url), None);
         assert_eq!(Backend::Marimo.notebook_id("http://127.0.0.1:1234/marimo/edit?id=abc"), None);

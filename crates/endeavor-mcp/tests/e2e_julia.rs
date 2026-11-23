@@ -1,19 +1,3 @@
-//! The runtime end to end, with real Julia: the helper and core started as the
-//! app starts This Mac's, the agent's MCP calls over `POST /mcp` with its
-//! session headers, the app's `/endeavor/call`s, Pluto's page and WebSocket as
-//! a browser reaches them, and the helper's file requests.
-//!
-//! Julia takes a while to start, so one test starts it once and walks through
-//! the steps in order. It's ignored by default:
-//!
-//!     cargo test -p endeavor-mcp --test e2e_julia -- --ignored --nocapture
-//!
-//! Julia is `ENDEAVOR_E2E_JULIA` if set, else the app's own under
-//! ~/Library/Application Support/endeavor/julia-*, else `julia` on the PATH.
-//! With the app's Julia, the app's depot supplies the packages, read-only
-//! behind a depot of the test's own in the target folder, which keeps what
-//! Julia compiles between runs.
-
 #![cfg(unix)]
 
 mod common;
@@ -30,22 +14,17 @@ use serde_json::{Value, json};
 use wire::files::{Reply, Request};
 use wire::{ToApp, ToHelper};
 
-/// Sessions as the agent's MCP config names them: one on This Mac, one on a server.
 const MAC: &[(&str, &str)] = &[("X-Endeavor-Session", "1")];
 const SERVER: &[(&str, &str)] = &[("X-Endeavor-Session", "2"), ("X-Endeavor-Host", "lab")];
 const THIRD: &[(&str, &str)] = &[("X-Endeavor-Session", "3")];
-/// A session that names its client, which joins session 1's notebook.
 const JOINER: &[(&str, &str)] = &[("X-Endeavor-Session", "4")];
 
-/// A folder of the test's own, emptied.
 fn fresh(path: PathBuf) -> PathBuf {
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).unwrap();
     path.canonicalize().unwrap()
 }
 
-/// End the runtime recorded in `state`, if one runs: the core, Julia and its
-/// notebook workers are one process group.
 fn end_runtime(state: &Path) {
     let Ok(text) = std::fs::read_to_string(state.join("runtime.json")) else { return };
     if let Some(pid) = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["pid"].as_i64()).filter(|&p| p > 1) {
@@ -54,25 +33,21 @@ fn end_runtime(state: &Path) {
     }
 }
 
-/// This Mac's runtime as the app has it: the helper, and the bridge's token.
 struct Runtime {
     helper: Helper,
     token: String,
-    /// The pages' token, which the bearer token isn't.
     pages: String,
     next_id: u64,
     state: PathBuf,
 }
 
 impl Drop for Runtime {
-    /// A failed step leaves no Julia behind.
     fn drop(&mut self) {
         end_runtime(&self.state);
     }
 }
 
 impl Runtime {
-    /// Ask for the runtime and wait until it's ready, however long Julia takes.
     fn start(&mut self) {
         self.helper.request_start(None, true);
         let mut log = Vec::new();
@@ -89,7 +64,6 @@ impl Runtime {
         }
     }
 
-    /// Stop the runtime, as the app's Restart Julia does first.
     fn stop(&self) {
         let stop = self.helper.request_stop();
         loop {
@@ -101,8 +75,6 @@ impl Runtime {
         }
     }
 
-    /// POST `body` to `path` on the runtime's port, relayed through the helper
-    /// as the app's and the agent's connections are: the status line and the body.
     fn post(&self, path: &str, headers: &[(&str, &str)], body: &str) -> (String, String) {
         let mut socket = self.helper.connect();
         socket.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
@@ -120,8 +92,6 @@ impl Runtime {
         (head.lines().next().unwrap_or_default().to_owned(), body.to_owned())
     }
 
-    /// GET `target` on the runtime's port with `headers` and no token, as a
-    /// browser does: the status line, the whole head, and the body.
     fn get(&self, target: &str, headers: &str) -> (String, String, String) {
         let mut socket = self.helper.connect();
         socket.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
@@ -138,7 +108,6 @@ impl Runtime {
         self.next_id
     }
 
-    /// One MCP request from a session: its JSON-RPC reply.
     fn mcp(&mut self, caller: &[(&str, &str)], method: &str, params: Value) -> Value {
         let id = self.id();
         let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
@@ -149,7 +118,6 @@ impl Runtime {
         reply
     }
 
-    /// A session's tool call: the tool's JSON answer, or its error.
     fn tool(&mut self, caller: &[(&str, &str)], name: &str, arguments: Value) -> Result<Value, Value> {
         let reply = self.mcp(caller, "tools/call", json!({ "name": name, "arguments": arguments }));
         let result = &reply["result"];
@@ -162,7 +130,6 @@ impl Runtime {
         self.tool(caller, name, arguments.clone()).unwrap_or_else(|e| panic!("{name}({arguments}) failed: {e}"))
     }
 
-    /// One of the app's `/endeavor/call`s: its result.
     fn call(&mut self, method: &str, params: Value) -> Result<Value, Value> {
         let id = self.id();
         let (status, body) = self.post("/endeavor/call", &[], &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string());
@@ -174,20 +141,17 @@ impl Runtime {
         }
     }
 
-    /// A notebook tool the app calls itself, through `/endeavor/call`: its JSON answer.
     fn app_tool(&mut self, name: &str, arguments: Value) -> Value {
         let result = self.call("tools/call", json!({ "name": name, "arguments": arguments })).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(result["isError"], false, "{name}: {result}");
         serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
     }
 
-    /// `list_notebooks` as a session sees it.
     fn notebooks(&mut self, caller: &[(&str, &str)]) -> Vec<Value> {
         let listed = self.ok(caller, "list_notebooks", json!({}));
         listed.as_array().unwrap_or_else(|| panic!("list_notebooks: {listed}")).clone()
     }
 
-    /// A file request to the helper, as the app sends an upload.
     fn files(&self, id: u32, request: Request) -> Reply {
         self.helper.send(ToHelper::Files { id, request });
         loop {
@@ -200,7 +164,6 @@ impl Runtime {
     }
 }
 
-/// A MessagePack map of short strings with an empty `body`, as Pluto's page sends its messages.
 fn msgpack(fields: &[(&str, &str)]) -> Vec<u8> {
     let mut out = vec![0x80 | (fields.len() as u8 + 1)];
     let string = |out: &mut Vec<u8>, s: &str| {
@@ -221,7 +184,6 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// A step's name, and how long it took, as the run goes.
 fn step<T>(name: &str, f: impl FnOnce() -> T) -> T {
     let started = Instant::now();
     eprintln!("── {name}");
@@ -246,7 +208,6 @@ fn the_runtime_end_to_end() {
     let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-julia");
     let depot = work.join("depot");
     std::fs::create_dir_all(&depot).unwrap();
-    // Ours first, where Julia writes; the app's behind it, read-only; the defaults last.
     let depot_path = match &app {
         Some(app) => format!("{}:{}:", depot.display(), app.join("depot").display()),
         None => format!("{}:", depot.display()),
@@ -296,8 +257,6 @@ fn the_runtime_end_to_end() {
     }
 
     let (notebook, path, cell) = step("new notebook, add and edit a cell, run it, read its output", || {
-        // The first notebook in a new Julia process compiles for a while. If that outlasts the call,
-        // it answers `notebook_opening`, a normal result that says to make the same call again.
         let started = Instant::now();
         let created = loop {
             let created = rt.ok(MAC, "new_notebook", json!({}));
@@ -324,7 +283,6 @@ fn the_runtime_end_to_end() {
         assert_eq!(ran["outputs"]["changed"][0]["output_text"], json!("2-element Vector{Float64}:\n 1.5\n 2.5"), "a run's receipt: {ran}");
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": rich }));
         assert_eq!(read["output_text"], json!("2-element Vector{Float64}:\n 1.5\n 2.5"), "a tree output read as text: {read}");
-        // What a cell printed and logged, which Pluto keeps apart from its output (#257).
         let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "begin\n    println(\"fitting\")\n    print(\"1%\\r50%\\r100%\\n\")\n    @warn \"3 rows dropped\" n = 3\n    @info \"loaded\"\n    7\nend", "after_cell_id": rich }));
         let logs = added["cell_id"].as_str().unwrap().to_owned();
         let ran = rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": logs, "wait_for_completion": true }));
@@ -333,8 +291,6 @@ fn the_runtime_end_to_end() {
         }
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": logs }));
         assert_eq!((&read["output"], &read["notes"]), (&json!("7"), &json!(["logged_warning::3 rows dropped (n = 3)", "logged_info::loaded", "printed::fitting\n100%"])), "{read}");
-        // A widget's cell lists it under `inputs`, read from the notebook's process (a widget
-        // that gives its default through `Base.get`, so the test needs no package).
         let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "begin\n    struct Dial; start::Int; end\n    Base.get(d::Dial) = d.start\n    Base.show(io::IO, ::MIME\"text/html\", ::Dial) = print(io, \"<input type=range>\")\nend", "after_cell_id": logs }));
         let dial_type = added["cell_id"].as_str().unwrap().to_owned();
         let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "@bind dial Dial(4)", "after_cell_id": dial_type }));
@@ -343,7 +299,6 @@ fn the_runtime_end_to_end() {
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": dial }));
         assert_eq!(read["inputs"], json!(["dial: Dial, value 4"]), "{read}");
         assert_eq!(rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": logs })).get("inputs"), None, "a cell with no widget has no `inputs`");
-        // A huge text output, as the desktop check's (1.3 MB): cut in the run's reply and in read_cell.
         let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "Text(join(string.(1:200_000), '\\n'))", "after_cell_id": dial }));
         let big = added["cell_id"].as_str().unwrap().to_owned();
         let ran = rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": big, "wait_for_completion": true }));
@@ -352,8 +307,6 @@ fn the_runtime_end_to_end() {
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": big }));
         let output = read["output"].as_str().unwrap();
         assert!(output.len() < 16_200 && output.ends_with("199999\n200000") && output.contains("bytes are left out here. No tool shows them"), "read_cell: {:.300}", output);
-        // Markdown math, read as stripped HTML while another cell runs: its numeric entities decoded, once, so
-        // the source's literal `&amp;#123;` reads as written.
         let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "md\"Euler: $e^{i\\pi} + 1 = 0$, and &amp;#123;\"", "after_cell_id": big }));
         let math = added["cell_id"].as_str().unwrap().to_owned();
         rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": math, "wait_for_completion": true }));
@@ -422,7 +375,6 @@ fn the_runtime_end_to_end() {
         }
         let head = String::from_utf8(head).unwrap();
         assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
-        // A masked ping with the payload "hi"; Pluto's server answers with a pong.
         let mask = [1u8, 2, 3, 4];
         let mut ping = vec![0x89, 0x80 | 2];
         ping.extend(mask);
@@ -439,8 +391,6 @@ fn the_runtime_end_to_end() {
             assert_eq!(reply["result"]["isError"], false, "{name}: {reply}");
             reply["result"]["structuredContent"].clone()
         };
-        // `endeavor/page_bundle` uses `Pluto.generate_html`'s offline keywords: a Pluto update that
-        // changes them shows here. The core refuses a page that loads scripts from outside.
         let (mut text, mut offset) = (String::new(), 0);
         loop {
             let part = view("notebook_page", json!({ "offset": offset, "size": 1_000_000 }));
@@ -455,7 +405,6 @@ fn the_runtime_end_to_end() {
         assert!(scripts.len() > 1 && scripts.iter().all(|s| s["attrs"]["src"].is_null()), "every script inline: {} scripts", scripts.len());
         assert!(page["body"].as_str().unwrap().contains("pluto-editor"), "Pluto's editor: {}", &page["body"].as_str().unwrap()[..300.min(page["body"].as_str().unwrap().len())]);
 
-        // Pluto's own connect message, then the notebook's whole state, as the page asks for them.
         let socket = view("notebook_socket_open", json!({ "notebook_id": notebook }))["socket"].clone();
         let send = |view: &mut dyn FnMut(&str, Value) -> Value, kind: &str| {
             let message = msgpack(&[("type", kind), ("client_id", "e2e"), ("request_id", kind), ("notebook_id", &notebook)]);
@@ -514,7 +463,6 @@ fn the_runtime_end_to_end() {
         let elsewhere = list.iter().find(|nb| nb["notebook_id"] != notebook.as_str()).unwrap()["path"].as_str().unwrap().to_owned();
         let again = rt.tool(JOINER, "open_notebook", json!({ "path": elsewhere })).expect_err("it still works on one notebook");
         assert_eq!(again["error"], "one_notebook", "{again}");
-        // The app's own call is no session's and gets the notebook as it is.
         let app = rt.app_tool("open_notebook", json!({ "path": path }));
         assert_eq!((&app["notebook_id"], &app["already_open"]), (&json!(notebook), &json!(true)), "{app}");
     });
@@ -534,7 +482,6 @@ fn the_runtime_end_to_end() {
         rt.call("endeavor/set_policy", json!({ "owner": "1", "policy": "ask" })).unwrap();
         rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": dependent, "wait_for_completion": true }));
 
-        // The app's Restore: the turn's edit and added cell put back, all or nothing.
         rt.ok(MAC, "edit_cell", json!({ "notebook_id": notebook, "cell_id": dependent, "code": "y = x + 2" }));
         rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": dependent, "wait_for_completion": true }));
         let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "w = y", "after_cell_id": dependent }));
@@ -547,7 +494,6 @@ fn the_runtime_end_to_end() {
         assert_eq!(restored, json!({ "restored": [dependent, w], "changed": [] }));
         let order = rt.ok(MAC, "get_cell_order", json!({ "notebook_id": notebook }));
         assert!(!order.to_string().contains(&w), "w is gone: {order}");
-        // The turn ran its edit, so what was put back hasn't run: the cell is stale until it runs.
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": dependent }));
         assert_eq!((&read["code"], &read["stale"]), (&json!("y = x + 1"), &json!(true)), "{read}");
         rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": dependent, "wait_for_completion": true }));
@@ -581,7 +527,6 @@ fn the_runtime_end_to_end() {
     let other_path = step("restart: unchanged comes back running, changed in safe preview", || {
         let list = rt.notebooks(MAC);
         let other_path = list.iter().find(|nb| nb["notebook_id"] != notebook.as_str()).unwrap()["path"].as_str().unwrap().to_owned();
-        // As restart_local: the allowed notebooks and their files' times, then Stop and Start.
         let allowed: Vec<(String, f64)> = list
             .iter()
             .filter(|nb| nb["execution_allowed"] == true)
@@ -593,7 +538,6 @@ fn the_runtime_end_to_end() {
         let text = std::fs::read_to_string(&other_path).unwrap();
         std::fs::write(&other_path, format!("{text}\n")).unwrap();
         rt.start();
-        // As reopen_notebooks: each runs again if it ran and its file is as it was.
         let mut reopened = Vec::new();
         for (p, was) in &allowed {
             let run = modified(&mut rt, p) == *was;
@@ -679,12 +623,9 @@ fn the_runtime_end_to_end() {
         let id = opened["notebook_id"].as_str().unwrap().to_owned();
         rt.call("endeavor/set_notebook", json!({ "owner": "3", "notebook": starting })).unwrap();
         rt.ok(THIRD, "allow_execution", json!({ "notebook_id": id, "run_notebook": true }));
-        // Right away: the notebook's own Julia is still starting, and its run waits for it.
         let stopped = rt.ok(THIRD, "interrupt_notebook", json!({ "notebook_id": id }));
         assert_eq!(stopped["interrupted"], true, "{stopped}");
-        // And says the cells won't run, however long the process takes to start.
         assert_eq!(stopped["dropped"], json!(ids), "{stopped}");
-        // Once its process is up, the run ends without running a cell.
         let began = Instant::now();
         let busy = |read: &Value| read["running"] == true || read["queued"] == true;
         while ids.iter().any(|cell| busy(&rt.ok(THIRD, "read_cell", json!({ "notebook_id": id, "cell_id": cell })))) {
@@ -700,7 +641,6 @@ fn the_runtime_end_to_end() {
     });
 
     step("a notebook whose process ended while it started restarts, and its cells run (#194)", || {
-        // The Malt workers running now: a notebook's own Julia.
         let workers = || -> std::collections::HashSet<i32> {
             std::fs::read_dir("/proc").unwrap().filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
                 .filter(|pid: &i32| std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| String::from_utf8_lossy(&c).contains("Malt") && String::from_utf8_lossy(&c).contains("worker.jl")))
@@ -724,7 +664,6 @@ fn the_runtime_end_to_end() {
         rt.call("endeavor/set_notebook", json!({ "owner": "3", "notebook": crashing })).unwrap();
         let before = workers();
         rt.ok(THIRD, "allow_execution", json!({ "notebook_id": id, "run_notebook": true }));
-        // Its Julia ends before Pluto connects to it, as a crash at startup would.
         let began = Instant::now();
         let worker = loop {
             if let Some(&pid) = workers().difference(&before).next() {
@@ -740,7 +679,6 @@ fn the_runtime_end_to_end() {
             let read = rt.ok(THIRD, "read_cell", json!({ "notebook_id": id, "cell_id": cell }));
             assert!(read["output"].as_str().unwrap_or("").is_empty(), "nothing ran before the restart: {read}");
         }
-        // The app's Restart starts a new process, and every cell runs.
         let restarted = rt.call("endeavor/restart_notebook", json!({ "notebook_id": id }));
         assert_eq!(restarted.as_ref().map(|r| r["restarted"].clone()), Ok(json!(true)), "{restarted:?}");
         let began = Instant::now();
@@ -773,8 +711,6 @@ fn the_runtime_end_to_end() {
         rt.call("endeavor/set_notebook", json!({ "owner": "3", "notebook": opening })).unwrap();
         let opened = rt.ok(THIRD, "open_notebook", json!({ "path": opening, "run_notebook": true }));
         let id = opened["notebook_id"].as_str().unwrap().to_owned();
-        // At once, while the notebook's Julia starts: the read waits for the open's run, and the
-        // cell has its value.
         let began = Instant::now();
         let read = rt.ok(THIRD, "read_cell", json!({ "notebook_id": id, "cell_id": ids[1] }));
         assert_eq!((&read["output"], &read["running"], &read["queued"]), (&json!("2"), &json!(false), &json!(false)), "after {:.1} s: {read}", began.elapsed().as_secs_f64());
@@ -782,8 +718,6 @@ fn the_runtime_end_to_end() {
     });
 
     step("the agent's Stop interrupts the cell its call is running", || {
-        // Add a cell with `code` after the last one, run it waiting, and cancel the call 3 s in,
-        // as the agent's client does when the user presses Stop: the cell, and how long the call took.
         let stop_during = |rt: &mut Runtime, code: &str| {
             let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
             let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
@@ -804,8 +738,6 @@ fn the_runtime_end_to_end() {
             (added["cell_id"].clone(), last, started.elapsed())
         };
 
-        // One long `sleep`, which Ctrl+C doesn't reach on Julia 1.12, is stopped in its own task: the
-        // notebook's process lives on (#139; before, Pluto ended it, as its own Stop did).
         let (slow, last, took) = stop_during(&mut rt, "slow = (sleep(600); 1)");
         assert!(took < Duration::from_secs(10), "the call ended {:.1} s after it began", took.as_secs_f64());
         let listed = rt.notebooks(SERVER).into_iter().find(|nb| nb["notebook_id"] == previewed.as_str()).unwrap();
@@ -814,8 +746,6 @@ fn the_runtime_end_to_end() {
         let ran = rt.ok(SERVER, "execute_cell", json!({ "notebook_id": previewed, "cell_id": last, "wait_for_completion": true }));
         assert_eq!(ran["execution"]["status"], "completed", "{ran}");
 
-        // A cell sleeping in a loop ends interrupted the same way, and its process lives on. The next step
-        // ends that process, which is reported as a crash again.
         let (slow, _, took) = stop_during(&mut rt, "slow = (for _ in 1:600; sleep(1); end; 1)");
         assert!(took < Duration::from_secs(20), "the call ended {:.1} s after it began", took.as_secs_f64());
         let read = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
@@ -823,7 +753,6 @@ fn the_runtime_end_to_end() {
         assert!(read["output"].as_str().is_some_and(|output| output.contains("InterruptException")), "{read}");
         rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
 
-        // Stop in the app while no call is under way: a run the session started without waiting ends.
         let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
         let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
         rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
@@ -844,8 +773,6 @@ fn the_runtime_end_to_end() {
         assert!(read["output"].as_str().is_some_and(|output| output.contains("InterruptException")), "{read}");
         rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": slow }));
 
-        // After a Restart, the cell the session started runs again, but as the restart's run: the
-        // session's Stop leaves it alone.
         let order = rt.ok(SERVER, "get_cell_order", json!({ "notebook_id": previewed }));
         let last = order["cell_ids"].as_array().unwrap().last().unwrap().clone();
         rt.ok(SERVER, "read_notebook_code", json!({ "notebook_id": previewed }));
@@ -924,7 +851,6 @@ fn the_runtime_end_to_end() {
         assert_eq!(restarted["running_again"], json!([stuck]), "{restarted}");
         assert!(restarted["message"].as_str().unwrap().contains("edit it"), "{restarted}");
         wait_running(&mut rt);
-        // The restart's run may still be on an earlier cell, with this one queued: either way it ends.
         let stopped = rt.ok(SERVER, "interrupt_notebook", json!({ "notebook_id": previewed }));
         assert!([&stopped["stopped"], &stopped["dropped"]].iter().any(|ids| ids.as_array().unwrap().contains(&stuck)), "{stopped}");
         rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": stuck }));
@@ -1006,12 +932,10 @@ fn the_runtime_end_to_end() {
         let mut events = rt.helper.connect();
         events.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
         write!(events, "GET /endeavor/events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\n\r\n", rt.token).unwrap();
-        // About two seconds.
         rt.call("endeavor/set_idle_limit", json!({ "hours": 0.0005 })).unwrap();
         let mut seen = String::new();
         let mut buffer = [0u8; 8192];
         let deadline = Instant::now() + Duration::from_secs(60);
-        // Another open notebook can go idle a check before this one, so wait for an event that has this one.
         let stopped_here = |line: &str| -> Option<Value> {
             let state: Value = serde_json::from_str(line.strip_prefix("data: ")?).ok()?;
             let entry = state["idle_stopped"].as_array()?.iter().find(|e| e["path"] == path.as_str())?.clone();

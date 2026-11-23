@@ -1,18 +1,3 @@
-//! `endeavor connect`: the app's end on a machine. It answers questions
-//! about the machine's files at once, and when the app asks, becomes the one
-//! client of its Julia runtime (Pluto plus EndeavorRuntime): it attaches to the
-//! runtime recorded in the state folder or starts one, then relays the app's
-//! streams to the runtime's one loopback port over its own stdin/stdout
-//! (Endeavor's docs/remote-sessions.md). It runs over `ssh` on a server as the
-//! `endeavor` binary; on This Mac the app runs itself as the helper
-//! (`endeavor --helper connect …`, calling `run`), so its helper can't go
-//! missing or be from another build. It is also ssh's askpass program (see `askpass`).
-//!
-//! On a cluster (`--launcher slurm`) the runtime runs in a Slurm job instead,
-//! and the streams go on through a second helper on the job's node
-//! (`endeavor relay`, see `slurm`).
-
-// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 mod askpass;
@@ -43,7 +28,6 @@ mod unixproc;
 #[cfg(windows)]
 mod winproc;
 
-/// The wire crate, for the types in this crate's signatures (`wire::Item`, `wire::KIND_RUNTIME`, `wire::ENGINE_PLUTO`).
 pub use wire;
 pub use core::{INTERFACE as CORE_INTERFACE, serve_unreachable};
 pub use guard::{AskRestart, Picture, Pictures, REQUEST_RESTART, RestartAnswer, Snapshot, restart_schema, serve_guarded};
@@ -51,10 +35,6 @@ pub use mcp::{NOTEBOOK_TOOLS_JSON, asks_first, changes_notebook, is_tool, runs_c
 pub use standalone::{Lease, lease, unpack};
 pub use release::release_helper;
 
-/// `runtime/` (the Julia side, which Endeavor installs on servers and runs on
-/// This Mac) and `plugin/` (the skills Endeavor loads as its Claude Code
-/// plugin), built into the binary (build.rs), and the Helpers release's key
-/// this build was made for, when the release build recorded it.
 pub mod embedded {
     include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
 }
@@ -97,58 +77,30 @@ const LOG_TAIL: usize = 40;
 
 struct Args {
     state_dir: PathBuf,
-    /// No `--state-dir` was given to the process launcher: the plugin's folder, and the app's older one
-    /// (`runtime::or_older`). `state_dir` is worked out again from them whenever no runtime is attached,
-    /// so that a runtime in the older folder is kept only while it is alive (#434).
     unnamed: Option<(PathBuf, Option<PathBuf>)>,
     julia: julia::Source,
-    /// `--julia-when-needed`: Julia isn't looked for before the runtime starts, and starts the first
-    /// time something needs it (see `core`). On a cluster it is still found on the login node, where
-    /// there is internet for a download, and only its start waits.
     julia_when_needed: bool,
-    /// The R for R notebooks, which the core looks for when one is first opened.
     r: r::Source,
-    /// `--own-r`: the runtime is on the user's own computer, where the core may offer Endeavor's own R
-    /// when it finds none (`r::install_own`). Never on a server.
     own_r: bool,
     runtime: PathBuf,
     depot: String,
     launcher: Launcher,
-    /// Stop the runtime when the app goes away without saying Stop or Detach.
     quit_with_client: bool,
-    /// The same, but only for a runtime this connection started: one it attached to, or another
-    /// connection's start it waited for, is left running. Only for the process launcher: a cluster's
-    /// job is left, since a running job another helper submitted also attaches as not reattached.
     own_with_client: AtomicBool,
-    /// The state folder belongs to this one machine, so a different node name
-    /// only means the machine was renamed.
     any_node: bool,
-    /// The app build this helper and its runtime came from, which a runtime it
-    /// starts reports to the app.
     build: Option<String>,
-    /// `--exit-idle`: the runtime ends once no notebook has been open for a while
-    /// (see `core::main`). The Slurm launcher passes it on to the job.
     exit_idle: bool,
-    /// `--exit-idle-after-client`: a runtime here that the app leaves running as it goes (Detach, or the end
-    /// of input with nothing to stop) ends from then on once no notebook has been open for a while
-    /// (`core::end_when_idle`, app #274), rather than never. The app passes it for its own computer only.
     exit_idle_after_client: bool,
-    /// More of the core's environment: a standalone runtime's settings, and
-    /// ENDEAVOR_EXIT_IDLE when `exit_idle`. Set on a core this helper starts; none removes an inherited variable.
     core_env: Vec<(&'static str, Option<String>)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Launcher {
-    /// A detached process on this machine.
     Process,
-    /// A Slurm job; this machine is a login node.
     Slurm,
 }
 
 impl Launcher {
-    /// What `--launcher auto` is here: Slurm when its `sinfo` is, as the bootstrap script's
-    /// `PICK_LAUNCHER_SH` settles it before the helper starts.
     fn here() -> Launcher {
         if wire::slurm::has("sinfo") { Launcher::Slurm } else { Launcher::Process }
     }
@@ -161,60 +113,38 @@ impl Launcher {
     }
 }
 
-/// `runtime.json`, written by the core once the runtime is ready.
 struct State {
     launcher: String,
     node: String,
     pid: i32,
-    /// When that process started (`unixproc::start_time`, `winproc::start_time`), which tells it from a
-    /// later process given the same pid; none for a record from a build before it was written, and on
-    /// a Unix system that gives no start time.
     started: Option<u64>,
-    /// Which boot of the computer `started` counts from (`unixproc::boot_id`, Linux); none when the
-    /// platform's start time is absolute, and for a record from before it was written.
     boot: Option<String>,
-    /// The runtime's one port (the core's). None for a runtime from a build
-    /// before one port per runtime, which this helper can stop but not relay to.
     port: Option<u16>,
     token: String,
-    /// The pages' token (`page_token`); none for one from before the pages had their own, which take `token`.
     page_token: Option<String>,
-    /// The Slurm job it runs in.
     job: Option<String>,
-    /// The build that started it (`embedded::BUILD_VERSION`); none for one from before builds were recorded.
     build: Option<String>,
-    /// What it offers its callers (`core::INTERFACE`); none for one from before it was recorded.
     interface: Option<u32>,
-    /// The notebooks folder a standalone runtime recorded.
     folder: Option<String>,
-    /// It was started without a project folder, and `folder` is the home folder it works in.
     no_folder: bool,
-    /// Whether it ends itself when idle; none for a record from before this was written.
     exits_when_idle: Option<bool>,
-    /// The network settings it was started with (`network_settings`); none for a record from before they were written.
     network: Option<serde_json::Map<String, Value>>,
 }
 
 impl State {
-    /// This build's callers can use it as it is: it offers this build's interface, or it is this build.
     fn usable_as_is(&self) -> bool {
         usable_as_is(self.build.as_deref(), self.interface)
     }
 }
 
-/// Whether this build's callers can use a runtime that `build` started and whose core offers `interface`
-/// as it is: it offers this build's interface (`core::INTERFACE`), or it is this build. False when neither is known.
 pub fn usable_as_is(build: Option<&str>, interface: Option<u32>) -> bool {
     interface == Some(core::INTERFACE) || build == Some(embedded::BUILD_VERSION)
 }
 
-/// Which build started a runtime, in words: "build <key>", or "an earlier build" when its record doesn't say.
 pub(crate) fn which_build(build: Option<&str>) -> String {
     build.map_or("an earlier build".to_owned(), |build| format!("build {build}"))
 }
 
-/// How a runtime whose core offers `theirs` compares with a build that offers `ours`, in words: "an older",
-/// "a newer" or "another" (version). A core that says no interface is from before the number existed.
 pub(crate) fn which_version(theirs: Option<u32>, ours: Option<u32>) -> &'static str {
     match (theirs, ours) {
         (None, Some(_)) => "an older",
@@ -224,12 +154,6 @@ pub(crate) fn which_version(theirs: Option<u32>, ours: Option<u32>) -> &'static 
     }
 }
 
-/// What the agent is told about a runtime on `place` that another build started and that doesn't offer this
-/// build's interface, whose core offers `interface`; `machine` is the id `stop_machine` and `use_machine`
-/// take, and `open` a sentence on its open notebooks, if any. No build keys: an agent passes this on to the
-/// user, to whom they mean nothing. As in `no_r_text`'s callers, the way to stop it comes only after the
-/// user's yes: small models take a named call as a recipe, and a kept runtime's open notebook is often
-/// this session's own, which `stop_machine`'s check of other sessions doesn't count (#239).
 pub(crate) fn other_version_text(place: &str, machine: &str, interface: Option<u32>, open: &str) -> String {
     format!(
         "Endeavor on {place} was started by {} version, and it keeps running as it is.{open} Some notebook tools may not work as described, or may be refused. If that happens, don't stop it yourself: tell the user, and ask whether to restart it, which closes the notebooks open in it. Only if the user says yes, call `stop_machine` with machine \"{machine}\", then `use_machine` with machine \"{machine}\" to start this version.",
@@ -237,62 +161,41 @@ pub(crate) fn other_version_text(place: &str, machine: &str, interface: Option<u
     )
 }
 
-/// What the agent is told in place of a refusal of an R notebook's path by a runtime on `place` from
-/// before R notebooks (`mcp::refuses_r_for_want_of_it`); `restart` says how this version gets there.
 pub(crate) fn no_r_text(place: &str, restart: &str) -> String {
     format!("unsupported::Endeavor on {place} was started by an older version, which has no R notebooks, so it can't make or open this one. This version has them; the older one keeps running until it is restarted. {restart}")
 }
 
-/// Why a runtime from a build before one port per runtime can't be used.
 pub const OLDER_RUNTIME: &str = "Julia here was started by an older version of Endeavor, which this version can't connect to. Restart Julia to use it.";
 
 enum Event {
     App(ToHelper),
-    /// The app closed our stdin.
     Eof,
-    /// The runtime with this pid exited, with this status.
     Exited(i32, String),
-    /// A control message from the relay on a job's node (`slurm::Link`).
     Node(u64, ToApp),
-    /// That relay's output ended.
     NodeGone(u64),
 }
 
-/// Where the app's streams go while a runtime is attached.
 #[derive(Clone)]
 enum Route {
     None,
-    /// The runtime's loopback port here.
     Local(u16),
-    /// On to the relay on the job's node.
     Node(Arc<slurm::Link>),
 }
 
 type Routes = Arc<RwLock<Route>>;
 
-/// How the helper answers the app's file requests.
 type Answer = Arc<dyn Fn(&wire::files::Request) -> wire::files::Reply + Send + Sync>;
 
-/// Arguments this program needs before the helper's own to run as the helper
-/// again (for the core): none for the `endeavor` binary, the flag for the app.
 static HELPER_ARGS: OnceLock<&'static [&'static str]> = OnceLock::new();
 
-/// With `--own-with-client`, the write end of the core's lifeline: a pipe whose other end the core this
-/// helper started reads (`core --lifeline`). However this process ends, SIGKILL included, the core then
-/// reads the pipe's end, and ends with Julia unless `keep_runtime` was called first. On Windows the core
-/// gets the pipe's read handle by inheritance, as an fd on Unix (#144).
 static LIFELINE: Mutex<Option<std::io::PipeWriter>> = Mutex::new(None);
 
-/// Tell the core this helper started that it is wanted, so that it lives on when this helper ends: once the
-/// app has it, or detaches while it starts.
 fn keep_runtime() {
     if let Some(mut lifeline) = LIFELINE.lock().unwrap().take() {
         let _ = lifeline.write_all(b"k");
     }
 }
 
-/// `ToHelper::OwnWithClient`: off, a start of this helper's that is under way is wanted too, so its
-/// lifeline lets go (`keep_runtime`) and a killed app leaves it (app #245).
 fn own_with_client(args: &Args, on: bool) {
     args.own_with_client.store(on, Ordering::SeqCst);
     if !on {
@@ -300,18 +203,12 @@ fn own_with_client(args: &Args, on: bool) {
     }
 }
 
-/// The helper's main, given its arguments without the program name. Call it
-/// before the process starts any thread: it blocks SIGUSR1 for all of them.
 pub fn run(argv: Vec<String>) -> ! {
     run_as(&[], argv)
 }
 
-/// `run` in a program that acts as the helper when started with `helper_args`
-/// before the helper's arguments (the app: `endeavor --helper …`).
 pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
     let _ = HELPER_ARGS.set(helper_args);
-    // A binary the bootstrap script or the plugin's launcher installed keeps its folder from being
-    // removed while it runs; the ones a client starts look for other builds nothing uses (#97).
     let place = old_builds::Place::here(helper_args);
     old_builds::hold_own_folder(place.as_ref());
     if matches!(argv.first().map(String::as_str), Some("connect" | "mcp" | "serve")) {
@@ -323,11 +220,9 @@ pub fn run_as(helper_args: &'static [&'static str], argv: Vec<String>) -> ! {
         Some("node-start") => slurm::node_start_main(&argv[1..]),
         Some("core") => core::main(&argv[1..]),
         Some("serve" | "mcp" | "stop" | "status" | "open") => standalone::main(&argv),
-        // Claude Code's PreToolUse hook, from the plugin's launcher.
         Some("hook") => standalone::claude_mode::hook_main(),
         Some("--version" | "-V" | "version") => update::print_version(),
         Some("update") => update::main(&argv[1..]),
-        // ssh runs `$SSH_ASKPASS PROMPT`, with no room for a mode argument.
         Some(prompt) if prompt != "connect" && [wire::askpass::SOCKET_ENV, wire::askpass::ADDRESS_ENV].iter().any(|v| std::env::var_os(v).is_some()) => askpass::run(prompt),
         _ => {}
     }
@@ -435,23 +330,18 @@ fn make_state_dir(dir: &Path) -> Result<(), String> {
     builder.create(dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))
 }
 
-/// `options` for a file only this user may read. On Windows the state folder
-/// is under the user's own %LOCALAPPDATA%, whose permissions already do that.
 fn owner_only(options: &mut OpenOptions) -> &mut OpenOptions {
     #[cfg(unix)]
     options.mode(0o600);
     options
 }
 
-/// Say hello, then serve the app until it detaches or goes away, starting,
-/// stopping and relaying to the runtime as it asks. Returns only on failure.
 fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, String> {
     make_state_dir(&args.state_dir)?;
     let (events, rx) = mpsc::channel();
     let mut inbox = Inbox { rx, later: VecDeque::new() };
     let routes: Routes = Arc::new(RwLock::new(Route::None));
     let parts = Parts::default();
-    // The folder of the runtime attached, if one is; else it is decided when it is used (`state_dir_now`).
     let attached_dir: Arc<RwLock<Option<PathBuf>>> = Arc::default();
     let answer: Answer = {
         let (attached_dir, named, unnamed, launcher, any_node, parts, julia) = (attached_dir.clone(), args.state_dir.clone(), args.unnamed.clone(), args.launcher, args.any_node, parts.clone(), args.julia.clone());
@@ -507,7 +397,6 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
                     }
                 }
             }
-            // The app quits and the plugin works in the runtime: it is left to the plugin (app #232).
             Event::App(ToHelper::Stop { unless_shared: true, .. })
                 if attached.as_ref().is_some_and(|a| matches!(a.how, How::Process(..)) && a.left_to_plugin()) =>
             {
@@ -534,8 +423,6 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
                 }
                 std::process::exit(0);
             }
-            // An explicit Detach wins over --quit-with-client: the app decides at
-            // quit, and the flag only covers an app that vanishes without saying.
             Event::App(ToHelper::Detach) => {
                 parts.discard();
                 keep_runtime();
@@ -543,7 +430,6 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
             }
             Event::Eof => left_running(args, attached, &routes, &mut inbox),
             Event::App(ToHelper::OwnWithClient { on }) => own_with_client(args, on),
-            // Answered as they arrive (relay_stdin).
             Event::App(ToHelper::Files { .. }) => {}
             Event::Exited(pid, status) => {
                 if attached.as_ref().is_some_and(|a| matches!(&a.how, How::Process(r, _) if r.pid == pid)) {
@@ -568,9 +454,6 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
     }
 }
 
-/// The app went and leaves the runtime running, and this helper exits. With `--exit-idle-after-client`, one
-/// here ends once idle (`core::end_when_idle`). A runtime of an older build, whose core can't, would then
-/// never end: it is left to the plugin if the plugin works in it, else stopped, as the app's quit used to.
 fn left_running(args: &Args, attached: Option<Attached>, routes: &Routes, inbox: &mut Inbox) -> ! {
     if args.exit_idle_after_client
         && let Some(attached) = attached
@@ -589,14 +472,10 @@ fn left_running(args: &Args, attached: Option<Attached>, routes: &Routes, inbox:
     std::process::exit(0)
 }
 
-/// The first `core::INTERFACE` whose core keeps a box's picture (`notebook_crop`, `view_cell_output`'s `crop`).
 pub(crate) const CROP_SINCE: u32 = 47;
 
-/// The first `core::INTERFACE` whose core has `endeavor/end_when_idle`.
 const END_WHEN_IDLE_SINCE: u32 = 46;
 
-/// The state folder as `connect` would pick it now: `named` when `--state-dir` was given (or on a cluster),
-/// else the plugin's folder, or the app's older one while a runtime there is alive (`Args::unnamed`).
 fn state_dir_now(unnamed: &Option<(PathBuf, Option<PathBuf>)>, named: &Path) -> PathBuf {
     match unnamed {
         Some((dir, older)) => runtime::or_older(dir, older.as_deref()),
@@ -604,9 +483,6 @@ fn state_dir_now(unnamed: &Option<(PathBuf, Option<PathBuf>)>, named: &Path) -> 
     }
 }
 
-/// With no runtime attached, decide the state folder for the start or stop about to happen, at that
-/// moment: the app's Restart Julia after the runtime in the app's older folder stopped starts in the
-/// plugin's folder, and a start or check after the plugin started one there finds it (#434).
 fn repick_state_dir(args: &mut Args) -> Result<(), String> {
     let now = state_dir_now(&args.unnamed, &args.state_dir);
     if now != args.state_dir {
@@ -616,8 +492,6 @@ fn repick_state_dir(args: &mut Args) -> Result<(), String> {
     Ok(())
 }
 
-/// Answer the `Stop` with this id, and the ones said during it, which have the same outcome: they are
-/// not stopped again. A forced one said during an unforced stop is not among them, and is heard next.
 fn answer_stops(mux: &Arc<Mux>, inbox: &mut Inbox, id: u32, force: bool, stopped: &Result<(), String>) {
     for id in std::iter::once(id).chain(inbox.take_stops(force)) {
         let reply = match stopped {
@@ -628,8 +502,6 @@ fn answer_stops(mux: &Arc<Mux>, inbox: &mut Inbox, id: u32, force: bool, stopped
     }
 }
 
-/// The relay to the job's node ended: reconnect if the job still runs (the
-/// connection inside the cluster dropped), else say how the job ended.
 fn lost_node(args: &Args, mux: &Arc<Mux>, routes: &Routes, attached: &mut Option<Attached>, events: &Sender<Event>, said: Option<(String, Vec<String>)>) {
     *routes.write().unwrap() = Route::None;
     let Some(mut now) = attached.take() else { return };
@@ -644,45 +516,31 @@ fn lost_node(args: &Args, mux: &Arc<Mux>, routes: &Routes, attached: &mut Option
     let _ = mux.send(&job.ended(&args.state_dir, said).frame());
 }
 
-/// The runtime this helper is a client of. Any number of helpers attach to one runtime.
 struct Attached {
     how: How,
     state: State,
     reattached: bool,
-    /// Set as the app quits (`left_to_plugin`), under the lock each try of `take_back` holds, so a
-    /// take-back can't land after the runtime was left to the plugin and undo it (#453).
     quitting: Arc<Mutex<bool>>,
 }
 
 enum How {
-    /// A process here, and its port.
     Process(Runtime, u16),
     Slurm(slurm::Running),
 }
 
 impl Attached {
-    /// Whether the runtime, asked as the app quits, stays for the plugin working in it
-    /// (`core::leave_to_plugin`). One that doesn't answer is stopped, as before.
     fn left_to_plugin(&self) -> bool {
         let How::Process(_, port) = &self.how else { return false };
         *self.quitting.lock().unwrap() = true;
         bridge_rpc(*port, &self.state.token, "endeavor/leave_to_plugin", json!({})).is_ok_and(|reply| reply["result"]["left"] == true)
     }
 
-    /// The app went and leaves this runtime running: it ends once idle from now on (`core::end_when_idle`).
-    /// Marked as quitting first, under the lock each try of `take_back` holds, so a take-back can't land after
-    /// it and undo it. A runtime of an older build ignores the call.
     fn end_when_idle(&self) -> std::io::Result<()> {
         let How::Process(_, port) = &self.how else { return Ok(()) };
         *self.quitting.lock().unwrap() = true;
         bridge_rpc(*port, &self.state.token, "endeavor/end_when_idle", json!({})).map(drop)
     }
 
-    /// The app has this runtime again: one an earlier quit left to the plugin goes back to the lifetime it
-    /// started with (`core::keep_for_app`), so no front takes it for the plugin's own. A runtime of an
-    /// older build ignores the call.
-    /// Tried a few times, off the helper's loop, since a runtime still left would stop under the app once
-    /// the plugin is out of it (#453).
     fn take_back(&self) {
         let How::Process(_, port) = &self.how else { return };
         let (port, token, quitting) = (*port, self.state.token.clone(), self.quitting.clone());
@@ -719,12 +577,6 @@ impl Attached {
         }
     }
 
-    /// Stop the runtime for every client. The start lock is held throughout, so
-    /// a helper that is asked for a runtime meanwhile starts a new one after this
-    /// one is gone, and never attaches to one that is on its way out. Without
-    /// the lock within `limit` the runtime isn't stopped: it comes back with
-    /// why, still routed to. The streams are cut only once the lock is held,
-    /// and restored if a process is still alive after its stop.
     fn stop(self, args: &Args, routes: &Routes, inbox: &mut Inbox, limit: Duration) -> Result<(), Box<(Attached, String)>> {
         let _starting = match lock_stop(&args.state_dir, inbox, limit) {
             Ok(lock) => lock,
@@ -748,12 +600,8 @@ impl Attached {
     }
 }
 
-/// Why a stop that left the process alive is refused.
 const STILL_RUNNING: &str = "Endeavor was not stopped: it is still running.";
 
-/// Stop `runtime`, leaving a note for the other clients of how it was stopped
-/// (see `stopped`), and taking the note back if it is still alive. Whether it
-/// is gone. `state` is its record, which a runtime that is starting does not have yet.
 fn stop_marked(dir: &Path, state: Option<&State>, runtime: &Runtime, how: stopped::How) -> bool {
     let of = stopped::Of::Runtime(runtime.pid);
     stopped::mark(dir, of, how);
@@ -765,36 +613,25 @@ fn stop_marked(dir: &Path, state: Option<&State>, runtime: &Runtime, how: stoppe
     gone
 }
 
-/// What the app and the runtime have said that the helper has not yet handled.
 struct Inbox {
     rx: mpsc::Receiver<Event>,
-    /// Events a stop took off `rx` that are still the loop's to handle.
     later: VecDeque<Event>,
 }
 
-/// What a start hears while it waits.
 enum Heard {
-    /// Nothing, or a `StartRuntime`, which was answered as busy.
     Quiet,
-    /// The `Stop` with this id, and whether it is forced: it cuts the start short.
     Stop(u32, bool),
     Detach,
     Eof,
-    /// What happened to a runtime or a relay: nothing a start under way acts on.
     Event,
-    /// `OwnWithClient`: what `--own-with-client` is from now on.
     OwnWithClient(bool),
 }
 
 impl Inbox {
-    /// The next event, waiting for one.
     fn next(&mut self) -> Event {
         self.later.pop_front().unwrap_or_else(|| self.rx.recv().expect("senders live as long as their threads"))
     }
 
-    /// The next event for a start under way, taking the ones a stop kept first,
-    /// and waiting up to `wait` for one. A `StartRuntime` meanwhile is refused,
-    /// so that it is answered.
     fn hear_while_starting(&mut self, mux: &Arc<Mux>, wait: Duration) -> Heard {
         let event = match self.later.pop_front() {
             Some(event) => event,
@@ -817,18 +654,12 @@ impl Inbox {
         }
     }
 
-    /// Keep `event` for the main loop once a stop is over. What happened to the
-    /// runtime goes before what the app said, so that a start asked for meanwhile
-    /// doesn't find a runtime that has since gone still attached.
     fn defer(&mut self, event: Event) {
         let app = |event: &Event| matches!(event, Event::App(_) | Event::Eof);
         let at = if app(&event) { self.later.len() } else { self.later.iter().position(app).unwrap_or(self.later.len()) };
         self.later.insert(at, event);
     }
 
-    /// The ids of the `Stop`s kept that came before any start, a detach, the
-    /// end of input or (after an unforced stop, `force` false) a forced stop,
-    /// which are no longer kept: a stop that is over answers them.
     fn take_stops(&mut self, force: bool) -> Vec<u32> {
         let mut ids = Vec::new();
         let mut at = 0;
@@ -847,25 +678,15 @@ impl Inbox {
     }
 }
 
-/// How a start ended without a runtime: what answers it.
 enum Unstarted {
     Failed(String),
-    /// The start needs these installed and `install` was false.
     NeedsInstall(Vec<wire::Item>),
     Died { status: String, log_tail: Vec<String> },
-    /// The `Stop` with this id, forced or not, cut it short; that is answered too. `other`: it cut short a
-    /// wait for what this connection didn't begin (another connection's start, the start lock, or a
-    /// runtime that didn't answer), which this stop hasn't ended.
     Stopped { id: u32, force: bool, other: bool },
-    /// Only attaching was asked for, and nothing runs or is starting.
     NotRunning,
 }
 
 impl Unstarted {
-    /// Answer the `StartRuntime` with id `start`, and the `Stop` that ended it; but a `Stop` that ended
-    /// only this connection's wait for what it didn't begin is not answered: its id and `force` are
-    /// returned, for the caller to handle as a `Stop` with nothing attached (`stop_recorded`), so that an
-    /// unforced one says Julia is still starting and a forced one cancels that start.
     fn answer(self, mux: &Arc<Mux>, start: u32) -> Option<(u32, bool)> {
         if let Unstarted::Stopped { id, force, other: true } = self {
             let _ = mux.send(&ToApp::StartCancelled { id: start }.frame());
@@ -886,16 +707,12 @@ impl Unstarted {
     }
 }
 
-/// What the helper says to its client, and hears from it, while a start goes on (`runtime::Hooks`).
 struct Client<'a> {
     args: &'a Args,
     mux: &'a Arc<Mux>,
     inbox: &'a mut Inbox,
     parts: &'a Parts,
-    /// Whether the client was told that another helper holds the start lock.
     told: bool,
-    /// The `Stop` that ended the start: its id, whether it was forced, and whether it ended a wait for
-    /// what this didn't begin.
     stop: Option<(u32, bool, bool)>,
 }
 
@@ -904,8 +721,6 @@ impl<'a> Client<'a> {
         Client { args, mux, inbox, parts, told: false, stop: None }
     }
 
-    /// Hear what the client said while a stop waited, before a start for it is made: a client that has
-    /// since left gets none. Err when a `Stop` among it ended the start.
     fn hear_kept(&mut self) -> Result<(), Unstarted> {
         while !self.inbox.later.is_empty() {
             if !self.hear(Duration::ZERO, Waiting::Lock) {
@@ -915,10 +730,6 @@ impl<'a> Client<'a> {
         Ok(())
     }
 
-    /// Hear the client for up to `wait`. Detach and the end of input exit, leaving a runtime that is
-    /// starting to finish by itself; but the end of input stops it where `--quit-with-client` says the
-    /// runtime goes with the client, or `--own-with-client` says so and this connection began the start.
-    /// A `Stop` ends the start. A `StartRuntime` is refused. False: the start is over.
     fn hear(&mut self, wait: Duration, waiting: Waiting) -> bool {
         match self.inbox.hear_while_starting(self.mux, wait) {
             Heard::Stop(id, force) => {
@@ -931,7 +742,6 @@ impl<'a> Client<'a> {
                 std::process::exit(0)
             }
             Heard::Eof if self.args.quit_with_client && waiting != Waiting::Lock => return false,
-            // `await_runtime` stops the runtime this start began.
             Heard::Eof if self.args.own_with_client.load(Ordering::SeqCst) && waiting == Waiting::Ready => return false,
             Heard::Eof => std::process::exit(0),
             Heard::OwnWithClient(on) => own_with_client(self.args, on),
@@ -940,7 +750,6 @@ impl<'a> Client<'a> {
         true
     }
 
-    /// How a start that `hear` ended is answered; none is when the client has gone, and the process exits.
     fn cancelled(&self) -> Unstarted {
         match self.stop {
             Some((id, force, other)) => Unstarted::Stopped { id, force, other },
@@ -948,7 +757,6 @@ impl<'a> Client<'a> {
         }
     }
 
-    /// The app's answer to a start that came to nothing.
     fn unstarted(&self, outcome: Outcome) -> Unstarted {
         match outcome {
             Outcome::Failed(message) => Unstarted::Failed(message),
@@ -962,8 +770,6 @@ impl<'a> Client<'a> {
         }
     }
 
-    /// Take the start lock, with what the client said while a stop waited heard first. While another
-    /// helper holds it the client is told once, and what it sends is still served.
     fn lock_start(&mut self) -> Result<File, Unstarted> {
         self.hear_kept()?;
         runtime::take_start_lock(&self.args.state_dir, self).map_err(|outcome| self.unstarted(outcome))
@@ -988,9 +794,6 @@ impl Hooks for Client<'_> {
     }
 }
 
-/// Take the start lock to stop the runtime, waiting up to `limit`. What the
-/// client sends meanwhile doesn't cancel the stop, and none of it is lost: it
-/// is kept in `later`.
 fn lock_stop(dir: &Path, inbox: &mut Inbox, limit: Duration) -> Result<File, String> {
     let waited = standalone::wait_for_start_lock(dir, limit, || {
         match inbox.rx.recv_timeout(Duration::from_millis(200)) {
@@ -1007,13 +810,9 @@ fn lock_stop(dir: &Path, inbox: &mut Inbox, limit: Duration) -> Result<File, Str
     })
 }
 
-/// Attach to the runtime in the state folder, or start one (`runtime::find_or_start`). Helpers asked at
-/// once start one runtime and the rest attach to it. The error is the app's answer: why it couldn't
-/// start, or that it died while starting.
 fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>, parts: &Parts, engine: &str, install: bool, attach_only: bool) -> Result<Attached, Unstarted> {
     let mut client = Client::new(args, mux, inbox, parts);
     client.hear_kept()?;
-    // A process's runtime only: on a cluster (`slurm::attach`) a new one would wait in the queue again.
     let want = Want { args, engine, install, runtime: &|| Ok(args.runtime.clone()), events, attach_only, replace_older: !attach_only };
     match runtime::find_or_start(&want, &mut client) {
         Outcome::Ready(Up { state, port, runtime, started }) => Ok(Attached { how: How::Process(runtime, port), state, reattached: !started, quitting: Default::default() }),
@@ -1021,10 +820,6 @@ fn attach(args: &Args, mux: &Arc<Mux>, inbox: &mut Inbox, events: &Sender<Event>
     }
 }
 
-/// Stop the runtime recorded in the state folder without attaching to it (on
-/// a cluster, cancel its job, or the job waiting for a node): the app's Stop
-/// for a host it only browsed. Without the start lock, for a runtime this helper
-/// may not stop, or for one that is still starting, nothing is stopped: why.
 fn stop_recorded(args: &Args, inbox: &mut Inbox, events: &Sender<Event>, force: bool) -> Result<(), String> {
     let dir = &args.state_dir;
     let _starting = lock_stop(dir, inbox, standalone::stop_lock_limit())?;
@@ -1041,7 +836,6 @@ fn stop_recorded(args: &Args, inbox: &mut Inbox, events: &Sender<Event>, force: 
     Ok(())
 }
 
-/// What a client that finds the runtime gone is told, by how it was stopped.
 fn stopped_text(how: stopped::How) -> &'static str {
     match how {
         stopped::How::Connection => "It was stopped from another connection.",
@@ -1049,15 +843,12 @@ fn stopped_text(how: stopped::How) -> &'static str {
     }
 }
 
-/// What runs from the state folder, found without taking it over.
 fn check(dir: &Path, launcher: Launcher, any_node: bool) -> RuntimeState {
     if launcher == Launcher::Slurm {
         return slurm::check(dir);
     }
-    // Before the look: a core writes its record before it lets go of the lock.
     let starting = runtime::lock_state(dir).is_held();
     match runtime::look(dir, any_node, true) {
-        // No runtime answers: a start under way is what will.
         runtime::Looked::NotRunning | runtime::Looked::Dead(_) | runtime::Looked::Silent(_) if starting => RuntimeState::Starting,
         runtime::Looked::NotRunning | runtime::Looked::Dead(_) | runtime::Looked::Silent(_) => RuntimeState::NotRunning,
         runtime::Looked::OtherNode(state) | runtime::Looked::Older(state) => RuntimeState::Running { node: state.node, notebooks: None, job: None },
@@ -1065,7 +856,6 @@ fn check(dir: &Path, launcher: Launcher, any_node: bool) -> RuntimeState {
     }
 }
 
-/// How many notebooks the runtime has open, from its `list_notebooks` tool.
 fn open_notebooks(port: u16, token: &str) -> Option<u32> {
     let params = json!({ "name": "list_notebooks", "arguments": {} });
     let reply = bridge_rpc(port, token, "tools/call", params).ok()?;
@@ -1074,11 +864,6 @@ fn open_notebooks(port: u16, token: &str) -> Option<u32> {
     list.as_array().map(|a| a.len() as u32)
 }
 
-/// Whether the runtime that answers on `port`, which `state` records, runs on a Julia removed since it
-/// started, so that no notebook can start in it (#346, #347): it runs on this computer, its core says which
-/// julia it started (`endeavor/julia_status`), and that file is gone. juliaup removes a version when it
-/// updates past it, even while that version runs. False when Julia hasn't started there, when the core
-/// doesn't say, and on another computer, where this one can't look.
 fn julia_removed(state: &State, port: u16) -> bool {
     if state.node != hostname() {
         return false;
@@ -1087,10 +872,8 @@ fn julia_removed(state: &State, port: u16) -> bool {
     reply["result"]["julia"]["path"].as_str().is_some_and(|path| !Path::new(path).exists())
 }
 
-/// A runtime process this helper watches.
 struct Runtime {
     pid: i32,
-    /// As in `State`: what `kill` checks the pid against before ending it.
     started: Option<u64>,
     boot: Option<String>,
     exit: Arc<Exit>,
@@ -1098,7 +881,6 @@ struct Runtime {
 }
 
 impl Runtime {
-    /// The runtime this helper just started as `child`.
     fn child(child: Child, state_dir: &Path, events: &Sender<Event>) -> Runtime {
         let pid = child.id() as i32;
         #[cfg(windows)]
@@ -1114,34 +896,27 @@ impl Runtime {
         }
     }
 
-    /// The runtime `state` records, which some earlier helper started.
     fn recorded(state: &State, state_dir: &Path, events: &Sender<Event>) -> Runtime {
         Runtime::of(state.pid, state.started, state.boot.clone(), state_dir, events)
     }
 
-    /// The runtime process `pid`, which started at `started` (on boot `boot`), though it has no record.
     fn of(pid: i32, started: Option<u64>, boot: Option<String>, state_dir: &Path, events: &Sender<Event>) -> Runtime {
         let exit = Exit::watch_pid(pid, started, boot.clone(), events.clone());
         Runtime { pid, started, boot, exit, state_dir: state_dir.to_path_buf() }
     }
 
-    /// It exited: clean up after it and say so, and if another connection
-    /// stopped it, say that instead of how it exited.
     fn died(&self, status: String) -> (String, Vec<String>) {
         let status = stopped::why(&self.state_dir, stopped::Of::Runtime(self.pid)).map_or(status, |how| stopped_text(how).into());
         let log_tail = log_tail(&self.state_dir.join("runtime.log"));
-        // Its notebook workers are no use without it.
         stop_workers(self.pid, self.started, self.boot.as_deref());
         remove_state(&self.state_dir, self.pid, self.started);
         (status, log_tail)
     }
 
-    /// Whether the process with its pid is it, and runs.
     fn is_it(&self) -> bool {
         pid_alive(self.pid, self.started, self.boot.as_deref())
     }
 
-    /// Ask the runtime to shut down (when it's up and from this build), then insist.
     fn stop(&self, state: Option<&State>) {
         if let Some(state) = state
             && let Some(port) = state.port
@@ -1155,7 +930,6 @@ impl Runtime {
     #[cfg(unix)]
     fn kill(&self) {
         for signal in [libc::SIGTERM, libc::SIGKILL] {
-            // A pid that is now another process's is not signalled.
             if self.exit.status().is_some() || !self.is_it() {
                 break;
             }
@@ -1165,13 +939,11 @@ impl Runtime {
             self.exit.wait(Duration::from_secs(5));
         }
         stop_workers(self.pid, self.started, self.boot.as_deref());
-        // A runtime that survived stays on record for the clients that can still reach it.
         if !self.is_it() {
             remove_state(&self.state_dir, self.pid, self.started);
         }
     }
 
-    /// End the core, which ends its Job Object, and with it Julia and its workers.
     #[cfg(windows)]
     fn kill(&self) {
         if self.exit.status().is_none() {
@@ -1185,14 +957,11 @@ impl Runtime {
     }
 }
 
-/// `ENDEAVOR_TEST_UNKILLABLE` (any value, read only by a debug build) sends the runtime no signals, so a
-/// test can have a runtime that is still alive after the stop, as one stuck in the kernel would be.
 #[cfg(unix)]
 fn unkillable_for_tests() -> bool {
     cfg!(debug_assertions) && std::env::var_os("ENDEAVOR_TEST_UNKILLABLE").is_some()
 }
 
-/// The runtime was started with setsid, so its pid is also its process group's.
 #[cfg(unix)]
 fn signal_group(pid: i32, signal: i32) {
     // SAFETY: plain syscalls; a group or process that's gone only returns ESRCH.
@@ -1202,12 +971,6 @@ fn signal_group(pid: i32, signal: i32) {
     }
 }
 
-/// End what is left of the process group of a runtime whose core `pid` (which started at `started`, on
-/// boot `boot`) is gone, and wait until it is: notebook workers, and on macOS, where nothing ties Julia to
-/// the core, Julia itself, which would otherwise go on saving the notebooks a new runtime opens. Only the
-/// group: once the core is reaped its pid may be reused, but a group id isn't while any member is left. Not
-/// when `pid` now belongs to a process, which may lead a group of its own, nor when the record is from an
-/// earlier boot, whose group ids mean nothing now. Whether anything was left running (zombies are not).
 #[cfg(unix)]
 fn stop_workers(pid: i32, started: Option<u64>, boot: Option<&str>) -> bool {
     if pid <= 0 || pid_alive(pid, None, None) || !unixproc::this_boot(started, boot) {
@@ -1231,14 +994,11 @@ fn stop_workers(pid: i32, started: Option<u64>, boot: Option<&str>) -> bool {
     true
 }
 
-/// Nothing to do on Windows: the core's Job Object ends Julia and its workers
-/// when the core ends.
 #[cfg(windows)]
 fn stop_workers(_pid: i32, _started: Option<u64>, _boot: Option<&str>) -> bool {
     false
 }
 
-/// Whether and how the runtime exited.
 #[derive(Default)]
 struct Exit {
     status: Mutex<Option<String>>,
@@ -1256,7 +1016,6 @@ impl Exit {
         exit
     }
 
-    /// A runtime some earlier helper started isn't our child: poll it.
     fn watch_pid(pid: i32, started: Option<u64>, boot: Option<String>, events: Sender<Event>) -> Arc<Exit> {
         let exit = Arc::new(Exit::default());
         let e = exit.clone();
@@ -1285,10 +1044,6 @@ impl Exit {
     }
 }
 
-/// Whether the process `pid` runs, and when `started` is known, is the one that started then (on boot
-/// `boot`, when both that and this boot have an id): a pid that is recorded outlives a reboot, and is then
-/// another program's. Only a process that is not there, or has another start time, is not it: a start
-/// time that can't be read leaves it to `kill`. Everything that trusts or signals a recorded pid asks this.
 #[cfg(unix)]
 fn pid_alive(pid: i32, started: Option<u64>, boot: Option<&str>) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
@@ -1303,14 +1058,11 @@ fn pid_alive(pid: i32, started: Option<u64>, boot: Option<&str>) -> bool {
     }
 }
 
-/// Windows reuses pids quickly, so the process must also have started when
-/// the record says.
 #[cfg(windows)]
 fn pid_alive(pid: i32, started: Option<u64>, _boot: Option<&str>) -> bool {
     winproc::Process::open(pid, started).is_some_and(|process| process.alive())
 }
 
-/// When this process started, as `runtime.json` and `starting.lock` record it.
 fn own_start_time() -> Option<u64> {
     #[cfg(unix)]
     return unixproc::start_time(std::process::id() as i32).at();
@@ -1318,7 +1070,6 @@ fn own_start_time() -> Option<u64> {
     return winproc::own_start_time();
 }
 
-/// Which boot this is, for the start time to be compared on (`State::boot`).
 fn own_boot() -> Option<String> {
     #[cfg(unix)]
     return unixproc::boot_id();
@@ -1326,9 +1077,6 @@ fn own_boot() -> Option<String> {
     return None;
 }
 
-/// End the runtime recorded with `pid` and `started` (runtime.json), with
-/// Julia and its workers, unless that pid now belongs to another process: the
-/// app's Repair runtime, where Unix ends the process group instead.
 #[cfg(windows)]
 pub fn end_recorded_runtime(pid: i32, started: Option<u64>) {
     if let Some(core) = winproc::Process::open(pid, started) {
@@ -1348,8 +1096,6 @@ fn try_lock(file: &File) -> bool {
     file.try_lock().is_ok()
 }
 
-/// Block SIGUSR1 in every thread (call before any starts), so it can't end
-/// the process: the helper of an older build sends it to the one named in `DIR/lock`.
 fn block_sigusr1() {
     // SAFETY: initializing and applying a signal set on this (still only) thread.
     #[cfg(unix)]
@@ -1361,10 +1107,6 @@ fn block_sigusr1() {
     }
 }
 
-/// Read frames from the app: streams go where the attached runtime is (its
-/// ports here, or the relay on its job's node), file requests are answered on
-/// their own threads with `answer`, other control messages and the end of input
-/// become events.
 fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>, answer: Answer, parts: Parts) {
     std::thread::spawn(move || {
         // SAFETY: fd 0 is our stdin; only this thread reads it.
@@ -1418,13 +1160,10 @@ fn relay_stdin(mux: Arc<Mux>, routes: Routes, events: Sender<Event>, answer: Ans
     });
 }
 
-/// The parts of files the app is sending (`wire::files::write`), so the ones
-/// it never finished go when it does.
 #[derive(Clone, Default)]
 struct Parts(Arc<Mutex<std::collections::HashSet<PathBuf>>>);
 
 impl Parts {
-    /// Answer a piece of a file with `write`, noting its part while unfinished.
     fn track(&self, folder: &str, path: &str, offset: u64, last: bool, write: impl FnOnce() -> wire::files::Reply) -> wire::files::Reply {
         let Ok((part, _)) = wire::files::upload_paths(&wire::files::expand(folder), path) else { return write() };
         let mut parts = self.0.lock().unwrap();
@@ -1491,12 +1230,8 @@ fn parse_state(v: &Value) -> Option<State> {
     })
 }
 
-/// The variables that decide how a runtime's downloads reach the network, package installs among them.
-/// A runtime keeps the values of the session that started it (#93).
 pub(crate) const NETWORK_VARS: [&str; 11] = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE"];
 
-/// This process's network settings (`NETWORK_VARS`), as `runtime.json` records them: each variable that is
-/// set, with a short hash of its value. Not the value, since a proxy's address can carry a password.
 pub(crate) fn network_settings() -> serde_json::Map<String, Value> {
     use sha2::{Digest, Sha256};
     NETWORK_VARS
@@ -1509,8 +1244,6 @@ pub(crate) fn network_settings() -> serde_json::Map<String, Value> {
         .collect()
 }
 
-/// Remove `runtime.json` if it still describes the runtime `pid`, which started at `started` when that
-/// is known and the record says.
 fn remove_state(dir: &Path, pid: i32, started: Option<u64>) {
     let path = dir.join("runtime.json");
     let current = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
@@ -1520,20 +1253,14 @@ fn remove_state(dir: &Path, pid: i32, started: Option<u64>) {
     }
 }
 
-/// The bridge's bearer token, kept in the state folder so it stays the same
-/// across runtimes (the agent's MCP config carries it).
 fn token(dir: &Path) -> Result<String, String> {
     kept_token(dir, "token")
 }
 
-/// The pages' token, which lets a browser or the app into Pluto's and Ember's pages and nothing else.
-/// Apart from the bearer token, which an agent's MCP config carries and which doesn't open the pages.
-/// Kept in the state folder like it, so the pages' link stays the same across runtimes.
 pub(crate) fn page_token(dir: &Path) -> Result<String, String> {
     kept_token(dir, "page_token")
 }
 
-/// The token in the state folder's file `name`, made when there is none.
 fn kept_token(dir: &Path, name: &str) -> Result<String, String> {
     let path = dir.join(name);
     if let Ok(token) = std::fs::read_to_string(&path)
@@ -1549,7 +1276,6 @@ fn kept_token(dir: &Path, name: &str) -> Result<String, String> {
     Ok(token)
 }
 
-/// `N` random bytes, in hex.
 pub(crate) fn random_hex<const N: usize>() -> Result<String, String> {
     let mut bytes = [0u8; N];
     #[cfg(unix)]
@@ -1559,8 +1285,6 @@ pub(crate) fn random_hex<const N: usize>() -> Result<String, String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// The core's Julia flags (see core): the julia `found`, or with none found, where to find it and
-/// whether Endeavor's own may be downloaded (`install`); and whether Julia waits until it's needed.
 fn julia_flags(args: &Args, found: Option<&str>, install: bool) -> Vec<String> {
     let mut flags: Vec<String> = match (found, &args.julia) {
         (Some(path), _) => vec!["--julia".into(), path.into()],
@@ -1578,12 +1302,9 @@ fn julia_flags(args: &Args, found: Option<&str>, install: bool) -> Vec<String> {
     flags
 }
 
-/// `endeavor core`, which starts `julia boot.jl` (see core) with the `julia` flags (`julia_flags`).
-/// Callers add the R flags (`r::Source::args`).
 fn runtime_command(julia: &[String], runtime: &Path, depot: &str, token: &str, state_dir: &Path, launcher: &str, build: Option<&str>) -> Result<Command, String> {
     let _ = std::fs::remove_file(state_dir.join("runtime.json"));
     let mut command = Command::new(this_program()?);
-    // `ps` shows `endeavor core` (`endeavor --helper core` from the app), not the binary's path.
     #[cfg(unix)]
     command.arg0("endeavor");
     command.args(HELPER_ARGS.get().copied().unwrap_or_default());
@@ -1595,7 +1316,6 @@ fn runtime_command(julia: &[String], runtime: &Path, depot: &str, token: &str, s
         .arg("--runtime")
         .arg(runtime)
         .args(["--depot", depot])
-        // Not argv, which `ps` shows to every user.
         .env("ENDEAVOR_TOKEN", token)
         .env("ENDEAVOR_LAUNCHER", launcher)
         .stdin(Stdio::null());
@@ -1605,16 +1325,11 @@ fn runtime_command(julia: &[String], runtime: &Path, depot: &str, token: &str, s
     Ok(command)
 }
 
-/// The file this process runs from, to start a core of this build or send this build to a server. `endeavor update` may have put another
-/// build at this program's path since it started, and a core of that build would run with this build's
-/// `runtime/`. Linux keeps the file this process started from.
 #[cfg(target_os = "linux")]
 pub(crate) fn this_program() -> Result<PathBuf, String> {
     Ok(PathBuf::from("/proc/self/exe"))
 }
 
-/// Elsewhere the program at the path is asked its build, and another build is refused. Not in the app
-/// (`HELPER_ARGS`), whose copy only the app's own update replaces.
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn this_program() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
@@ -1636,11 +1351,6 @@ pub(crate) fn this_program() -> Result<PathBuf, String> {
     }
 }
 
-/// `runtime.log`, emptied, as the runtime's stdout and its stderr. The log
-/// shows Pluto's secret URL. On Unix it's opened to append, so nothing that
-/// writes it overwrites another. Not on Windows: there appending opens the file
-/// without the right to its data, which emptying it needs (os error 5). The two
-/// handles share one position, so stdout and stderr still take turns.
 fn open_log(path: &Path) -> Result<(File, File), String> {
     let mut options = OpenOptions::new();
     if cfg!(windows) {
@@ -1654,8 +1364,6 @@ fn open_log(path: &Path) -> Result<(File, File), String> {
     Ok((log, stderr))
 }
 
-/// Start the runtime detached from us (its own session, no terminal, stdin from
-/// /dev/null), logging to `runtime.log`.
 #[cfg(unix)]
 fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<Child, String> {
     let dir = &args.state_dir;
@@ -1663,7 +1371,6 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
     let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
     command.args(args.r.args()).args(args.own_r.then_some("--own-r")).stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
-    // A start this connection owns ends if this helper does before the app has it (`LIFELINE`).
     let lifeline = match args.own_with_client.load(Ordering::SeqCst) {
         true => Some(std::io::pipe().map_err(|e| format!("Couldn't start the runtime: {e}"))?),
         false => None,
@@ -1679,7 +1386,6 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
                 libc::fcntl(fd, libc::F_SETFD, 0);
             }
             libc::setsid();
-            // Not the signals the starting process blocked for itself (`standalone` blocks Ctrl-C's).
             let mut none: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut none);
             libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
@@ -1693,10 +1399,6 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
     Ok(child)
 }
 
-/// Start the runtime detached from us (its own process group, a console of its
-/// own with no window, stdin from NUL), logging to `runtime.log`. The core
-/// then puts itself in a Job Object that takes Julia and its workers along
-/// when it ends (see core).
 #[cfg(windows)]
 fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<Child, String> {
     use std::os::windows::io::AsRawHandle;
@@ -1709,8 +1411,6 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
     command.args(args.r.args()).args(args.own_r.then_some("--own-r")).stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
     not_inherited_std_handles();
-    // A start this connection owns ends if this helper does before the app has it (`LIFELINE`). Every
-    // inheritable handle goes to each child, so only the read end is made one, and only until the spawn.
     let lifeline = match args.own_with_client.load(Ordering::SeqCst) {
         true => Some(std::io::pipe().map_err(|e| format!("Couldn't start the runtime: {e}"))?),
         false => None,
@@ -1720,12 +1420,6 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
         inherited(reader.as_raw_handle(), true);
         command.arg("--lifeline").arg((reader.as_raw_handle() as usize).to_string());
     }
-    // CREATE_NO_WINDOW gives a console-program core a console without a
-    // window. A GUI-program core (the app's own exe) gets no console at all,
-    // so the core also starts Julia with CREATE_NO_WINDOW (core.rs), and
-    // Pluto's workers share Julia's hidden console. Breaking away from a job the
-    // app runs in lets the runtime outlive the app, as it does on Unix; a job
-    // that doesn't allow that refuses it, and then the runtime ends with the app.
     let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
     let child = match command.creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB).spawn() {
         Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
@@ -1744,7 +1438,6 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
     child
 }
 
-/// Whether children get `handle`.
 #[cfg(windows)]
 fn inherited(handle: std::os::windows::io::RawHandle, on: bool) {
     use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
@@ -1752,11 +1445,6 @@ fn inherited(handle: std::os::windows::io::RawHandle, on: bool) {
     unsafe { SetHandleInformation(handle as _, HANDLE_FLAG_INHERIT, if on { HANDLE_FLAG_INHERIT } else { 0 }) };
 }
 
-/// Our standard handles came from whoever started us as inheritable handles,
-/// and Windows gives every inheritable handle to each child, whatever its own
-/// stdio. The core and Julia would then keep the app's log and our pipes open
-/// for as long as a kept runtime runs. Each spawn that inherits our output
-/// still gets its own copy (std duplicates it for the child).
 #[cfg(windows)]
 fn not_inherited_std_handles() {
     use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation};
@@ -1772,8 +1460,6 @@ fn not_inherited_std_handles() {
     }
 }
 
-/// Send the runtime's log lines as `Progress` until it's ready (then what's
-/// been written so far) or gone.
 fn follow_log(path: PathBuf, mux: Arc<Mux>, ready: Arc<AtomicBool>, exit: Arc<Exit>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut log = runtime::Log::new(path);
@@ -1788,14 +1474,12 @@ fn follow_log(path: PathBuf, mux: Arc<Mux>, ready: Arc<AtomicBool>, exit: Arc<Ex
     })
 }
 
-/// The end of the runtime's log, secrets masked.
 fn log_tail(path: &Path) -> Vec<String> {
     let text = log_end(path);
     let lines: Vec<&str> = text.lines().collect();
     lines[lines.len().saturating_sub(LOG_TAIL)..].iter().map(|l| redact_secret(l)).collect()
 }
 
-/// The last 64 KB of the log at `path`, empty if it can't be read.
 fn log_end(path: &Path) -> String {
     let Ok(mut file) = File::open(path) else { return String::new() };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -1805,7 +1489,6 @@ fn log_end(path: &Path) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Mask Pluto's `secret=…` URL token.
 fn redact_secret(line: &str) -> String {
     let Some(start) = line.find("secret=").map(|i| i + "secret=".len()) else { return line.to_string() };
     let end = line[start..].find(|c: char| !c.is_ascii_alphanumeric()).map_or(line.len(), |i| start + i);
@@ -1821,9 +1504,6 @@ fn hostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
-/// The DNS host name, as Julia's `gethostname()` gives it for the runtime's
-/// record. `COMPUTERNAME` is the NetBIOS name (upper case, at most 15
-/// characters), so a computer named otherwise saw its own runtime as remote.
 #[cfg(windows)]
 fn hostname() -> String {
     use windows_sys::Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW};
@@ -1837,22 +1517,15 @@ fn hostname() -> String {
     String::from_utf16_lossy(&buf[..len as usize])
 }
 
-/// Whether `node`, a host name a runtime recorded, names this computer.
-/// Windows host names don't keep case: Julia's `gethostname()` and ours can
-/// give the same name in different cases (EndeavorMCP #54).
 pub(crate) fn is_this_node(node: &str) -> bool {
     let here = hostname();
     if cfg!(windows) { node.eq_ignore_ascii_case(&here) } else { node == here }
 }
 
-/// The app's calls on the runtime's port.
 const CALL: &str = "/endeavor/call";
 
-/// The waits between tries of `endeavor/keep_for_app` (`Attached::take_back`): about a minute in all.
 const TAKE_BACK_WAITS: [Duration; 5] = [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(15), Duration::from_secs(30)];
 
-/// Call `call` until it answers, waiting `waits` between tries, and stop once `quitting` is set. Each try
-/// holds `quitting`'s lock, so none is under way once it is set. Whether it answered.
 fn take_back_with(call: &dyn Fn() -> std::io::Result<()>, waits: &[Duration], quitting: &Mutex<bool>) -> bool {
     let mut waits = waits.iter();
     loop {
@@ -1876,7 +1549,6 @@ fn take_back_with(call: &dyn Fn() -> std::io::Result<()>, waits: &[Duration], qu
     }
 }
 
-/// POST one JSON-RPC call to the runtime's calls; its reply.
 fn bridge_rpc(port: u16, token: &str, method: &str, params: Value) -> std::io::Result<Value> {
     let mut socket = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(2))?;
     socket.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1887,18 +1559,14 @@ fn bridge_rpc(port: u16, token: &str, method: &str, params: Value) -> std::io::R
         "POST {CALL} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )?;
-    // HTTP/1.0: the body runs to the end of the connection.
     let mut response = String::new();
     socket.read_to_string(&mut response)?;
     let (_, payload) = response.split_once("\r\n\r\n").ok_or(std::io::ErrorKind::InvalidData)?;
     serde_json::from_str(payload).map_err(|_| std::io::ErrorKind::InvalidData.into())
 }
 
-/// How long `bridge_call` has, connecting, sending and reading the response's head, all told.
 const BRIDGE_CALL_WAIT: Duration = Duration::from_secs(5);
 
-/// POST one JSON-RPC call to `path` on the loopback server at `port`; its HTTP status. A server that
-/// answers slowly, or a little at a time, does not keep it past `BRIDGE_CALL_WAIT`.
 fn bridge_call(port: u16, path: &str, token: &str, method: &str) -> std::io::Result<u16> {
     bridge_call_within(port, path, token, method, BRIDGE_CALL_WAIT)
 }
@@ -1920,7 +1588,6 @@ mod tests {
 
     #[test]
     fn taking_the_runtime_back_is_tried_again_until_it_answers() {
-        // A runtime still left to the plugin stops under the reopened app once the plugin is out of it (#453).
         let tries = std::cell::Cell::new(0);
         let fails_twice = || {
             tries.set(tries.get() + 1);
@@ -1939,8 +1606,6 @@ mod tests {
 
     #[test]
     fn no_take_back_lands_once_the_app_is_quitting() {
-        // The app quits while a try is under way: setting `quitting` waits for that try, and none starts
-        // after it, so none undoes `leave_to_plugin` (#453).
         let quitting = Arc::new(Mutex::new(false));
         let (started, in_try) = (Arc::new(std::sync::Barrier::new(2)), Arc::new(AtomicBool::new(false)));
         let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1964,12 +1629,9 @@ mod tests {
         assert!(!in_try.load(Ordering::SeqCst), "the try under way ended before the quit went on");
         assert!(!retrying.join().unwrap());
         assert_eq!(tries.load(Ordering::SeqCst), 1, "no try after the quit");
-        // Already quitting: no try at all.
         assert!(!take_back_with(&|| Ok(()), &[], &Mutex::new(true)));
     }
 
-    /// The runtime records Julia's `gethostname()`, the DNS name in its own
-    /// case, which Windows' `hostname` command also prints.
     #[cfg(windows)]
     #[test]
     fn windows_names_this_computer_as_julia_does() {
@@ -1977,7 +1639,6 @@ mod tests {
         assert_eq!(hostname(), String::from_utf8_lossy(&said.stdout).trim());
     }
 
-    /// On Windows the log once couldn't be emptied, so no runtime started there.
     #[test]
     fn the_runtime_log_is_emptied_and_both_handles_write_it() {
         let path = client::scratch("runtime-log").join("runtime.log");
@@ -1998,7 +1659,6 @@ mod tests {
         let stop = done.clone();
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
-            // A byte every 50 ms, never a newline: no single read ever times out.
             while !stop.load(Ordering::SeqCst) {
                 if socket.write_all(b"x").is_err() {
                     break;

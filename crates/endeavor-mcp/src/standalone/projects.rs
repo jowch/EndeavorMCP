@@ -1,11 +1,3 @@
-//! What each project remembers (docs/plugins-and-remote.md): the machine its
-//! agent sessions last used and the folder there. One file the binary owns,
-//! `<state home>/endeavor/projects.json`: a JSON object from a project's folder
-//! (the front's `--folder`, as its canonical path) to a `Remembered`. It is
-//! written whole to a temporary file that is then renamed, readable by this
-//! user only, under a lock. A file that can't be read or parsed is an error
-//! that names it, and is never replaced.
-
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,9 +7,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Remembered {
-    /// The machine's id in the machines file.
     pub machine: String,
-    /// The folder on that machine; none is the server's home folder.
     #[serde(default)]
     pub folder: Option<String>,
 }
@@ -36,17 +26,14 @@ impl Projects {
         &self.path
     }
 
-    /// What `folder` remembers, if anything.
     pub fn get(&self, folder: &Path) -> Result<Option<Remembered>, String> {
         Ok(self.load()?.remove(&key(folder)))
     }
 
-    /// How many projects are remembered; 0 if there is no file.
     pub fn count(&self) -> Result<usize, String> {
         Ok(self.load()?.len())
     }
 
-    /// Remember `what` for `folder`, or forget what it remembers.
     pub fn set(&self, folder: &Path, what: Option<Remembered>) -> Result<(), String> {
         let key = key(folder);
         self.change(|projects| match what {
@@ -94,7 +81,6 @@ impl Projects {
     }
 }
 
-/// A project's key: its folder as the system spells it, so that two ways to reach it are one project.
 fn key(folder: &Path) -> String {
     std::fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf()).display().to_string()
 }

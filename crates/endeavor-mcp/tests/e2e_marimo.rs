@@ -1,13 +1,3 @@
-//! A Python notebook end to end, with real marimo and no Julia: `endeavor serve`, then an agent opens a
-//! marimo notebook, which starts Python notebooks' adapter (`runtime/marimo/adapter.py`) through uv; it
-//! reads, edits and runs cells, makes a new notebook, and the browser reaches marimo's page at
-//! `/marimo/` through the runtime's port.
-//!
-//! Ignored by default, like e2e_r; it needs `uv` (on the PATH or in ~/.local/bin) and PyPI. The first run
-//! downloads marimo and the notebooks' packages into uv's cache.
-//!
-//!     cargo test -p endeavor-mcp --test e2e_marimo -- --ignored --nocapture
-
 #![cfg(unix)]
 
 mod common;
@@ -32,7 +22,6 @@ fn recorded_pid(state: &Path) -> Option<i32> {
     serde_json::from_str::<Value>(&text).ok()?["pid"].as_i64().map(|p| p as i32).filter(|&p| p > 1)
 }
 
-/// Whatever happens, no runtime stays behind; a failed test prints the runtime's log.
 struct Cleanup {
     state: PathBuf,
     children: Vec<Child>,
@@ -72,8 +61,6 @@ fn post(port: u16, token: &str, session: Option<&str>, message: &Value) -> (Stri
     socket.set_read_timeout(Some(Duration::from_secs(600))).unwrap();
     let body = message.to_string();
     let session = session.map_or(String::new(), |id| format!("Mcp-Session-Id: {id}\r\n"));
-    // The agent stands in for a client behind the plugin's front, which asks the user itself: so its
-    // approve_install is the user's yes (#392).
     write!(
         socket,
         "POST /mcp HTTP/1.0\r\nHost: localhost:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nX-Endeavor-Consent: front\r\n{session}Content-Length: {}\r\n\r\n{body}",
@@ -86,7 +73,6 @@ fn post(port: u16, token: &str, session: Option<&str>, message: &Value) -> (Stri
     (head.to_owned(), body.to_owned())
 }
 
-/// A GET on the runtime's port: the status line, the head and the body.
 fn get(port: u16, target: &str, headers: &str) -> (String, String, String) {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
@@ -137,7 +123,6 @@ fn step<T>(name: &str, f: impl FnOnce() -> T) -> T {
     result
 }
 
-/// A notebook's PEP 723 header, where marimo writes what it installs.
 fn header(path: &Path) -> String {
     let text = std::fs::read_to_string(path).unwrap();
     text.split("\n# ///\n").next().unwrap_or_default().to_owned()
@@ -178,8 +163,6 @@ if __name__ == "__main__":
     app.run()
 "#;
 
-/// A stand-in for marimo's page: it takes the session as its editor, says `main`, then `got` once an edit
-/// with the given code arrives.
 const PAGE: &str = r#"
 import asyncio, json, sys, websockets
 async def main(url, cookie, want):
@@ -194,8 +177,6 @@ async def main(url, cookie, want):
 asyncio.run(main(*sys.argv[1:]))
 "#;
 
-/// A stand-in for marimo's page that disables a cell: it takes the session as its editor and, once the
-/// kernel is ready, sends the config change marimo's page sends, then says what marimo answered.
 const PAGE_DISABLES: &str = r#"
 import asyncio, json, sys, urllib.request, websockets
 async def main(base, session, cookie, token, cell):
@@ -204,7 +185,6 @@ async def main(base, session, cookie, token, cell):
             if json.loads(raw).get("op") == "kernel-ready":
                 break
         change = {"type": "set-config", "cellId": cell, "column": None, "disabled": True, "hideCode": False, "expandOutput": False}
-        # A cell made on the page, disabled from the start.
         created = {"type": "create-cell", "cellId": "Zpge", "code": "z = 1", "name": "_", "after": cell,
                    "config": {"column": None, "disabled": True, "hide_code": False, "expand_output": False}}
         request = urllib.request.Request(f"http://{base}/marimo/api/document/transaction", data=json.dumps({"changes": [change, created]}).encode(), method="POST",
@@ -238,9 +218,7 @@ fn a_python_notebook_through_the_runtime() {
         .args(["--julia", julia.to_str().unwrap(), "--depot", &format!("{}:", work.join("depot").display())])
         .env("XDG_CACHE_HOME", work.join("cache"))
         .env("XDG_STATE_HOME", work.join("state-home"))
-        // The install step reads while a package installs, which a warm uv cache would otherwise finish first.
         .env("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS", "3")
-        // A call waits no time for marimo's start, so the first open answers `python_installing` (#354).
         .env("ENDEAVOR_TEST_MARIMO_WAIT_SECS", "0")
         .env("XDG_CONFIG_HOME", work.join("config"))
         .stdout(Stdio::piped())
@@ -269,8 +247,6 @@ fn a_python_notebook_through_the_runtime() {
 
     let path = folder.join("growth.py").display().to_string();
     let notebook = step("opening a marimo notebook starts marimo, in safe preview", || {
-        // The first call doesn't wait for marimo's start: it says so as a normal result, and the start goes
-        // on for the same call again.
         let (failed, first) = agent.call("open_notebook", json!({ "path": "growth.py" }));
         assert!(!failed && first["error"] == "python_installing", "{first}");
         assert!(first["message"].as_str().unwrap_or_default().contains("Make the same call again"), "{first}");
@@ -290,7 +266,6 @@ fn a_python_notebook_through_the_runtime() {
         assert_eq!(opened["browser_url"], json!(format!("http://localhost:{port}/marimo/?file={encoded}")), "{opened}");
         let marimo = std::fs::read_to_string(state.join("marimo.json")).expect("the adapter wrote its state");
         assert!(marimo.contains("marimo_port") && !marimo.contains("token"), "the core made marimo's token: {marimo}");
-        // Opening the notebook's page would build its environment, which runs code: not before it may run.
         let (_, head, _) = get(port, &format!("/marimo/?token={pages}"), "");
         let set = head.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap_or_else(|| panic!("no cookie: {head}"));
         let cookie = format!("Cookie: {}\r\nSec-Fetch-Site: none\r\n", set.split(';').next().unwrap());
@@ -308,7 +283,6 @@ fn a_python_notebook_through_the_runtime() {
         assert_eq!(order.len(), 2, "{order:?}");
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order[0] }));
         assert_eq!(read["code"], "x = 20", "{read}");
-        // In safe preview marimo has no session: an edit is written with marimo's own save, and nothing builds (#351).
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": order[0], "code": "x = 41" }));
         let added = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "w = 1", "after_cell_id": order[0] }))["cell_id"].as_str().unwrap().to_owned();
         let saved = std::fs::read_to_string(&path).unwrap();
@@ -316,8 +290,6 @@ fn a_python_notebook_through_the_runtime() {
         let preview: Value = agent.ok("get_cell_order", json!({ "notebook_id": notebook }))["cell_ids"].clone();
         assert_eq!(preview.as_array().unwrap().len(), 3, "{preview}");
         agent.ok("allow_execution", json!({ "notebook_id": notebook, "run_notebook": false }));
-        // marimo numbers a file's cells by position when it loads it; the ids the preview gave out still hold,
-        // in marimo's session too: every cell runs straight away, with no edit in between to save it again.
         assert_eq!(agent.ok("get_cell_order", json!({ "notebook_id": notebook }))["cell_ids"], preview, "the ids survive going live");
         agent.ok("run_all_cells", json!({ "notebook_id": notebook, "wait_for_completion": true }));
         for (cell, out) in [(&order[1], "42"), (&added, "")] {
@@ -330,7 +302,6 @@ fn a_python_notebook_through_the_runtime() {
         assert_eq!(read["code"], "w = 1", "{read}");
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": added, "code": "w = 2" }));
         assert!(std::fs::read_to_string(&path).unwrap().contains("w = 2"), "the live session knows the added cell by its preview id");
-        // The ancestor was edited and never ran: the run takes it first.
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": order[1], "wait_for_completion": true }));
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order[1] }));
         assert_eq!(read["errored"], false, "{read}");
@@ -346,8 +317,6 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": c, "wait_for_completion": true }));
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": c }));
         assert!(read["output"].as_str().unwrap_or_default().contains("84"), "{read}");
-        // A run takes the cells below it, as in Pluto: marimo's lazy mode alone would leave them stale
-        // (smoke P2 with Haiku, 11-19).
         agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order[0] }));
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": order[0], "code": "x = 50" }));
         let ran = agent.ok("submit_changes", json!({ "notebook_id": notebook, "wait_for_completion": true }));
@@ -358,7 +327,6 @@ fn a_python_notebook_through_the_runtime() {
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": c }));
         assert_eq!(read["errored"], true, "{read}");
         assert!(read.to_string().contains("ZeroDivisionError"), "{read}");
-        // Folding a live cell: marimo refuses a config change that leaves out a field (L1 on Haiku, 11-20).
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": c, "code": "z = y * 3\nz", "folded": true }));
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": c }));
         assert_eq!(read["code_folded"], true, "{read}");
@@ -367,14 +335,10 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("fold_cell", json!({ "notebook_id": notebook, "cell_id": c, "folded": true }));
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("@app.cell(hide_code=True)\ndef _(y):\n    z = y * 3"), "marimo saved the fold: {saved}");
-        // A deleted cell's names leave the session too, so a cell that reads them fails as it would
-        // in a fresh run of the file. marimo kept them while only the document lost the cell (#410).
         let def = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "gone_name = 41", "after_cell_id": c }))["cell_id"].as_str().unwrap().to_owned();
         let reader = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "gone_name + 1", "after_cell_id": def }))["cell_id"].as_str().unwrap().to_owned();
         agent.ok("submit_changes", json!({ "notebook_id": notebook, "wait_for_completion": true }));
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": reader }))["output"], "42");
-        // While another cell runs, marimo takes the cell out of its kernel only after it; the reader
-        // is stale at once all the same (the Mac check on #540).
         let slow = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "import time as _t\n_t.sleep(3)", "after_cell_id": reader }))["cell_id"].as_str().unwrap().to_owned();
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": slow, "wait_for_completion": false }));
         std::thread::sleep(Duration::from_millis(500));
@@ -392,7 +356,6 @@ fn a_python_notebook_through_the_runtime() {
     });
 
     step("a preview that leaves no cell where it was still keeps its ids", || {
-        // Every cell moves: the first is deleted, so marimo's ids for the file share none with the preview's.
         std::fs::write(folder.join("shift.py"), GROWTH).unwrap();
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
         agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
@@ -410,8 +373,6 @@ fn a_python_notebook_through_the_runtime() {
     });
 
     step("cells keep their ids when the file changes outside, and after a restart", || {
-        // marimo numbers a file's cells by position each time it loads it, so a cell put above the others
-        // gave each of them the id of the one before (#353).
         let file = folder.join("ids.py");
         std::fs::write(&file, GROWTH).unwrap();
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
@@ -422,7 +383,6 @@ fn a_python_notebook_through_the_runtime() {
         };
         let code = |agent: &mut Agent, cell: &str| agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell, "include_code": true }))["code"].clone();
         let before = order(&mut agent);
-        // In safe preview: another editor adds a cell at the top.
         std::thread::sleep(Duration::from_millis(50));
         std::fs::write(&file, GROWTH.replacen("@app.cell\ndef _():\n    x = 20", "@app.cell\ndef _():\n    w = 0\n    return\n\n\n@app.cell\ndef _():\n    x = 20", 1)).unwrap();
         let now = order(&mut agent);
@@ -430,11 +390,9 @@ fn a_python_notebook_through_the_runtime() {
         assert_eq!(now[1..], before[..], "the cells keep their ids: {now:?} {before:?}");
         assert_eq!(code(&mut agent, &before[0]), "x = 20");
         assert_eq!(code(&mut agent, &now[0]), "w = 0");
-        // Going live, marimo numbers them again; the ids still hold.
         agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
         assert_eq!(order(&mut agent), now, "the ids survive going live");
         assert_eq!(code(&mut agent, &before[0]), "x = 20");
-        // Every id moved in marimo's session: each runs the code it names.
         agent.ok("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }));
         for cell in &now {
             let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
@@ -443,8 +401,6 @@ fn a_python_notebook_through_the_runtime() {
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": before[1] }))["output"], "21");
         agent.ok("close_notebook", json!({ "notebook_id": id }));
 
-        // A restart is a new session of marimo's, which numbers the cells again: a cell the agent added came
-        // back under another id.
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
         agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
         let made = agent.ok("new_notebook", json!({ "path": "restarted.py" }));
@@ -472,7 +428,6 @@ fn a_python_notebook_through_the_runtime() {
             assert!(read["errored"] == false && read["not_run"] != true, "{read}");
         }
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": last }))["output"], "42");
-        // Live: another editor adds a cell at the top, and marimo, watching the file, pairs the cells by code.
         let saved = std::fs::read_to_string(&file).unwrap();
         let top = "@app.cell\ndef _():\n    x = 20";
         assert!(saved.contains(top), "{saved}");
@@ -490,8 +445,6 @@ fn a_python_notebook_through_the_runtime() {
     });
 
     step("a header without marimo gets the pinned marimo, not a loose one", || {
-        // marimo's sandbox adds `marimo>=<newest>` to a header that doesn't name marimo, which is wrong for
-        // anyone who runs the file elsewhere, and can bring a kernel newer than the server (#352).
         let file = folder.join("loose.py");
         std::fs::write(&file, GROWTH.replace("#     \"marimo==0.25.1\",\n", "")).unwrap();
         assert!(!std::fs::read_to_string(&file).unwrap().contains("marimo=="));
@@ -505,7 +458,6 @@ fn a_python_notebook_through_the_runtime() {
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("\"marimo==0.25.1\"") && !text.contains("marimo>="), "{text}");
         agent.ok("close_notebook", json!({ "notebook_id": id }));
-        // A file with no header gets one, as marimo's would, with the pinned marimo in it.
         let file = folder.join("bare.py");
         let bare = GROWTH.split_once("# ///\n\n").unwrap().1;
         assert!(!bare.contains("# /// script"));
@@ -523,8 +475,6 @@ fn a_python_notebook_through_the_runtime() {
     });
 
     step("a Python notebook's package date moves, and its exact versions with it", || {
-        // The header holds six at an old version and the notebook at a date; moving the date lets each exact
-        // version go to that date's newest, and pins it there (#352).
         let file = folder.join("dated.py");
         let header = "# /// script\n# requires-python = \">=3.10\"\n# dependencies = [\n#     \"marimo==0.25.1\",\n#     # old on purpose\n#     \"six==1.16.0\",\n# ]\n#\n# [tool.uv]\n# exclude-newer = \"2026-10-05T00:00:00Z\"\n# ///\n";
         let body = GROWTH.split_once("# ///\n\n").unwrap().1.replacen("    y = x + 1\n    y\n", "    import six\n    y = six.__version__\n    y\n", 1);
@@ -533,7 +483,6 @@ fn a_python_notebook_through_the_runtime() {
         agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
         let opened = agent.ok("open_notebook", json!({ "path": "dated.py" }));
         let id = opened["notebook_id"].clone();
-        // In safe preview: the preview builds nothing and changes nothing.
         let preview = agent.ok("preview_package_update", json!({ "notebook_id": id, "date": "2026-11-01" }));
         assert_eq!(preview["status"], "ready", "{preview}");
         let six = preview["changes"].as_array().unwrap().iter().find(|c| c["name"] == "six").cloned().unwrap_or_else(|| panic!("{preview}"));
@@ -549,12 +498,10 @@ fn a_python_notebook_through_the_runtime() {
         assert!(text.ends_with(&body), "the cells are as they were: {text}");
         assert!(text.contains("#     # old on purpose\n"), "the header's comment stays: {text}");
         assert!(text.contains("# ]\n#\n# [tool.uv]\n") && !text.contains("# \n"), "a blank line in the header stays `#`: {text}");
-        // A day before marimo 0.25.1 was published can't hold it.
         let early = agent.ok("preview_package_update", json!({ "notebook_id": id, "date": "2026-01-01" }));
         assert!(early["status"] == "failed" && early.to_string().contains("marimo 0.25.1"), "{early}");
         let (failed, refused) = agent.call("preview_package_update", json!({ "notebook_id": id, "package": "six" }));
         assert!(failed && refused.to_string().contains("not_supported"), "{refused}");
-        // A header that doesn't resolve as it is has nothing to compare with: no preview is ready, and none applies.
         let good = std::fs::read_to_string(&file).unwrap();
         std::fs::write(&file, good.replacen(&format!("\"six=={newer}\""), "\"six==0.0.1\"", 1)).unwrap();
         let broken = agent.ok("preview_package_update", json!({ "notebook_id": id, "date": "2026-11-01" }));
@@ -562,12 +509,10 @@ fn a_python_notebook_through_the_runtime() {
         let (failed, refused) = agent.call("apply_package_update", json!({ "notebook_id": id, "date": "2026-11-01" }));
         assert!(failed && refused.to_string().contains("no_preview"), "{refused}");
         std::fs::write(&file, good).unwrap();
-        // Live, the sandbox has the version the header pins.
         agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": true }));
         let cells = agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"].clone();
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cells[1] }));
         assert!(read["output"].as_str().unwrap_or_default().contains(&newer), "{read}");
-        // Live again, to today's: the notebook restarts on the new header, every cell not run.
         let today = agent.ok("preview_package_update", json!({ "notebook_id": id }));
         assert_eq!(today["status"], "ready", "{today}");
         let day = today["date"].as_str().unwrap().to_owned();
@@ -584,7 +529,6 @@ fn a_python_notebook_through_the_runtime() {
     });
 
     step("a new notebook pins marimo and a package date", || {
-        // A session works on one notebook: another agent makes it.
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
         agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
         let made = agent.ok("new_notebook", json!({ "path": "fresh.py" }));
@@ -599,9 +543,6 @@ fn a_python_notebook_through_the_runtime() {
     });
 
     step("headings keep their own code when the file changes under marimo", || {
-        // marimo writes `mo.md("## A")` to its file as `mo.md("""\n## A\n""")`. When the file then changes under
-        // it (a package added to its header), marimo pairs its cells with the file's by similar code, and with the
-        // agent's form in memory it gave one heading's code to another (L1 on Haiku, 11-20).
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
         agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
         let made = agent.ok("new_notebook", json!({ "path": "headings.py" }));
@@ -619,27 +560,21 @@ fn a_python_notebook_through_the_runtime() {
             headings.push(heading);
         }
         agent.ok("submit_changes", json!({ "notebook_id": nb, "wait_for_completion": true }));
-        // Editing a heading straight after adding it needs no new read: the core knows the code as kept.
         let edited = agent.ok("edit_cell", json!({ "notebook_id": nb, "cell_id": headings[4], "code": "mo.md(\"## Data Quality Checks\")" }));
         assert_eq!(edited["code"], "mo.md(\"\"\"\n## Data Quality Checks\n\"\"\")", "{edited}");
-        // edit_cells gives each cell's code that was kept in another form.
         agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": headings[3] }));
         let both = agent.ok("edit_cells", json!({ "notebook_id": nb, "cells": [{ "cell_id": headings[3], "code": "mo.md(\"## Cleaned Growth Curves\")" }] }));
         assert_eq!(both["code"][&headings[3]], "mo.md(\"\"\"\n## Cleaned Growth Curves\n\"\"\")", "{both}");
-        // marimo's file would turn the backslashes of LaTeX into escapes (`\a` is a bell): that cell is kept
-        // as a raw string, which marimo writes as it is (#433).
         let latex = r#"mo.md("$\\alpha + \\beta$")"#;
         let raw = "mo.md(r\"\"\"\n$\\alpha + \\beta$\n\"\"\")";
         let added = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": last, "code": latex }));
         assert_eq!(added["code"], raw, "kept as a raw string: {added}");
         let math = added["cell_id"].as_str().unwrap().to_owned();
-        // A value a raw string can't hold (it ends in a backslash) is kept as sent.
         let ends = r#"mo.md("a path: C:\\")"#;
         let added = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": math, "code": ends }));
         assert!(added.get("code").is_none(), "kept as sent: {added}");
         let path_cell = added["cell_id"].as_str().unwrap().to_owned();
         agent.ok("submit_changes", json!({ "notebook_id": nb, "wait_for_completion": true }));
-        // marimo's save still writes it another way, and its note says so (#449); a cell marimo keeps has none.
         let read = agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": path_cell }));
         assert!(read["notes"].as_array().is_some_and(|n| n.iter().any(|n| n.as_str().unwrap_or_default().starts_with("markdown_in_file::"))), "{read}");
         let read = agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": math, "include_code": true }));
@@ -668,7 +603,6 @@ fn a_python_notebook_through_the_runtime() {
     });
 
     step("a table's text shows its first 25 rows, so a small table is whole", || {
-        // marimo's own page is 10 rows, which cut an 11-row table's last row from the agent (smoke N1, 11-23).
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
         agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
         let made = agent.ok("new_notebook", json!({ "path": "tables.py" }));
@@ -691,9 +625,6 @@ fn a_python_notebook_through_the_runtime() {
     });
 
     step("headings from a hand-written file keep their own code when the file changes under marimo", || {
-        // A file written by hand keeps `mo.md("## A")` as written; marimo's first save writes it triple-quoted.
-        // Kept as written in the session, six such headings were paired with each other's code by marimo's
-        // reload after a change to the file (#442).
         let titles = ["Setup", "Data Loading", "Data Cleaning", "Growth Curves by Strain", "Data Quality Checks", "Summary"];
         let mut text = String::from("# /// script\n# requires-python = \">=3.10\"\n# dependencies = [\n#     \"marimo==0.25.1\",\n# ]\n# ///\n\nimport marimo\n\n__generated_with = \"0.25.1\"\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    import marimo as mo\n    return (mo,)\n\n");
         for (i, title) in titles.iter().enumerate() {
@@ -707,7 +638,6 @@ fn a_python_notebook_through_the_runtime() {
         let id = agent.ok("open_notebook", json!({ "path": "handwritten.py" }))["notebook_id"].clone();
         let order: Vec<String> = agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_owned()).collect();
         let headings: Vec<String> = (0..titles.len()).map(|i| order[1 + 2 * i].clone()).collect();
-        // Read in safe preview, the heading is already in the file's form, so an edit after going live needs no new read.
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": headings[5], "include_code": true }));
         assert_eq!(read["code"], "mo.md(\"\"\"\n## Summary\n\"\"\")", "{read}");
         agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
@@ -729,7 +659,6 @@ fn a_python_notebook_through_the_runtime() {
     });
 
     step("a typo's import installs nothing without the user's OK", || {
-        // PyPI isn't curated: `import pandsa` would install whatever is published under that name (#355).
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
         agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
         let made = agent.ok("new_notebook", json!({ "path": "typo.py" }));
@@ -738,13 +667,10 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import pandsa" }));
         let ran = agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": cell, "wait_for_completion": true }));
         assert_eq!(ran["packages"]["step"], "asking", "{ran}");
-        // pandsa is a letter swap from pandas, which the question and the message say (#416).
         assert_eq!(ran["packages"]["download"]["packages"], json!([{ "package": "pandsa", "close_to": "pandas" }]), "{ran}");
         assert!(ran["message"].as_str().unwrap_or_default().contains("pandsa is close to pandas, a widely used package"), "{ran}");
         assert!(!header(&folder.join("typo.py")).contains("pandsa"), "nothing installed");
-        // The agent fixes the typo and runs again: nothing new, nothing asks, and the cell runs.
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import json\njson.dumps(1)" }));
-        // It runs at once: a cell that waits for an OK isn't waited for as a run (#355).
         let began = Instant::now();
         let ran = agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": cell, "wait_for_completion": true }));
         assert!(began.elapsed() < Duration::from_secs(15), "{:?}", began.elapsed());
@@ -757,12 +683,7 @@ fn a_python_notebook_through_the_runtime() {
     });
 
     step("an install keeps to the notebook's package date", || {
-        // marimo installs with `uv pip install`, which reads no header; the date has to reach it. boto3 has a
-        // release most days, so the newest is never the one of a date weeks back.
         const DATE: &str = "2026-10-05T00:00:00Z";
-        // uv keeps a script's environment by its path, so a notebook of an earlier run's name would have
-        // boto3 already, and nothing would install: each run's notebook has a name of its own, and the
-        // environments of earlier runs' go (marimo's uv uses the runtime's cache, under XDG_CACHE_HOME).
         let name = format!("endeavor-e2e-dated-{}.py", std::process::id());
         for old in std::fs::read_dir(work.join("cache/uv/environments-v2")).into_iter().flatten().flatten() {
             if old.file_name().to_string_lossy().starts_with("endeavor-e2e-dated-") {
@@ -782,10 +703,6 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
         let cell = agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"][1].as_str().unwrap().to_owned();
         agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
-        // Run as an agent usually does, without waiting, then read: the read waits through the install and
-        // the rerun, and never shows the ModuleNotFoundError the first run hit (smoke N7 with Haiku, 11-19).
-        // The cell that uses the import waits too, and runs again after it: it doesn't keep its
-        // "an ancestor raised" (smoke P1, 11-19).
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": cell, "code": "import boto3" }));
         let user = agent.ok("add_cell", json!({ "notebook_id": id, "code": "boto3.__version__", "after_cell_id": cell }))["cell_id"].as_str().unwrap().to_owned();
         agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": false }));
@@ -803,20 +720,16 @@ fn a_python_notebook_through_the_runtime() {
                 std::thread::sleep(Duration::from_millis(100));
             }
         };
-        // boto3 is new to the notebook: nothing installs until the user's OK (#355), and the cells wait.
         let asking = until(&mut agent, "asking");
         assert!(asking["new"] == true && asking["download"]["packages"] == json!([{ "package": "boto3" }]), "it asks about boto3: {asking}");
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": user }));
         assert!(read["errored"] == false && read["queued"] == true, "a cell waiting for an OK doesn't show the import error: {read}");
         assert!(read["message"].as_str().unwrap_or_default().contains("Python has to install packages this notebook doesn't have yet: boto3"), "{read}");
         assert!(!header(&folder.join(&name)).contains("boto3"), "nothing installed before the OK");
-        // A yes to a question that named other packages approves nothing (#418).
         let stale = agent.ok("approve_install", json!({ "notebook_id": id, "packages": ["pandas"] }));
         assert!(stale["approved"] == false && stale["accepted"] == false && stale["asking"] == json!(["boto3"]) && stale["process_status"].is_string(), "{stale}");
         assert!(stale["message"].as_str().unwrap_or_default().contains("Nothing was approved"), "{stale}");
         assert!(until(&mut agent, "asking")["download"]["packages"] == json!([{ "package": "boto3" }]), "it still asks");
-        // The notebook comes to need another package before the user's yes to boto3: the yes covers boto3
-        // only (names compare as PyPI's do), and the other asks on its own.
         let extra = agent.ok("add_cell", json!({ "notebook_id": id, "code": "import endeavor_e2e_absent", "after_cell_id": user }))["cell_id"].as_str().unwrap().to_owned();
         agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": extra, "wait_for_completion": false }));
         let began = Instant::now();
@@ -825,15 +738,12 @@ fn a_python_notebook_through_the_runtime() {
         }
         let approved = agent.ok("approve_install", json!({ "notebook_id": id, "packages": ["Boto3"] }));
         assert!(approved["approved"] == true && approved["packages"] == json!(["boto3"]) && approved["asking"] == json!(["endeavor_e2e_absent"]), "{approved}");
-        // Nothing installs or runs while another package waits, as a Julia notebook says it (#419).
         assert!(approved["accepted"] == false && approved["process_status"].is_string(), "{approved}");
         assert!(approved["message"].as_str().unwrap_or_default().contains("needs their OK of its own"), "{approved}");
         assert!(until(&mut agent, "asking")["download"]["packages"] == json!([{ "package": "endeavor_e2e_absent" }]), "the other still asks");
         assert!(!header(&folder.join(&name)).contains("boto3"), "nothing installed while one waits");
-        // The other is dropped: boto3, which the user said yes to, installs on the next run without asking.
         agent.ok("delete_cell", json!({ "notebook_id": id, "cell_id": extra }));
         agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": cell, "wait_for_completion": false }));
-        // The install is under way (slowed by ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS) and says what it installs.
         let installing = until(&mut agent, "installing");
         assert!(installing["packages"].as_array().is_some_and(|p| p.iter().any(|p| p == "boto3")), "the install says it installs boto3: {installing}");
         let mut read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": user }));
@@ -850,12 +760,10 @@ fn a_python_notebook_through_the_runtime() {
         assert!(read["output"].as_str().unwrap_or_default().contains(version), "boto3 {version}, as of {DATE}: {read}");
         let header = std::fs::read_to_string(folder.join(&name)).unwrap();
         assert!(header.contains(&format!("\"{expected}\"")), "the header names {expected}: {header}");
-        // The header builds again: a version newer than its date wouldn't resolve.
         agent.ok("close_notebook", json!({ "notebook_id": id }));
         let opened = agent.ok("open_notebook", json!({ "path": name }));
         let id = opened["notebook_id"].clone();
         agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
-        // A reload gives marimo's cells new ids (#353); the cell that uses boto3 is still the third.
         let user = agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"][2].as_str().unwrap().to_owned();
         agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": user }));
         agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": user, "wait_for_completion": true }));
@@ -884,8 +792,6 @@ fn a_python_notebook_through_the_runtime() {
     });
 
     step("an agent's edit reaches the page that edits the notebook", || {
-        // marimo sends an edit to every consumer but the one it came from. The page holds the session, so an
-        // edit sent in its name never reached it, and its next autosave put back what it had.
         let (_, head, _) = get(port, &format!("/marimo/?file={}&token={pages}", path.replace(' ', "%20")), "");
         let set = head.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap();
         let cookie = set.split(';').next().unwrap().to_owned();
@@ -906,8 +812,6 @@ fn a_python_notebook_through_the_runtime() {
     });
 
     step("a cell disabled on the page stays disabled after an agent's edit", || {
-        // The adapter's save writes each cell's config from its own copy, which a change on the page didn't
-        // update, so the next save enabled the cell again (#425).
         let file = path.replace(' ', "%20");
         let (_, head, _) = get(port, &format!("/marimo/?file={file}&token={pages}"), "");
         let cookie = head.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap().split(';').next().unwrap().to_owned();
@@ -946,9 +850,6 @@ fn a_python_notebook_through_the_runtime() {
     });
 }
 
-/// The app's runtime on this computer (`connect --own-r`, as the app starts it) and a plugin session that
-/// shares it (#358): the plugin's session opens a Python notebook there, through the core's own marimo,
-/// and the app's own sessions are refused one.
 #[test]
 #[ignore = "starts real marimo: cargo test -p endeavor-mcp --test e2e_marimo -- --ignored"]
 fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
@@ -996,7 +897,6 @@ fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
         socket.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
         write!(
             socket,
-            // The plugin's front says which process it is: this test's, which runs throughout (app #232).
             "POST /mcp HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nX-Endeavor-Session: {client}-1\r\nX-Endeavor-Client: {client}\r\n{}Content-Length: {}\r\n\r\n{body}",
             if client == "plugin" { format!("X-Endeavor-Front-Pid: {}\r\n", std::process::id()) } else { String::new() },
             body.len()
@@ -1055,7 +955,6 @@ fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
                 other => panic!("expected Ready, got {other:?}"),
             }
         }
-        // The helper takes it back just after it answers (#453).
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let record: Value = serde_json::from_str(&std::fs::read_to_string(state.join("runtime.json")).unwrap()).unwrap();

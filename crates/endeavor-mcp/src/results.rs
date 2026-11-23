@@ -1,12 +1,3 @@
-//! Each agent session's last tool results, for the app to look up when the
-//! agent doesn't pass a call's result on (Cursor reports only
-//! `{"success": true}`; Endeavor's docs/other-agents.md, work item 2).
-//!
-//! A result is found by the id the agent's client gave the call, when the app
-//! knows it (Claude Code sends `_meta["claudecode/toolUseId"]`, the same id
-//! its ACP adapter gives the tool call), else as the oldest result not yet
-//! looked up of a call to the same tool with the same arguments.
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
@@ -14,7 +5,6 @@ use serde_json::{Map, Value, json};
 
 use crate::mcp::to_json;
 
-/// How many results each session keeps.
 const KEPT: usize = 64;
 
 #[derive(Default)]
@@ -32,7 +22,6 @@ struct Record {
 }
 
 impl Results {
-    /// Keep `result` (a `tools/call` result) of session `owner`'s call.
     pub fn record(&self, owner: &str, call_id: Option<&str>, tool: &str, arguments: &Value, result: &Value) {
         let content: Vec<Value> = result["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "text").cloned().collect();
         let record = Record {
@@ -51,9 +40,6 @@ impl Results {
         }
     }
 
-    /// `endeavor/tool_result`: `{content, isError}` of session `owner`'s call
-    /// with this id, else of its oldest call to `tool` with `arguments` not yet
-    /// looked up; null if there's none.
     pub fn find(&self, owner: &str, call_id: Option<&str>, tool: &str, arguments: &Value) -> Value {
         let mut sessions = self.sessions.lock().unwrap();
         let Some(kept) = sessions.get_mut(owner) else { return Value::Null };
@@ -66,8 +52,6 @@ impl Results {
     }
 }
 
-/// Arguments as one string, the same however the client wrote them: keys in
-/// order, and a whole number the same whether written `1` or `1.0`.
 fn canonical(arguments: &Value) -> String {
     fn normal(value: &Value) -> Value {
         match value {
@@ -99,7 +83,6 @@ mod tests {
         results.record("8", None, "read_cell", &json!({ "cell_id": "a" }), &reply("other session", false));
 
         assert_eq!(results.find("7", Some("toolu_1"), "edit_cell", &json!({})), json!({ "content": [{ "type": "text", "text": "first" }], "isError": false }));
-        // Matched by tool and arguments, in any key order: the oldest not yet looked up.
         let edit = json!({ "cell_id": "a", "code": "x = 1" });
         assert_eq!(results.find("7", Some("cursor-call-9"), "edit_cell", &edit), json!({ "content": [{ "type": "text", "text": "second" }], "isError": true }));
         assert_eq!(results.find("7", None, "edit_cell", &edit), Value::Null, "each is found once by its arguments");

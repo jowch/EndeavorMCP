@@ -1,14 +1,3 @@
-//! The front on a machine (docs/plugins-and-remote.md): where this session's
-//! notebooks run, the four machine tools the front answers itself, and what a
-//! call to a runtime goes through: a `Provider` for the target (`target`), which
-//! gives the runtime's port and token on this computer. A machine's is this
-//! process's own connection to it (`client::Session`, one for each machine it uses).
-//!
-//! A session is on this computer or on one machine. Its calls go to the
-//! runtime there, a machine's with `X-Endeavor-Host` and `X-Endeavor-Browser-Port`.
-//! The session keeps one key on every runtime it uses; each runtime binds the
-//! key to a notebook of its own.
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 use std::time::{Duration, Instant};
@@ -24,41 +13,24 @@ use crate::client::{Asker, Auth, Reply, Cluster, Config, InstallInfo, Launcher, 
 use crate::mcp::{browser_link, to_json, tool_error};
 use crate::notebooks::Folder;
 
-/// A tool call's result that is `text`.
 pub(super) fn text_result(text: &str) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": false })
 }
 
-/// What `use_machine` and `stop_machine` call this computer.
 pub(super) const LOCAL: &str = "local";
 
-/// Another session counts as active if it called a tool this lately.
 const RECENT_SECONDS: u64 = 15 * 60;
 
-/// How long a runtime may say nothing to the question of who else is active before `stop_machine` gives up on it.
 const CHECK_WAIT: Duration = Duration::from_secs(5);
 
-/// How long the status tool waits for a connection that has only just been made to say whether a runtime is there.
 const CONNECT_WAIT: Duration = Duration::from_secs(10);
 
-/// A call isn't begun with less than this left of the call's time.
 const MIN_CALL: Duration = Duration::from_millis(300);
 
-/// An `ENDEAVOR_TEST_*` variable. A release build never reads them, so they cannot redirect a shipped binary's ssh.
 pub(super) fn test_var(name: &str) -> Option<std::ffi::OsString> {
     if cfg!(debug_assertions) { std::env::var_os(name) } else { None }
 }
 
-/// A connection to `server`: the one place that makes a `Session`. The helper it sends to the machine is this program when the machine's
-/// platform is this computer's, else the release's for that platform. `allow_install` is the user's
-/// agreement to the helper on the machine.
-///
-/// For tests only, read from the environment, and only by a debug build (`test_var`): `ENDEAVOR_TEST_SHELL` (any value) runs the helper on this
-/// computer through `sh`, as `Transport::Shell` does, so no sshd is needed; `ENDEAVOR_TEST_ROOT`,
-/// `ENDEAVOR_TEST_STATE` and `ENDEAVOR_TEST_DEPOT` set `Options::root`, `state` and `depot`, which otherwise
-/// are the machine's own default folders (`{id}` in them is the machine's id, so that two machines don't
-/// share a runtime); `ENDEAVOR_TEST_JULIA_AT_START` starts Julia with the runtime; `ENDEAVOR_TEST_ASK` is a command that runs in the shell before each connect
-/// (`Transport::Shell`'s `ask`), and a failure of it fails the connect.
 fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>, wanted: &Arc<Mutex<Instant>>) -> Result<(Session, Option<Asker>), String> {
     let (id, name) = (server.id.clone(), server.display_name());
     let asker = sign_in(&server, wanted);
@@ -76,19 +48,14 @@ fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>,
     }
     (config.root, config.state, config.depot, config.allow_install) = (var("ENDEAVOR_TEST_ROOT"), var("ENDEAVOR_TEST_STATE"), var("ENDEAVOR_TEST_DEPOT"), allow_install);
     config.launcher = launcher;
-    // An agent that only opens R notebooks there never needs Julia. A debug build's tests of a start
-    // that waits for Julia turn it off (as `Options::julia_when_needed`).
     config.julia_when_needed = test_var("ENDEAVOR_TEST_JULIA_AT_START").is_none();
     config.messages = Messages {
         restart_failed: |name| format!("Endeavor on {name} couldn't start. Call use_machine to try again."),
         restart_needs_install: |name, items| format!("Endeavor on {name} couldn't start. {}", install_text(name, &InstallInfo { items: items.to_vec(), helper: None }, "use_machine")),
         not_connected: |name| format!("Endeavor isn't connected to {name}. Call use_machine to use it again."),
-        // The plugin's runs aren't held for the user's answer by any runtime (it sends no policy): an old one is no worse.
         no_run_gate: None,
-        // The front tells its agent of another build's runtime itself (`Relay::decorate`), with `stop_machine`.
         tell_other_build: false,
     };
-    // Without a program for ssh to ask through, it signs in with keys only, as without a browser.
     let asker = asker.and_then(|asker| askpass_program().map_err(|e| eprintln!("┌ Warning: {e}; {name} signs in with keys only")).ok().map(|program| (asker, program)));
     if let Some((asker, program)) = &asker {
         config.auth = Auth::Env(asker.env(program));
@@ -96,8 +63,6 @@ fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>,
     Ok((Session::new(config)?, asker.map(|(asker, _)| asker)))
 }
 
-/// This program, as ssh runs it to ask (`SSH_ASKPASS`). On Linux not `/proc/self/exe`, which in ssh
-/// is ssh itself, but this process's own link, which holds even when an update replaced the file.
 fn askpass_program() -> Result<std::path::PathBuf, String> {
     if cfg!(target_os = "linux") {
         return Ok(format!("/proc/{}/exe", std::process::id()).into());
@@ -105,11 +70,6 @@ fn askpass_program() -> Result<std::path::PathBuf, String> {
     crate::this_program()
 }
 
-/// The user agreed to an install for a cluster job's runtime (`runtime`). If the job's core looked for
-/// Julia and found none, find it on `name`'s login node, downloading Endeavor's own there if there is
-/// none, waiting for the download while the call has time, and hand its path to the core, which starts
-/// it when a notebook next needs it. A yes that was for the helper alone downloads nothing. A note for
-/// the result when it isn't done.
 fn login_julia(provider: &dyn Provider, name: &str, runtime: &RuntimeInfo, deadline: &Deadline) -> Option<String> {
     let again = "Call `use_machine` again with `install: true` in a minute to finish; until then a Julia notebook there can't start.";
     match crate::bridge_rpc(runtime.port, &runtime.token, "endeavor/julia_status", json!({})) {
@@ -138,29 +98,18 @@ fn login_julia(provider: &dyn Provider, name: &str, runtime: &RuntimeInfo, deadl
     }
 }
 
-/// How lately a machine tool must have asked for a machine's connection for ssh's sign-in questions on it
-/// to be put to the user: a connection made again in the background, when no one asked for it, isn't.
 const SIGN_IN_WINDOW: Duration = Duration::from_secs(2 * 60);
 
-/// How long one sign-in question waits for the user's answer on its page: less than the 2 minutes a
-/// server gives a sign-in by default (sshd's `LoginGraceTime`), so that a question nobody answers ends
-/// as one that wasn't answered, which a reconnect tries again, before the server closes the connection.
 const SIGN_IN_WAIT: Duration = Duration::from_secs(100);
 
-/// The sign-in pages of this front's machines (`signin_page`).
 static SIGN_IN: std::sync::LazyLock<super::signin_page::SignIn> = std::sync::LazyLock::new(Default::default);
 
-/// What answers ssh's questions (a password, a code, a new host key) on `server`'s connection: the user,
-/// on a page in their browser (#106), while a machine tool asked for the connection within
-/// `SIGN_IN_WINDOW` (`wanted`). None where no browser can be opened: ssh then runs in batch mode and
-/// signs in only with keys, as before.
 fn sign_in(server: &Server, wanted: &Arc<Mutex<Instant>>) -> Option<Asker> {
     if !super::browser::shows(|name| std::env::var(name).ok()) {
         return None;
     }
     let (name, wanted) = (server.display_name(), wanted.clone());
     Asker::replying(move |ask| {
-        // A debug build's test waits less (`ENDEAVOR_TEST_SIGN_IN_WAIT_MS`).
         let wait = test_var("ENDEAVOR_TEST_SIGN_IN_WAIT_MS").and_then(|ms| ms.into_string().ok()?.parse().ok()).map_or(SIGN_IN_WAIT, Duration::from_millis);
         put_to_user(&name, &wanted, || SIGN_IN.ask(&name, &ask, wait, &open_page))
     })
@@ -168,35 +117,24 @@ fn sign_in(server: &Server, wanted: &Arc<Mutex<Instant>>) -> Option<Asker> {
     .ok()
 }
 
-/// One of ssh's sign-in questions on `name`'s connection, put to the user by `ask` if a machine tool
-/// asked for the connection within `SIGN_IN_WINDOW` (`wanted`); otherwise nobody answers it.
 fn put_to_user(name: &str, wanted: &Mutex<Instant>, ask: impl FnOnce() -> Reply) -> Reply {
     if wanted.lock().unwrap().elapsed() > SIGN_IN_WINDOW {
         eprintln!("[ Info: {name} asked to sign in while no machine tool waited for it; not asking the user");
         return Reply::GaveUp;
     }
     let reply = ask();
-    // The user answered, so they are there: a second question after a slow first one (a code after the
-    // password) is theirs too. Not when nobody answered: a reconnect that keeps trying would then open
-    // a page each time.
     if matches!(reply, Reply::Answered(_)) {
         *wanted.lock().unwrap() = Instant::now();
     }
     reply
 }
 
-/// A machine's connection and the settings it was made with, which a `Session` doesn't give back.
-/// Dropping it closes the session: it detaches from the machine's helper and leaves the runtime running.
 struct Held {
     server: Server,
     session: Arc<Session>,
-    /// The machine is in the machines file. An unsaved one is an `add_machine` still connecting.
     saved: bool,
-    /// The launcher the connection was asked for, when not the record's (`Config::launcher`).
     launcher: Option<Launcher>,
-    /// When a machine tool last asked for this connection (`sign_in`).
     wanted: Arc<Mutex<Instant>>,
-    /// What answers ssh's sign-in questions, for as long as the connection lasts.
     _asker: Option<Asker>,
 }
 
@@ -207,14 +145,11 @@ impl Held {
         Ok(Held { server: server.clone(), session: Arc::new(session), saved, launcher, wanted, _asker: asker })
     }
 
-    /// The connection, for a machine tool that asks for it now.
     fn asked_for(&self) -> Arc<Session> {
         *self.wanted.lock().unwrap() = Instant::now();
         self.session.clone()
     }
 
-    /// Whether nothing hangs on the connection, so that a new one can take its place without breaking
-    /// the address of a notebook page that is open through it.
     fn replaceable(&self) -> bool {
         replaceable(&self.session.status())
     }
@@ -225,21 +160,17 @@ fn replaceable(status: &Status) -> bool {
 }
 
 impl Drop for Held {
-    // On a thread of its own: closing waits for a machine that may not answer, and a tool call must not.
     fn drop(&mut self) {
         let session = self.session.clone();
         std::thread::spawn(move || session.close());
     }
 }
 
-/// This front's connections: one for each machine it has used, by machine id.
 #[derive(Default)]
 pub(super) struct Connections {
     held: Mutex<HashMap<String, Held>>,
 }
 
-/// An `add_machine`'s hold on a connection while its machine is not saved: when it is dropped the
-/// connection ends, so every way out that doesn't save the machine ends it. `leave` keeps it for the next call.
 struct Unsaved<'a> {
     connections: &'a Connections,
     id: String,
@@ -259,14 +190,10 @@ fn settings_changed(name: &str) -> String {
 }
 
 impl Connections {
-    /// The connection to saved machine `id`, if the front has one. Makes none.
     fn get(&self, id: &str) -> Option<Arc<Session>> {
         self.held.lock().unwrap().get(id).filter(|held| held.saved).map(Held::asked_for)
     }
 
-    /// The connection to `server`'s machine: the one held if it was made with the same settings, else a
-    /// new one that takes the place of one nothing hangs on, and none if something does. `allow_install`
-    /// is for a new one only.
     fn open(&self, server: &Server, allow_install: bool) -> Result<Arc<Session>, String> {
         let mut held = self.held.lock().unwrap();
         if let Some(old) = held.get(&server.id).filter(|old| old.saved) {
@@ -285,17 +212,11 @@ impl Connections {
         Ok(session)
     }
 
-    /// The connection `add_machine` tries `record` with: the one held if it was made with the same
-    /// settings (a saved machine's, or the one an earlier call left unsaved, if it was asked for the same
-    /// `launcher`), else a new one, made with `launcher` (None: the record's), that takes the place of one
-    /// nothing hangs on. An error when a runtime is in use through a saved one made with other
-    /// settings. Any other unsaved connection is ended.
     fn trying(&self, record: &Server, allow_install: bool, launcher: Option<Launcher>) -> Result<(Arc<Session>, Unsaved<'_>), String> {
         let mut held = self.held.lock().unwrap();
         let abandoned: Vec<Held> = held.extract_if(|id, h| !h.saved && *id != record.id).map(|(_, h)| h).collect();
         let unsaved = || Unsaved { connections: self, id: record.id.clone(), leave: false };
         match held.get(&record.id) {
-            // A connection asked for another launcher may run Slurm jobs where the user said not to, or the reverse.
             Some(old) if old.server.same_connection(record) && (launcher.is_none() || old.launcher == launcher) => return Ok((old.asked_for(), unsaved())),
             Some(old) if old.saved && !old.replaceable() => return Err(settings_changed(&record.display_name())),
             _ => {}
@@ -308,35 +229,28 @@ impl Connections {
         Ok((session, unsaved()))
     }
 
-    /// `record` is saved: its connection is the machine's own from now on.
     fn save(&self, record: &Server) {
         if let Some(held) = self.held.lock().unwrap().get_mut(&record.id) {
             (held.server, held.saved) = (record.clone(), true);
         }
     }
 
-    /// End the connections of machines that are not saved: `id`'s, or all of them.
     fn drop_unsaved(&self, id: Option<&str>) {
         let ended: Vec<Held> = self.held.lock().unwrap().extract_if(|key, held| !held.saved && id.is_none_or(|id| id == key)).map(|(_, held)| held).collect();
         drop(ended);
     }
 
-    /// End machine `id`'s connection, if there is one.
     fn forget(&self, id: &str) {
         let old = self.held.lock().unwrap().remove(id);
         drop(old);
     }
 
-    /// Where machine `id`'s connection stands, if there is one.
     fn status(&self, id: &str) -> Option<Status> {
-        // Not `get`: a look at where a connection stands isn't a call that waits for it to sign in.
         self.held.lock().unwrap().get(id).filter(|held| held.saved).map(|held| held.session.status())
     }
 
-    /// The input ended: every connection lets go of its machine, which leaves each runtime running.
     pub(super) fn close_all(&self) {
         let all: Vec<Held> = self.held.lock().unwrap().drain().map(|(_, held)| held).collect();
-        // Each may wait a few seconds for a machine that doesn't answer, and the front's end waits for all of them together.
         let ending: Vec<_> = all.into_iter().map(|held| std::thread::spawn(move || held.session.close())).collect();
         for ending in ending {
             let _ = ending.join();
@@ -344,8 +258,6 @@ impl Connections {
     }
 }
 
-/// The time one machine tool call has, counted from the moment it arrived: waiting for the
-/// other machine tool call and every wait for a machine come out of it.
 #[derive(Clone, Copy)]
 pub(super) struct Deadline(Instant);
 
@@ -358,31 +270,25 @@ impl Deadline {
         self.0.saturating_duration_since(Instant::now())
     }
 
-    /// Too little time is left to begin anything.
     pub(super) fn spent(self) -> bool {
         self.left() < MIN_CALL
     }
 }
 
-/// How a machine stands when a call stopped waiting for it.
 pub(super) struct Reached {
     outcome: Outcome,
     status: Status,
 }
 
-/// Why a call can't go to a runtime yet. `reached` is how the machine stands, when it was asked.
 pub(super) struct NotReady {
     name: String,
     message: String,
     reached: Option<Box<Reached>>,
-    /// Nothing runs and none was asked for: `list_notebooks` and `session_status` answer that.
     idle: bool,
-    /// `stop_machine` ended it.
     stopped: bool,
 }
 
 impl NotReady {
-    /// Nothing runs on the target: no runtime was there to start (`idle`), or `stop_machine` ended it.
     pub(super) fn nothing_runs(&self) -> bool {
         self.idle || self.stopped
     }
@@ -396,19 +302,14 @@ impl NotReady {
     }
 }
 
-/// How a message names a place: this computer, or the machine.
 fn place(name: &str) -> &str {
     if name == LOCAL { "this computer" } else { name }
 }
 
-/// What a call needs of the runtime it is routed to.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Need {
-    /// A runtime to work in: one is started when none runs (a cluster asks for a job first), and waited for.
     Start,
-    /// What runs, waited for while it is on its way; none is started (`list_notebooks`).
     Look,
-    /// How it stands now, with none started and no wait for one that is on its way (`session_status`).
     Peek,
 }
 
@@ -432,7 +333,6 @@ fn state_word(state: &State) -> &'static str {
     }
 }
 
-/// Slurm's reason for a waiting job, in words for the user.
 fn queue_reason_text(reason: &str) -> String {
     match reason {
         "" | "None" => "no reason given yet".into(),
@@ -447,8 +347,6 @@ fn queue_reason_text(reason: &str) -> String {
     }
 }
 
-/// What a machine that isn't ready says, for the agent to relay and act on. This is where an
-/// outcome becomes words for a result.
 fn not_ready_message(name: &str, reached: &Reached) -> String {
     let at = place(name);
     match &reached.outcome {
@@ -479,15 +377,11 @@ fn not_ready_message(name: &str, reached: &Reached) -> String {
     }
 }
 
-/// The step of `install_text` that has the agent ask in the chat, and what it says instead where
-/// Endeavor asks the user itself in a dialog (#378).
 const ASK_IN_CHAT: &str = "Ask the user whether Endeavor may do that. Only if they agree, call ";
 const ASKED_IN_DIALOG: &str = "Endeavor asks the user itself, in a dialog that the app they talk to you in shows, which names what it installs, as soon as a call needs it: tell the user it needs their OK, then call ";
 const CALL_END_IN_CHAT: &str = " and `install: true`.";
 const CALL_END_IN_DIALOG: &str = " and `install: true` now, after one line telling the user that Endeavor is asking for their OK, and for what, in the same reply; don't ask in the chat.";
 
-/// A machine tool's `message` where Endeavor asks the user itself: its asking step, if it has one,
-/// says so.
 fn asked_in_dialog(text: &str) -> String {
     let Some(at) = text.find(ASK_IN_CHAT) else { return text.to_owned() };
     let rest = &text[at + ASK_IN_CHAT.len()..];
@@ -495,10 +389,8 @@ fn asked_in_dialog(text: &str) -> String {
     format!("{}{ASKED_IN_DIALOG}{}{CALL_END_IN_DIALOG}{}", &text[..at], &rest[..end], &rest[end + CALL_END_IN_CHAT.len()..])
 }
 
-/// The same, where Endeavor asks the user on a page in their browser (#381).
 const ASKED_ON_PAGE: &str = "Endeavor asks the user itself, on a page that it opens in their browser and that names what it installs, once a call has `install: true`: tell the user it needs their OK, then call ";
 
-/// A machine tool's `message` where Endeavor asks the user on a page in their browser.
 fn asked_on_page(text: &str) -> String {
     let Some(at) = text.find(ASK_IN_CHAT) else { return text.to_owned() };
     let rest = &text[at + ASK_IN_CHAT.len()..];
@@ -506,7 +398,6 @@ fn asked_on_page(text: &str) -> String {
     format!("{}{ASKED_ON_PAGE}{}{CALL_END_IN_DIALOG}{}", &text[..at], &rest[..end], &rest[end + CALL_END_IN_CHAT.len()..])
 }
 
-/// Open an install page in the user's browser (`Relay::page_shows`).
 pub(super) fn open_page(url: &str) -> bool {
     if let Some(file) = test_var("ENDEAVOR_TEST_INSTALL_PAGES").filter(|file| !file.is_empty()) {
         use std::io::Write;
@@ -515,12 +406,10 @@ pub(super) fn open_page(url: &str) -> bool {
     super::browser::open(url)
 }
 
-/// Where no one can be asked: neither a dialog nor a page in the browser.
 const CANT_ASK: &str = "Endeavor can't install it from this app: it asks the user itself before it installs anything, and here it can neither show its dialog nor open a page in their browser. Setting `install` installs nothing here. Tell the user what it needs and where; to install it, they can ask for it from Claude Code in a terminal (not `claude -p`), which shows Endeavor's dialog, or from an app whose Endeavor runs on a computer that can open their browser. Don't work around it: don't make the notebook on this computer instead, and don't suggest commands or settings that these messages don't name; there are none that install it from here.";
 
 const CANT_ASK_ERROR: &str = "install_cant_ask::Endeavor can't install it from this app: it asks the user itself before it installs anything, and here it can neither show its dialog nor open a page in their browser. Nothing was installed, and calling again won't install it. Tell the user what it needs and where; to install it, they can ask for it from Claude Code in a terminal (not `claude -p`), which shows Endeavor's dialog, or from an app whose Endeavor runs on a computer that can open their browser. Don't work around it: don't make the notebook on this computer instead, and don't suggest commands or settings that these messages don't name; there are none that install it from here.";
 
-/// A machine tool's `message` where no one can be asked: its asking step says so instead.
 fn cant_ask(text: &str) -> String {
     let Some(at) = text.find(ASK_IN_CHAT) else { return text.to_owned() };
     let rest = &text[at + ASK_IN_CHAT.len()..];
@@ -528,24 +417,16 @@ fn cant_ask(text: &str) -> String {
     format!("{}{CANT_ASK}{}", &text[..at], &rest[end + CALL_END_IN_CHAT.len()..])
 }
 
-/// The most a call that asks on a page takes, click and install together: under the 60 s that
-/// Codex gives a tool call.
 pub(super) const PAGE_CALL: Duration = Duration::from_secs(55);
 
-/// The part of `PAGE_CALL` kept for the install after the click.
 const INSTALL_SHARE: Duration = Duration::from_secs(20);
 
-/// The least an install after a click is given, however late the click came: one that runs out says
-/// to call again, and the user's yes holds for that call (`install_page::SETTLED`).
 pub(super) const MIN_INSTALL: Duration = Duration::from_secs(5);
 
-/// How long a call waits for the user's click on the install page: under the 60 s that some clients
-/// give a tool call. A debug build takes `ENDEAVOR_TEST_PAGE_WAIT_MS`.
 pub(super) fn page_wait() -> Duration {
     test_var("ENDEAVOR_TEST_PAGE_WAIT_MS").and_then(|ms| ms.to_str()?.parse().ok()).map_or(Duration::from_secs(45), Duration::from_millis)
 }
 
-/// What the dialog asks before a machine tool installs `items` on machine `name`.
 fn install_question(name: &str, items: &[wire::Item], tool: &str) -> String {
     let what = if items.is_empty() { format!("Endeavor needs to install its helper program on {name}.") } else { wire::needs_text(items, name) };
     let later = if tool == "use_machine" && name != LOCAL && !items.iter().any(|item| item.kind == wire::KIND_RUNTIME) {
@@ -556,8 +437,6 @@ fn install_question(name: &str, items: &[wire::Item], tool: &str) -> String {
     format!("{what}{later} Install it now?")
 }
 
-/// What the dialog asks before `use_machine` gives a runtime that runs already leave to install
-/// what a notebook needs.
 fn leave_question(machine: &str) -> String {
     if machine == LOCAL || machine.is_empty() {
         "If an R notebook needs R and none is found on this computer, may Endeavor install its own copy of R?".to_owned()
@@ -566,9 +445,6 @@ fn leave_question(machine: &str) -> String {
     }
 }
 
-/// What installing would do on the machine and what to ask the user, for the agent to relay.
-/// `tool` is the machine tool to call again, with `install: true`, once the user has agreed.
-/// Every item is named with its size and place; a kind this build knows adds a note.
 fn install_text(name: &str, info: &InstallInfo, tool: &str) -> String {
     let again = match tool {
         "add_machine" => "`add_machine` again with the same arguments".to_owned(),
@@ -616,7 +492,6 @@ fn install_json(info: &InstallInfo) -> Value {
     out
 }
 
-/// What a tool says when the machine needs something installed that the user hasn't agreed to.
 fn needs_install_result(name: &str, info: &InstallInfo, tool: &str) -> Value {
     let mut result = json!({
         "machine": name,
@@ -632,7 +507,6 @@ fn needs_install_result(name: &str, info: &InstallInfo, tool: &str) -> Value {
     result
 }
 
-/// What a result that isn't a saved machine says about the file: nothing was written, or the machine stays as it was.
 fn unsaved_note(updating: bool) -> &'static str {
     if updating { "The machine stays as it was; the new settings are saved once they have connected." } else { "The machine is saved when it has connected, and not before." }
 }
@@ -655,19 +529,16 @@ fn job_json(status: &Status) -> Option<Value> {
 
 fn queue_json(status: &Status) -> Option<Value> {
     let queue = status.state.queue()?;
-    // Once the job runs, the helper gives its node in place of a reason.
     if queue.state == "RUNNING" {
         return Some(json!({ "state": queue.state, "node": queue.reason, "reason_text": format!("running on node {}, and Endeavor is starting there", queue.reason) }));
     }
     Some(json!({ "state": queue.state, "reason": queue.reason, "reason_text": queue_reason_text(&queue.reason) }))
 }
 
-/// What the other-version notice adds for a runtime in a Slurm job.
 fn cluster_clause(cluster: bool) -> &'static str {
     if cluster { " It runs in a Slurm job, so stopping it also gives up the job: the next start waits in the queue again. Tell the user that too." } else { "" }
 }
 
-/// What `session_status` says when the machine's runtime isn't up.
 fn status_result(name: &str, reached: &Reached, message: &str) -> Value {
     let Reached { outcome, status } = reached;
     let mut out = json!({ "machine": name, "state": state_word(&status.state), "ready": false, "message": message });
@@ -706,7 +577,6 @@ fn partition_text(p: &Partition) -> String {
     format!("{}{} ({limit}, {} CPUs and {} GB a node)", p.name, if p.default { " (default)" } else { "" }, p.cpus, p.mem_gb())
 }
 
-/// A machine's name as the tools take it: letters, digits, `-`, `_` and `.`, starting and ending with a letter or digit.
 fn valid_name(name: &str) -> Result<(), String> {
     let plain = !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) && name.starts_with(|c: char| c.is_ascii_alphanumeric()) && name.ends_with(|c: char| c.is_ascii_alphanumeric());
     if !plain {
@@ -718,14 +588,12 @@ fn valid_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A name for a host given as `user@host`, where the user isn't part of it.
 fn default_name(host: &str) -> String {
     let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
     let name: String = host.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' }).collect();
     name.trim_matches(|c: char| !c.is_ascii_alphanumeric()).to_owned()
 }
 
-/// A new machine's id: its name in lower case, with a number after it if that id is taken.
 fn new_id(name: &str, servers: &[Server]) -> Result<String, String> {
     let base = name.to_ascii_lowercase();
     let mut id = base.clone();
@@ -766,14 +634,12 @@ fn count_arg(args: &Value, key: &str, max: u32) -> Result<Option<u32>, String> {
     }
 }
 
-/// The resources and account a `use_machine` call gives.
 #[derive(Default, Debug, PartialEq)]
 struct Given {
     partition: Option<String>,
     cpus: Option<u32>,
     memory_gb: Option<u32>,
     minutes: Option<u32>,
-    /// Not given, none (`gpus` 0, which clears the saved default), or a gres string.
     gres: Option<Option<String>>,
     account: Option<String>,
     extra: Option<Vec<String>>,
@@ -820,7 +686,6 @@ impl Given {
         *self != Given::default()
     }
 
-    /// The machine's saved defaults with what was given put over them, kept within the partition's limits.
     fn over(&self, cluster: &Cluster) -> Result<(Resources, Option<String>), String> {
         let mut resources = cluster.resources.clone();
         if let Some(name) = &self.partition {
@@ -854,13 +719,10 @@ impl Relay {
         on
     }
 
-    /// The provider of `target`'s runtime, if there is one yet: a machine's connection is made by the
-    /// first call that needs it.
     pub(super) fn held(&self, target: &Target) -> Option<Arc<dyn Provider>> {
         if target.is_local() { Some(self.local.clone()) } else { self.connections.get(&target.id).map(|session| session as Arc<dyn Provider>) }
     }
 
-    /// `held`, with the machine's connection made when the front has none.
     fn provider(&self, target: &Target) -> Result<Arc<dyn Provider>, String> {
         match self.held(target) {
             Some(provider) => Ok(provider),
@@ -868,13 +730,11 @@ impl Relay {
         }
     }
 
-    /// `use_machine` sets the target, which counts as a move even to where the session is.
     fn point_at(&self, next: Target) {
         let mut target = self.target.lock().unwrap();
         *target = Target { moves: target.moves + 1, ..next };
     }
 
-    /// What the project remembers. A session without a project folder has no project, so nothing.
     fn remembered(&self) -> Result<Option<Remembered>, String> {
         match &self.options.folder {
             Some(folder) => self.projects.get(folder),
@@ -882,7 +742,6 @@ impl Relay {
         }
     }
 
-    /// Remember `what` for the project, or forget what it remembers; a session without a project folder keeps nothing.
     fn remember(&self, what: Option<Remembered>) -> Result<(), String> {
         match &self.options.folder {
             Some(folder) => self.projects.set(folder, what),
@@ -890,7 +749,6 @@ impl Relay {
         }
     }
 
-    /// The project's remembered machine becomes the target, without starting anything.
     pub(super) fn target_from_project(&self) {
         let remembered = match self.remembered() {
             Ok(remembered) => remembered,
@@ -915,10 +773,6 @@ impl Relay {
         }
     }
 
-    /// Where a call goes, waiting until `deadline` for a runtime that is on its way, and starting one
-    /// when `need` says so and none runs. A plain server and this computer are started alike; a cluster
-    /// is not, since it needs a job the user agreed to. A failure is kept for every call; only a call that
-    /// needs a runtime and has reported it asks to try again.
     pub(super) fn route(&self, need: Need, deadline: Deadline) -> Result<Route, NotReady> {
         let target = self.current();
         let name = target.name.clone();
@@ -926,7 +780,6 @@ impl Relay {
             return Err(self.stopped(&target));
         }
         let provider = self.provider(&target).map_err(NotReady::plain)?;
-        // The status tool doesn't wait for a start, but a connection only just made is waited for a moment, so that it can say what is there.
         let wait = if need != Need::Peek {
             deadline.left()
         } else if matches!(provider.status().state, State::Connecting | State::Connected | State::NothingRunning) {
@@ -936,7 +789,6 @@ impl Relay {
         };
         let mut outcome = provider.ensure(Want::Attach { install: false }, wait, need == Need::Start && target.failed);
         if need == Need::Start && matches!(outcome, Outcome::NothingRunning) && !provider.cluster() {
-            // Checked and issued under the target's lock, which `stop_machine` also takes to mark the runtime stopped: a stop can't come between.
             let issued = {
                 let now = self.target.lock().unwrap();
                 if let Some(unready) = self.moved(&now, &target, &provider) {
@@ -946,7 +798,6 @@ impl Relay {
             };
             outcome = if matches!(issued, Outcome::StillWorking(_)) { provider.ensure(Want::Start { job: None, install: false }, deadline.left(), false) } else { issued };
         }
-        // Another tool call may have moved the session, replaced the connection or stopped the runtime during the wait.
         if let Some(unready) = self.moved(&self.target.lock().unwrap(), &target, &provider) {
             return Err(unready);
         }
@@ -954,7 +805,6 @@ impl Relay {
             self.update_target(&target.id, |t| t.failed = matches!(outcome, Outcome::Failed(_)));
         }
         let status = provider.status();
-        // A start another process has under way is not "nothing runs".
         let outcome = if matches!(outcome, Outcome::NothingRunning) && matches!(status.state, State::Starting { .. }) { Outcome::StillWorking(String::new()) } else { outcome };
         if let Outcome::Ready(runtime) = &outcome {
             if target.is_local() {
@@ -985,9 +835,6 @@ impl Relay {
         }
     }
 
-    /// What to tell the agent, once per runtime, when a machine's runtime came from another build and
-    /// doesn't offer this build's interface. Unlike this computer's, it is never stopped for the agent:
-    /// on a cluster that would give up the job's allocation, and the next start waits in the queue again.
     fn machine_other_build(&self, target: &Target, runtime: &RuntimeInfo, cluster: bool) -> Option<String> {
         if !runtime.reattached || runtime.usable_as_is() || !self.told_other_build.lock().unwrap().insert((target.id.clone(), runtime.pid)) {
             return None;
@@ -995,7 +842,6 @@ impl Relay {
         Some(format!("{}{}", super::target::other_build_notice(&target.name, &target.id, runtime.interface, None), cluster_clause(cluster)))
     }
 
-    /// Say `notice` with the next result, after any notice not said yet.
     fn add_notice(&self, notice: String) {
         let mut owed = self.notice.lock().unwrap();
         *owed = Some(match owed.take() {
@@ -1004,7 +850,6 @@ impl Relay {
         });
     }
 
-    /// Whether the session is no longer where `target` had it, with `provider`: the reason, if so.
     fn moved(&self, now: &Target, target: &Target, provider: &Arc<dyn Provider>) -> Option<NotReady> {
         if now.id != target.id || now.moves != target.moves {
             return Some(NotReady::plain("This session moved to another machine while the call waited. Try the call again."));
@@ -1015,7 +860,6 @@ impl Relay {
         (!now.active).then(|| self.stopped(now))
     }
 
-    /// Why a call can't go to a runtime that `stop_machine` ended.
     fn stopped(&self, target: &Target) -> NotReady {
         let name = &target.name;
         let message = format!("Endeavor on {} was stopped from this session with stop_machine. Call `use_machine` with machine \"{name}\" to start it again.", place(name));
@@ -1026,22 +870,17 @@ impl Relay {
         NotReady { stopped: true, ..unready }
     }
 
-    /// The machine's record in the list of machines.
     fn listed(&self, target: &Target) -> Result<Server, String> {
         self.machines.find_by_id(&target.id)?.ok_or_else(|| format!("{} isn't in the list of machines ({}) any more.", target.name, self.machines.path().display()))
     }
 
-    /// Where calls to `target`'s runtime go, once it is ready; the session's folder is told to it once.
-    /// `home` is the machine's home folder, which is the session's folder when `use_machine` gave none.
     fn ready(&self, target: &Target, runtime: &RuntimeInfo, home: Option<&str>) -> Route {
         if target.told != Some(runtime.pid) {
-            // A machine's runtime has a folder of its own to fall back on when the session has none and the machine said no home.
             let folder = match self.local_folder(target) {
                 Some(Folder::In(folder)) => Some(Some(folder)),
                 Some(_) => Some(None),
                 None => target.folder.clone().or_else(|| home.filter(|h| !h.is_empty()).map(str::to_owned)).map(Some),
             };
-            // A failed telling is made again by the next call.
             if folder.is_none_or(|folder| self.tell_session_folder(runtime.port, &runtime.token, folder.as_deref())) {
                 self.update_target(&target.id, |t| t.told = Some(runtime.pid));
             }
@@ -1049,7 +888,6 @@ impl Relay {
         Route { port: runtime.port, token: runtime.token.clone(), page_token: runtime.page_token.clone(), host: target.host() }
     }
 
-    /// For a project's remembered cluster with no job: what to ask the user before submitting one.
     fn needs_job_message(&self, target: &Target) -> String {
         let defaults = self.machines.find_by_id(&target.id).ok().flatten().and_then(|s| s.cluster).map(|c| {
             let partition = c.resources.partition.as_deref().map_or("the cluster's default partition".to_owned(), |p| format!("partition {p}"));
@@ -1062,7 +900,6 @@ impl Relay {
         )
     }
 
-    /// The reply to a call that couldn't go to a runtime: an error, except while it is on its way.
     pub(super) fn unready(&self, message: &Value, tool: Option<&str>, unready: NotReady) {
         let Some(id) = message.get("id").filter(|id| !id.is_null()) else { return };
         let answer = |result: Value| to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": text_result(&to_json(&result)) }));
@@ -1076,7 +913,6 @@ impl Relay {
                 }
                 answer(result)
             }
-            // Starting, connecting or queued: nothing failed, and the agent waits by calling again.
             (_, Some(reached)) if message["method"] == "tools/call" && matches!(reached.outcome, Outcome::StillWorking(_) | Outcome::Queued { .. }) => {
                 to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": text_result(&unready.message) }))
             }
@@ -1085,10 +921,7 @@ impl Relay {
         self.write(&self.decorate(message, tool, reply));
     }
 
-    /// A runtime's reply to the agent's call, with what only the front knows: that the session is on a
-    /// machine (and its job) in `session_status`, and a notice that is owed once.
     pub(super) fn decorate(&self, message: &Value, tool: Option<&str>, reply: String) -> String {
-        // The notebook view's calls (`views`) carry nothing for the agent: a notice waits for its next call.
         if tool.is_some_and(crate::views::is_view_tool) {
             return reply;
         }
@@ -1117,9 +950,6 @@ impl Relay {
         if changed { to_json(&parsed) } else { reply }
     }
 
-    /// What the agent is told when the session's runtime is from before R notebooks and refused an R
-    /// notebook's path (`mcp::refuses_r_for_want_of_it`); none when the runtime is known to offer this
-    /// build's interface, whose refusal stands as it is.
     fn no_r_text(&self) -> Option<String> {
         let machine = self.current();
         let status = if machine.is_local() { Some(self.local.status()) } else { self.connections.status(&machine.id) };
@@ -1129,19 +959,13 @@ impl Relay {
         let place = if machine.is_local() { "this computer" } else { machine.name.as_str() };
         let cluster = !machine.is_local() && self.connections.get(&machine.id).is_some_and(|session| session.cluster());
         let id = &machine.id;
-        // No call the agent could take as the remedy: a kept runtime has a notebook open, often this session's own,
-        // which `stop_machine`'s check of other sessions doesn't count.
         let restart = format!("Don't stop it yourself: tell the user, and ask whether to restart it, which closes the notebooks open in it. Only if the user says yes, call `stop_machine` with machine \"{id}\", then `use_machine` with machine \"{id}\".{}", cluster_clause(cluster));
         Some(crate::no_r_text(place, &restart))
     }
 
-    /// The status's fields that only the front knows: the machine, its job and the runtime's own port, and
-    /// `other_version` when the runtime is another build's that doesn't offer this build's interface and is
-    /// kept, which says so again after the notice that was told once, with `runtime_build` the build that started it.
     fn add_machine_fields(&self, reply: &mut Value) -> bool {
         let machine = self.current();
         let status = if machine.is_local() { Some(self.local.status()) } else { self.connections.status(&machine.id) };
-        // On this computer, only one that was kept: an idle one is stopped by the next call that may start one.
         let other = status.as_ref().and_then(|status| status.state.runtime()).filter(|runtime| !runtime.usable_as_is() && (!machine.is_local() || self.local.kept(runtime.pid)));
         if machine.is_local() && other.is_none() {
             return false;
@@ -1170,7 +994,6 @@ impl Relay {
         true
     }
 
-    /// Answer a call to one of the machine tools.
     pub(super) fn machine_tool(self: &Arc<Self>, message: &Value, tool: &str, deadline: Deadline) {
         if message.get("id").is_none_or(Value::is_null) {
             return;
@@ -1180,9 +1003,6 @@ impl Relay {
             Err(result) => return self.answer_call(message, Some(tool), result),
         };
         let dialog = self.consent.can_ask();
-        // Nothing installs on the user's machines unless they say yes to it themselves (#378, #381):
-        // the agent's `install: true` alone isn't their yes. Where the client can't show a dialog,
-        // they say it on a page in their browser.
         let result = if tool != "list_machines" {
             match self.install_asked(message, tool, &arguments, deadline) {
                 Some(result) => result,
@@ -1191,7 +1011,6 @@ impl Relay {
         } else {
             self.run_machine_tool(tool, &arguments, deadline)
         };
-        // A client that said it shows dialogs and didn't is told about the page from this call on.
         let dialog = dialog && self.consent.can_ask();
         let page = !dialog && self.page_shows();
         let result = match result {
@@ -1222,23 +1041,12 @@ impl Relay {
         }
     }
 
-    /// Whether the user can be asked on a page in their browser (`install_page`). A debug build with
-    /// `ENDEAVOR_TEST_INSTALL_PAGES` set to a file adds each page's link to it instead, for a test to click.
     pub(super) fn page_shows(&self) -> bool {
         test_var("ENDEAVOR_TEST_INSTALL_PAGES").is_some_and(|file| !file.is_empty()) || super::browser::shows(|name| std::env::var(name).ok())
     }
 
-    /// A machine tool's call: the call without `install` first,
-    /// which installs nothing and says what would be installed. Only if something would be, the user
-    /// is asked in a dialog that names it, then and there, whether or not the agent set `install`, and
-    /// the call goes ahead with `install` only on their yes. An agent that was to call again for the
-    /// install often didn't, so the dialog never came (#380's smoke runs). `use_machine` with
-    /// `install: true` on a runtime that runs already gives it leave to download Julia (or, on this
-    /// computer, install R) when a notebook needs it: that is asked about too. None when the client
-    /// cancelled the call: it gets no reply.
     fn install_asked(self: &Arc<Self>, message: &Value, tool: &str, arguments: &Value, deadline: Deadline) -> Option<Result<Value, String>> {
         let began = Instant::now();
-        // Checked before the look, which leaves `install` out.
         let wants_install = match flag_arg(arguments, "install") {
             Ok(install) => install,
             Err(e) => return Some(Err(e)),
@@ -1259,8 +1067,6 @@ impl Relay {
             Ok(result) if tool == "use_machine" && wants_install && result["ready"] == true => Some(leave_question(&machine)),
             _ => None,
         };
-        // Where the client can't show a dialog, the user is asked on a page, and only once the agent
-        // sets `install`: a page that opens on every look would open one for each question the agent asks.
         let question = question.filter(|_| self.consent.can_ask() || wants_install);
         let Some(question) = question else {
             return (!self.consent.not_asking(message)).then_some(looked);
@@ -1269,11 +1075,6 @@ impl Relay {
         let mut install = arguments.clone();
         install["install"] = true.into();
         let page = self.page_shows();
-        // An answer the user gave on the page still holds (10 minutes): it is the answer, with no
-        // dialog first, which would ask them again what they said. A held Install installs even on
-        // a look without `install`, for a client with dialogs, as a yes in its dialog does: the user
-        // clicked it for this question. A client without dialogs only gets here once `question`
-        // passed the `wants_install` filter above.
         let held = page && self.pages.held(&question);
         let mut dialog = self.consent.can_ask() && !held;
         let mut asked = if held {
@@ -1283,17 +1084,12 @@ impl Relay {
         } else {
             Err(super::consent::NO_DIALOG.to_owned())
         };
-        // A dialog with no answer yet, which may not be up at all (`claude -p`): the page asks as
-        // well, for as long as the dialog would have waited, and the first answer counts. The user
-        // is being asked already, so this opens the page with or without `install`.
         if asked.as_ref().is_err_and(|e| e == super::consent::SILENT) {
             let wait = super::consent::ANSWER_WAIT.saturating_sub(began.elapsed());
             asked = self.ask_on_page(message, &question, &again, wait);
         }
-        // No dialog, or one the client said it would show and didn't (#381): the page.
         if asked.as_ref().is_err_and(|e| e == super::consent::NO_DIALOG) {
             dialog = false;
-            // As for any client without dialogs, the page opens only once the agent sets `install`.
             if !wants_install {
                 return (!self.consent.not_asking(message)).then_some(looked);
             }
@@ -1304,13 +1100,10 @@ impl Relay {
                 Err(CANT_ASK_ERROR.to_owned())
             };
         }
-        // A client that can't show a dialog may give the call no more than a minute (Codex), and the
-        // front alone waits for the click: the install gets what is left of that.
         let install_wait = if dialog { super::start_wait() } else { PAGE_CALL.saturating_sub(began.elapsed()).max(MIN_INSTALL) };
         match asked {
             Ok(true) => Some(self.run_machine_tool(tool, &install, Deadline::after(install_wait))),
             Ok(false) => None,
-            // The session moved in the look, which installed nothing: the agent hears both.
             Err(refused) if tool == "use_machine" && looked.as_ref().is_ok_and(|r| r["ready"] == true) => {
                 let mut result = looked.unwrap();
                 let said = refused.split_once("::").map_or(refused.as_str(), |(_, said)| said);
@@ -1322,14 +1115,7 @@ impl Relay {
         }
     }
 
-    /// `ask_install`'s answer where the client can't show a dialog: the user's click on a page that
-    /// the front opens in their browser (#381), waiting up to `wait` (where there is no dialog, what
-    /// leaves the install its time within `PAGE_CALL`); one that has stopped waiting finds the click
-    /// on its next try.
-    /// After a silent dialog (`consent::SILENT`), the dialog is still up, and whichever the user
-    /// answers first counts.
     fn ask_on_page(&self, message: &Value, question: &str, again: &str, wait: Duration) -> Result<bool, String> {
-        // A no the user gave on an earlier call: the agent is asking again, so the user wants it now.
         let again_after_no = self.pages.held(question);
         let clicked = self.pages.ask(question, true, wait, &|| self.consent.cancelled(message) || self.consent.dialog_answered(message), &open_page);
         if let Some(answer) = self.consent.install_answer_after_page(message, again, matches!(clicked, Clicked::Install | Clicked::Declined), &|line| self.write(line)) {
@@ -1350,14 +1136,11 @@ impl Relay {
         })
     }
 
-    /// Answer request `message` with `result`, a tool call's result.
     pub(super) fn answer_call(&self, message: &Value, tool: Option<&str>, result: Value) {
         let Some(id) = message.get("id").filter(|id| !id.is_null()) else { return };
         self.write(&self.decorate(message, tool, to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result }))));
     }
 
-    /// The one machine tool call that runs at a time (they switch, start and stop things), waited
-    /// for until `deadline`. A call that doesn't get it has changed nothing.
     fn lock_ops(&self, deadline: Deadline) -> Result<MutexGuard<'_, ()>, String> {
         loop {
             match self.ops.try_lock() {
@@ -1404,8 +1187,6 @@ impl Relay {
         }))
     }
 
-    /// Adds or updates a machine: connects to it, and saves it only once it has connected. The connection
-    /// is `Unsaved` until then, so that a call that ends without saving ends it.
     fn add_machine(&self, args: &Value, deadline: Deadline) -> Result<Value, String> {
         let _one = self.lock_ops(deadline)?;
         let typed = text_arg(args, "host")?.ok_or_else(|| invalid("host is required: an ssh alias from ~/.ssh/config, or user@host"))?;
@@ -1424,7 +1205,6 @@ impl Relay {
             Some(_) => return Err(invalid("slurm must be true (run notebooks in Slurm jobs) or false (run them directly on the machine)")),
         };
         let servers = self.machines.load_writable()?;
-        // Which saved machine this call is about: by the name given, else by the name it would get, else by its host.
         let find_existing = |servers: &[Server]| {
             let by_name = |n: &str| servers.iter().find(|s| s.name.eq_ignore_ascii_case(n)).cloned();
             match &given_name {
@@ -1443,9 +1223,6 @@ impl Relay {
         if julia.is_some() {
             record.julia = julia;
         }
-        // A machine not saved yet is connected to the way it will be saved, so that saving it doesn't
-        // mean connecting again: Slurm jobs when it has Slurm, unless `slurm` says. A saved one as it is
-        // saved, so that a runtime running the way it is saved is seen below.
         let launcher = match (&existing, slurm) {
             (Some(_), _) => None,
             (None, Some(true)) => Some(Launcher::Slurm),
@@ -1493,7 +1270,6 @@ impl Relay {
                 record.display_name()
             ));
         }
-        // Slurm is asked for the partitions after the connection is made, so they may come a moment later. They are reported, so they are waited for, except when the user said it is no cluster.
         let listed = cluster || slurm != Some(false);
         if listed {
             status = session.wait_for(deadline.left(), |s| s.hello.as_ref().is_none_or(|h| !h.slurm || h.partitions.is_some()));
@@ -1526,7 +1302,6 @@ impl Relay {
         }
         self.machines.save_expecting(record.clone(), existing.as_ref().map(|e| e.id.as_str()), &|servers| find_existing(servers).map(|e| e.id))?;
         if record.cluster.is_some() != connected_as_cluster {
-            // It connected the other way: the next connection starts the helper for how it is saved now.
             self.connections.forget(&record.id);
         } else {
             self.connections.save(&record);
@@ -1580,7 +1355,6 @@ impl Relay {
         }))
     }
 
-    /// A machine named in a call: a saved name or id.
     fn find_machine(&self, key: &str) -> Result<Server, String> {
         if key.eq_ignore_ascii_case(LOCAL) {
             return Ok(local_server());
@@ -1595,10 +1369,6 @@ impl Relay {
         }
     }
 
-    /// Put the session on a machine, or on this computer. Everything that can fail, and the request to
-    /// start or attach, comes first; only when the request was taken does the session move and the
-    /// project remember the machine. Whatever fails before that leaves all
-    /// of it as it was.
     fn use_machine(self: &Arc<Self>, args: &Value, deadline: Deadline) -> Result<Value, String> {
         let _one = self.lock_ops(deadline)?;
         self.connections.drop_unsaved(None);
@@ -1628,10 +1398,7 @@ impl Relay {
         let provider = self.provider_for(&server, install, false)?;
         let was_ready = matches!(provider.status().state, State::Ready(_));
         let mut notes: Vec<String> = Vec::new();
-        // The folder is looked at, and made when only it is missing, before any job is asked for. On
-        // a machine that isn't connected by the deadline it isn't looked at, and the result says so.
         if let Some(path) = folder.as_ref().filter(|_| !local) {
-            // A remembered folder that is gone can't be fixed by leaving `folder` out, which brings it back.
             let which = if from_memory { format!("The folder this project used on {name}, {path},") } else { format!("The folder \"{path}\"") };
             let ask = if from_memory { "Ask the user which folder to use and pass it as `folder` (`\"~\"` is the home folder)." } else { "Ask the user which folder to use, or leave `folder` out." };
             match provider.files(wire::files::Request::Folder { path: path.clone() }, deadline.left()) {
@@ -1645,7 +1412,6 @@ impl Relay {
                     return Err(invalid(format!("{which} can't be the session's folder: neither it nor the folder it would go in, {}, exists on {name}. Nothing was started. {why} {ask}", parent)));
                 }
                 Some(Ok(other)) => return Err(format!("{name}'s helper answered the folder check with {other:?}.")),
-                // The helper's own refusal (`Reply::Error`) comes as an error too.
                 Some(Err(message)) => return Err(invalid(format!("{which} can't be the session's folder on {name}: {message} Nothing was started. {ask}"))),
                 None => notes.push(format!("The folder {path} wasn't checked, because {name} wasn't connected yet; the next `use_machine` checks it.")),
             }
@@ -1668,13 +1434,8 @@ impl Relay {
             }
         };
         let reached = Reached { outcome, status: provider.status() };
-        // A runtime that runs already was started without leave to download Julia (on a machine) or to
-        // install Endeavor's own R (on this computer, the only place it's offered), which it asks for only
-        // when a notebook first needs one: the user's yes reaches it now.
         if install && let (Outcome::Ready(_), Some(runtime)) = (&reached.outcome, reached.status.state.runtime()) {
             if server.cluster.is_some() {
-                // A job's node often has no internet: Julia is downloaded on the login node, and the job's
-                // core is told where it is (#80).
                 if let Some(note) = login_julia(&*provider, &name, runtime, &deadline) {
                     notes.push(note);
                 }
@@ -1708,10 +1469,6 @@ impl Relay {
         self.use_result(&server, reached, was_ready, notes)
     }
 
-    /// The provider of `server`'s runtime for a tool call that names the machine: a machine's connection
-    /// is made when the front has none, with the settings of `server`. `install` is the user's agreement
-    /// to the helper, for a new one only. With `held`, the connection this front has is used whatever
-    /// its settings, which is how a runtime in use through old settings is reached to stop it.
     fn provider_for(&self, server: &Server, install: bool, held: bool) -> Result<Arc<dyn Provider>, String> {
         if server.id == LOCAL {
             return Ok(self.local.clone());
@@ -1723,7 +1480,6 @@ impl Relay {
         .map(|session| session as Arc<dyn Provider>)
     }
 
-    /// Put the saved defaults back as they are now in the file, with the cluster's resources and account from `saved`.
     fn save_defaults(&self, saved: &Server) -> Result<(), String> {
         let Some(mut current) = self.machines.find_by_id(&saved.id)? else { return Ok(()) };
         if let (Some(now), Some(new)) = (current.cluster.as_mut(), &saved.cluster) {
@@ -1765,7 +1521,6 @@ impl Relay {
             result["job"] = job;
         }
         let on = if runtime.reattached || was_ready { "A runtime was already running there, and this session uses it" } else { "Endeavor started there" };
-        // Julia starts with the first Julia notebook (`open_session`), not here.
         let julia = match test_var("ENDEAVOR_TEST_JULIA_AT_START") {
             None => " Julia starts there when a Julia notebook needs it, or may be starting already; the first start can take a few minutes, and calls say `julia_starting` until it's ready. R notebooks don't need Julia.",
             Some(_) => "",
@@ -1799,7 +1554,6 @@ impl Relay {
         let at = place(&name);
         let provider = self.provider_for(&server, install, true)?;
         if !matches!(provider.status().state, State::Ready(_) | State::Starting { .. } | State::Queued(_)) {
-            // Not waited for: a start another process has under way here, which a look would wait for and the stop is for.
             let starting_here = server.id == LOCAL && crate::runtime::lock_state(&self.local.state_dir()).is_held();
             let wait = if starting_here { Duration::ZERO } else { deadline.left() };
             match provider.ensure(Want::Attach { install }, wait, true) {
@@ -1818,7 +1572,6 @@ impl Relay {
                 return Ok(others_result(&name, &others));
             }
         }
-        // Marked before the runtime is ended, so that a notebook call meanwhile doesn't start it again (`route` checks and starts under the same lock). A stop that fails puts it back, whenever it fails.
         let mut was_active = false;
         self.update_target(&server.id, |t| {
             was_active = std::mem::replace(&mut t.active, false);
@@ -1846,8 +1599,6 @@ impl Relay {
         }))
     }
 
-    /// The other sessions active lately. The runtime has `quiet` to answer in all; anything but a
-    /// well-formed answer is an error that says so, and that `force` stops anyway.
     fn recent_others(&self, port: u16, token: &str, quiet: Duration) -> Result<Others, String> {
         let unknown = |why: String| format!("Nothing was stopped: couldn't check who else is active there ({why}). Stopping ends everyone's notebooks there, so call `stop_machine` again with `force: true` only if the user agrees to stop it anyway.");
         if quiet.is_zero() {
@@ -1868,7 +1619,6 @@ impl Relay {
         Ok(Others { count, seconds_ago })
     }
 
-    /// For a cluster with no job and no resources given: what to ask the user before submitting one. The session stays where it is.
     fn needs_job(&self, name: &str, cluster: &Cluster) -> Value {
         let defaults = resources_json(&cluster.resources, cluster.account.as_deref());
         let partitions: Vec<Value> = cluster.partitions.iter().map(partition_json).collect();
@@ -1890,8 +1640,6 @@ impl Relay {
     }
 }
 
-/// What to tell about opening the page when this session is not connected: it works only while the
-/// session is, and the runtime's own port on the machine is what a forward of the user's reaches.
 fn reach_text(server: &Server, runtime: &RuntimeInfo) -> String {
     let Some(port) = runtime.remote_port else { return " The page works while this session is connected.".into() };
     if server.cluster.is_some() {
@@ -1901,8 +1649,6 @@ fn reach_text(server: &Server, runtime: &RuntimeInfo) -> String {
     format!(" The page works while this session is connected. Once it has ended, `ssh -L {port}:127.0.0.1:{port}{via} {}` run on the user's computer reaches the runtime on port {port}, at http://localhost:{port}/ in a browser that opened its notebooks in this session.", server.ssh_host)
 }
 
-/// What `stop_machine` says, without `force`, when Endeavor is starting or a job is queued: other
-/// sessions that wait for it can't be seen, and stopping cancels it for them too.
 fn waiting_result(name: &str, status: &Status) -> Value {
     let at = place(name);
     let cancels = " Stopping cancels it. Endeavor can't see which other sessions are waiting for a runtime that isn't up yet, and they would lose it. Tell the user, and call `stop_machine` again with force true only if they agree.";
@@ -1930,8 +1676,6 @@ fn waiting_result(name: &str, status: &Status) -> Value {
     result
 }
 
-/// Whether Julia runs in Slurm jobs on the machine, from what `add_machine` was given (`slurm`), the
-/// record it had when it was connected to before (`prior`), and whether the helper found Slurm.
 fn choose_mode(slurm: Option<bool>, prior: Option<&Server>, found: bool) -> Result<bool, String> {
     match (slurm, prior) {
         (Some(true), _) if !found => Err("slurm true can't be used: Endeavor's helper found no Slurm on that machine (no sinfo). Leave slurm out, or give false, to run notebooks there directly.".into()),
@@ -1941,7 +1685,6 @@ fn choose_mode(slurm: Option<bool>, prior: Option<&Server>, found: bool) -> Resu
     }
 }
 
-/// What the runtime says of the other sessions that called a tool in the last `RECENT_SECONDS`.
 #[derive(Debug)]
 struct Others {
     count: u64,
