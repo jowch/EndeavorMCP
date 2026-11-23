@@ -219,6 +219,9 @@ impl Notebooks {
     }
 }
 
+/// How recent another session's edit of a cell must be for a session's first read of it to say so (#108).
+const OTHER_SESSION_RECENT: f64 = 600.0;
+
 /// Who may have changed a cell since a session read it, as its replies say.
 pub(crate) const CHANGED_BY: &str = "by the user, by another Endeavor session, or by this conversation before it was resumed";
 
@@ -330,7 +333,26 @@ impl Call<'_> {
         state.seq += 1;
         let seq = state.seq;
         let notebook = state.notebooks.entry(id.to_owned()).or_default();
-        notebook.changes.insert(cell.to_owned(), Change { owner: self.owner.to_owned(), seq });
+        notebook.changes.insert(cell.to_owned(), Change { owner: self.owner.to_owned(), seq, at: self.nbs.now() });
+    }
+
+    /// How many seconds ago another agent session changed `cell`, when this session has never read it and
+    /// that was within `OTHER_SESSION_RECENT`. Asked before the read is recorded. `changed_since_read` tells a
+    /// session that had read the cell; one reading it for the first time took another session's fresh edit
+    /// for the notebook as it is, and replaced it with neither told (#108). The user's own changes aren't news
+    /// of this kind, and the app's calls (no owner) are never told.
+    fn edited_by_other_session(&self, id: &str, cell: &str) -> Option<u64> {
+        if self.owner.is_empty() {
+            return None;
+        }
+        let state = self.nbs.state.lock().unwrap();
+        let notebook = state.notebooks.get(id)?;
+        if notebook.reads.contains_key(&(self.owner.to_owned(), cell.to_owned())) {
+            return None;
+        }
+        let change = notebook.changes.get(cell).filter(|change| change.owner != USER && other_owner(change, self.owner))?;
+        let ago = (self.nbs.now() - change.at).max(0.0);
+        (ago <= OTHER_SESSION_RECENT).then_some(ago.round() as u64)
     }
 
     /// An edit needs the owner to have read the cell's current code.
@@ -920,6 +942,7 @@ impl Call<'_> {
         // that reads each cell it just ran gets its own code back each time, a tenth of a long session.
         let left_out = !include_code && self.recent_read(&nb.id, &cell).is_some_and(|read| read == code);
         let was = self.changed_since_read(&nb, &cell);
+        let other = self.edited_by_other_session(&nb.id, &cell);
         self.record_read_of(&nb.id, &cell, &code, !left_out);
         let mut out = self.cell_json(&nb, &cell);
         if left_out {
@@ -965,6 +988,15 @@ impl Call<'_> {
         if let Some(was) = was {
             out.insert("changed_since_your_read".into(), json!({ "was": was }));
             let said = format!("This cell changed since you last read it, {CHANGED_BY}. Tell the user what changed before you replace it.");
+            let message = match out.get("message").and_then(Value::as_str) {
+                Some(more) => format!("{said} {more}"),
+                None => said,
+            };
+            out.insert("message".into(), json!(message));
+        }
+        if let Some(seconds) = other {
+            out.insert("edited_by_another_session".into(), json!({ "seconds_ago": seconds }));
+            let said = format!("Another Endeavor session changed this cell {seconds} s ago. Tell the user before you replace that change.");
             let message = match out.get("message").and_then(Value::as_str) {
                 Some(more) => format!("{said} {more}"),
                 None => said,
@@ -1360,6 +1392,9 @@ impl Call<'_> {
         let changed: Map<String, Value> = ids.iter()
             .filter_map(|id| self.changed_since_read(&nb, id).map(|was| (id.clone(), json!({ "was": was }))))
             .collect();
+        let others: Map<String, Value> = ids.iter()
+            .filter_map(|id| self.edited_by_other_session(&nb.id, id).map(|seconds| (id.clone(), json!({ "seconds_ago": seconds }))))
+            .collect();
         for id in &ids {
             self.record_read(&nb.id, id, &nb.cells[id].code);
         }
@@ -1385,6 +1420,14 @@ impl Call<'_> {
         if !changed.is_empty() {
             result["changed_since_your_read"] = json!(changed);
             result["message"] = json!(format!("The cells in changed_since_your_read changed since you last read them, {CHANGED_BY}; `was` is the code you had read. Tell the user what changed before you replace them."));
+        }
+        if !others.is_empty() {
+            result["edited_by_another_session"] = json!(others);
+            let said = "Another Endeavor session changed the cells in edited_by_another_session in the last few minutes. Tell the user before you replace those changes.";
+            result["message"] = json!(match result["message"].as_str() {
+                Some(more) => format!("{more} {said}"),
+                None => said.to_owned(),
+            });
         }
         Ok(result)
     }

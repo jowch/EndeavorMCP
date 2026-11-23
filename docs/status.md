@@ -292,7 +292,11 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   read), and `read_notebook_code` lists such cells, each with that code. That message and
   `stale_read`'s ask the agent to tell the user before it replaces the change.
   Haiku 4.5 replaced another session's edit without a word in three runs of
-  smoke N5 out of three (#504).
+  smoke N5 out of three (#504). A session that had never read the cell is told
+  too, on its first read, when another agent session changed it in the last ten
+  minutes (`edited_by_another_session`, with how many seconds ago): it would
+  otherwise take that fresh edit for the notebook as it is (#108). The user's
+  own changes aren't told this way.
 - The pages have a token of their own since 2026-10-15 (interface 8, #100). The
   bearer token, which an agent's MCP config carries, opens `/mcp` and
   `/endeavor/…` only; the pages' token (`page_token` in the state folder and
