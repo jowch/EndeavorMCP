@@ -657,7 +657,10 @@ Next:
   about 2 s (an exit, then SIGTERM, then SIGKILL), before Julia exits. Malt's own
   stop at exit gives a process busy in a cell 15 s to take its exit, one process at
   a time, so a stop during a long cell took 12 to 15 s in two tries of three. Now
-  eight stops of eight took 1.3 to 2.7 s.
+  they take 1.3 to 4.2 s. It then closes Pluto's server and the bridge, so `exit`
+  doesn't tear down a connection mid-write (each stop logged HTTP.jl's "stream not
+  initialized" error), and a notebook's process it stopped isn't logged as one
+  that ended by itself.
 - When the core dies abruptly (an OOM kill, `kill -9`), a small shell the core
   started with Julia stops it. It waits on a pipe only the core holds, so it costs
   nothing while the core lives and ends with Julia. On Linux, Julia has had SIGTERM
