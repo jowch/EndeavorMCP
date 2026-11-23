@@ -343,7 +343,7 @@ snapshot_cell <- function(v) {
     hidden = FALSE,
     markdown = !identical(v$kind, "code"),
     # Ember knows these itself: a result made before an ancestor last ran, or from
-    # code the cell no longer has (an edit to the file that hasn't run, #291), and a
+    # code the cell no longer has (an edit on Ember's page that hasn't run, #291), and a
     # cell that hasn't run since the notebook started (a restart leaves all so).
     stale = isTRUE(v$stale) || isTRUE(v$code_differs),
     not_run = identical(v$status, "not_run") && identical(v$kind, "code"),
