@@ -309,6 +309,46 @@ can't reach.
 Each `result.json` and the summary record the model or models that answered
 (from Claude's own events), so runs can be compared across models later.
 
+## Why the harness works as it does
+
+- The harness's own `endeavor mcp` sessions (setting notebooks up, reading
+  what the agent left, the second person's steps) are sessions of their
+  own. The proxy starts the second person's from inside the agent's MCP
+  server, whose `CLAUDE_CODE_SESSION_ID` would make it the agent's own
+  session (#176), so its edits wouldn't count as another session's, and
+  N5's `stale_read` and N6's `run_conflict` never came (#248).
+- The agent keeps only the variables it needs to run, sign in and reach the
+  network. A Claude Code session's own variables above all would connect it
+  to that session. Its first event is checked for a tool, plugin or server
+  beyond ours, or the starting session's memory; Claude Code's own built-in
+  plugins are allowed. Connectors load after the first turn has started, so
+  only a later turn's first event lists them, and the tools the agent used
+  catch one that connects later. A call Claude Code refused because the
+  agent hasn't that tool doesn't count as using it.
+- A re-run compares outputs with the project folder written as the agent's,
+  so a cell that prints its own folder compares the same (#440); macOS's
+  temporary folders show as `/var/...` or `/private/var/...`, so both are
+  replaced. A picture needn't be byte for byte the same, nor what a package
+  prints only the first time it runs on a computer.
+- A marimo notebook's cell ids aren't in its file, so a reload gives new ones
+  (#353): the same code in the same place is the same cell, but for the
+  spaces on its blank lines, which marimo's file doesn't keep. An id alone
+  isn't enough: marimo hands out ids in a fixed order, so a cell put in above
+  another took a new id, and the reload gives the other's id to it.
+- The headings check compares a heading alone ("Data" mustn't pass for "Data
+  Checks").
+- An install that waits for an OK the harness doesn't give isn't waited for,
+  since waiting would only run out the limit (N1 in Python, #541).
+- Every check that holds `reproducible`, at any depth, asks for a re-run
+  (N8 nests it, #524).
+- A task's folder is removed only once no process uses it: stopping the
+  runtime doesn't stop the background precompile, which runs from the
+  runtime unpacked in the task's folder. Removing it under that precompile
+  made Julia write its new cache file in the shared depot as mode 200 (#383).
+  There's no `ps` on Windows, so it isn't checked there.
+- The `asked_user` check of N7 and L1 matches the asking message's words, so
+  a rewording must change the check too (#412).
+
 ## Other agents
 
 Only part of this is Claude-specific: starting the agent (`run_claude` in
