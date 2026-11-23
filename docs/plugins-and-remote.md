@@ -317,7 +317,7 @@ browser ────────────────────────
   runtime's port on the server. The agent's calls and Pluto's page both use
   it, so `browser_url` works without a tunnel of your own.
 - **On a cluster** the helper on the login node submits the job and passes
-  the streams to a relay on the job's node (`slurm.rs`, built).
+  the streams to a relay on the job's node (`slurm.rs`, built; [slurm.md](slurm.md)).
 
 **One connection for each session and server.** Every agent session starts
 its own front, and each holds its own `ssh`, sign-in and loopback port for a

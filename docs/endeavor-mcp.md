@@ -180,7 +180,7 @@ a cluster), not from a copy made when the session was pointed at it.
 
 The helper, `serve` and the front find or start the runtime with one function
 (`runtime::find_or_start`), look at what is running with one (`runtime::look`)
-and stop it with one (`runtime::end`). A start, once begun, finishes without the
+and stop it with one (`runtime::end`). [start-and-stop.md](start-and-stop.md) has the details. A start, once begun, finishes without the
 process that asked for it. The core is its own session. As the first thing it
 does it holds `starting.lock` in the state folder, writes its pid, start time,
 boot id and host name into that file (one JSON object), and lets go only after
