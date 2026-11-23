@@ -71,7 +71,8 @@ NOTES_KEPT = 500
 TEXT_MAX = 20_000
 
 # Ours, not the user's: nothing runs by itself (an edit marks its readers stale), opening runs
-# nothing, a file edited elsewhere marks cells stale, and marimo's own AI is off (one agent).
+# nothing, a file edited elsewhere marks cells stale, and marimo's own AI is off (one agent). A table shows
+# 25 rows a page, not marimo's 10, so the agent's text of a small table is the whole of it.
 MARIMO_CONFIG = """[runtime]
 on_cell_change = "lazy"
 auto_instantiate = false
@@ -82,6 +83,8 @@ autosave = "after_delay"
 copilot = false
 [package_management]
 manager = "uv"
+[display]
+default_table_page_size = 25
 """
 
 # A new notebook, as `marimo new` writes one (no cells yet but an empty one), with a PEP 723 header: its
