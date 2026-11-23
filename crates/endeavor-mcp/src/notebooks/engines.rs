@@ -24,6 +24,8 @@ pub struct Engines {
     paths: Mutex<HashMap<String, String>>,
     /// Notebooks that were open in an engine (not Pluto's) that ended, until they're opened again.
     closed: Mutex<Vec<Closed>>,
+    /// Held while an engine is dropped, so two callers that both saw it fail drop it once.
+    dropping: Mutex<()>,
 }
 
 /// A notebook that closed because its engine ended (`Engines::drop_engine`).
@@ -42,7 +44,7 @@ pub struct Closed {
 impl Engines {
     /// The engines, starting with Pluto's if it runs.
     pub fn new(pluto: Option<Arc<dyn Upstream>>) -> Engines {
-        Engines { parts: Mutex::new(pluto.map(|pluto| (Backend::Pluto, pluto)).into_iter().collect()), ids: Mutex::default(), paths: Mutex::default(), closed: Mutex::default() }
+        Engines { parts: Mutex::new(pluto.map(|pluto| (Backend::Pluto, pluto)).into_iter().collect()), ids: Mutex::default(), paths: Mutex::default(), closed: Mutex::default(), dropping: Mutex::default() }
     }
 
     /// An engine, once it runs, in the place of one it replaces. False if it's there already: the
@@ -119,35 +121,36 @@ impl Engines {
     /// notebooks are gone with it, and the next notebook opened in it starts
     /// it again. They're kept as `closed`, with why it ended, until each is
     /// opened again. Nothing if it was already replaced.
+    ///
+    /// Each record is written before its notebook leaves the engine's list and its id is
+    /// forgotten, so a call that no longer finds the notebook open finds why it closed (#357).
     pub fn drop_engine(&self, backend: Backend, upstream: &Arc<dyn Upstream>) {
-        if backend == Backend::Pluto {
+        let _dropping = self.dropping.lock().unwrap();
+        if backend == Backend::Pluto || !self.is_current(backend, upstream) {
             return;
         }
-        {
-            let mut parts = self.parts.lock().unwrap();
-            let before = parts.len();
-            parts.retain(|(b, u)| !(*b == backend && Arc::ptr_eq(u, upstream)));
-            if parts.len() == before {
-                return;
-            }
-        }
-        let gone: Vec<String> = {
-            let mut ids = self.ids.lock().unwrap();
-            let gone = ids.iter().filter(|(_, b)| **b == backend).map(|(id, _)| id.clone()).collect();
-            ids.retain(|_, b| *b != backend);
-            gone
-        };
         let why = upstream.why_ended().unwrap_or_else(|| format!("{} stopped answering", language(backend)));
         let ended_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
-        eprintln!("┌ Warning: {} notebooks' engine ended: {why}", language(backend));
-        let mut paths = self.paths.lock().unwrap();
-        let mut closed = self.closed.lock().unwrap();
-        for id in gone {
-            if let Some(path) = paths.remove(&id) {
-                closed.retain(|c| c.path != path);
-                closed.push(Closed { id, path, language: language(backend), why: why.clone(), ended_at });
+        let gone: Vec<String> = self.ids.lock().unwrap().iter().filter(|(_, b)| **b == backend).map(|(id, _)| id.clone()).collect();
+        {
+            let paths = self.paths.lock().unwrap();
+            let mut closed = self.closed.lock().unwrap();
+            for id in &gone {
+                if let Some(path) = paths.get(id) {
+                    closed.retain(|c| c.path != *path);
+                    closed.push(Closed { id: id.clone(), path: path.clone(), language: language(backend), why: why.clone(), ended_at });
+                }
             }
         }
+        {
+            let mut paths = self.paths.lock().unwrap();
+            for id in &gone {
+                paths.remove(id);
+            }
+        }
+        self.ids.lock().unwrap().retain(|id, b| !(*b == backend && gone.contains(id)));
+        self.parts.lock().unwrap().retain(|(b, u)| !(*b == backend && Arc::ptr_eq(u, upstream)));
+        eprintln!("┌ Warning: {} notebooks' engine ended: {why}", language(backend));
     }
 
     /// The reply to one `POST /adapter` call, from the engine it belongs to.
