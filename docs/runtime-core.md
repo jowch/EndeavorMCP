@@ -17,7 +17,7 @@ the engine's language and running in the engine's process:
 
 | Engine | Language | Adapter |
 | --- | --- | --- |
-| Pluto | Julia | `runtime/` (`EndeavorRuntime`), built |
+| Pluto | Julia | `runtime/` (`EndeavorRuntime`, [pluto-adapter.md](pluto-adapter.md)), built |
 | marimo | Python | `runtime-py/` ([marimo.md](https://github.com/jowch/Endeavor/blob/main/docs/marimo.md)), not built |
 | Ember (https://github.com/jowch/Ember) | R | `runtime-r/`, not built |
 
