@@ -1281,12 +1281,33 @@ class Adapter:
         elif changes:
             sid = nb.watcher
             await self.marimo.post("/api/document/transaction", sid, {"changes": changes})
+            # The transaction changes the document only. A deleted cell also has to leave the kernel's
+            # graph, or what it defined stays there, and the cells that read it keep running in the
+            # session though a fresh run of the file fails on them (#410). In lazy mode they turn stale.
+            deleted = [ch["cellId"] for ch in changes if ch["type"] == "delete-cell"]
+            if deleted:
+                asyncio.create_task(self.unregister(nb, deleted))
             # Our copy follows at once, not when marimo's message comes back: the next read is ours.
             for ch in changes:
                 nb.document_change(ch)
             await self.save(nb, sid)
         self.seq += 1
         return {"inserted": inserted, "seq": self.seq, "codes": kept}
+
+    async def unregister(self, nb, cells):
+        """Take deleted cells out of the kernel's graph too: a document transaction leaves them there, with
+        what they defined, so the cells that read it keep running in the session though a fresh run of the
+        file fails on them (#410). marimo's /api/kernel/delete refuses us (no page is the session's editor),
+        so it goes through code mode, which waits behind a running cell; the edit doesn't wait for it, and a
+        later run queues behind it. In lazy mode the readers turn stale."""
+        code = CODE_MODE + "from marimo._runtime.commands import DeleteCellCommand\n" + \
+            "".join(f"await ctx._kernel.delete_cell(DeleteCellCommand(cell_id={c!r}))\n" for c in cells)
+        try:
+            ok, out = await self.marimo.execute(await nb.session_id(), code)
+        except Exception as e:  # noqa: BLE001
+            ok, out = False, str(e)
+        if not ok:
+            print(f"endeavor marimo: couldn't take {cells} out of the kernel: {out[-500:]}", file=sys.stderr)
 
     async def save(self, nb, sid):
         cells = [nb.cells[c] for c in nb.order]

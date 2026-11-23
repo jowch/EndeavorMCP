@@ -351,6 +351,22 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("fold_cell", json!({ "notebook_id": notebook, "cell_id": c, "folded": true }));
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("@app.cell(hide_code=True)\ndef _(y):\n    z = y * 3"), "marimo saved the fold: {saved}");
+        // A deleted cell's names leave the session too, so a cell that reads them fails as it would
+        // in a fresh run of the file. marimo kept them while only the document lost the cell (#410).
+        let def = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "gone_name = 41", "after_cell_id": c }))["cell_id"].as_str().unwrap().to_owned();
+        let reader = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "gone_name + 1", "after_cell_id": def }))["cell_id"].as_str().unwrap().to_owned();
+        agent.ok("submit_changes", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": reader }))["output"], "42");
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": def }));
+        let began = Instant::now();
+        while agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": reader }))["stale"] != true {
+            assert!(began.elapsed() < Duration::from_secs(10), "the reader turns stale");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": reader, "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": reader }));
+        assert!(read["errored"] == true && read.to_string().contains("gone_name"), "{read}");
+        agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": reader }));
     });
 
     step("a preview that leaves no cell where it was still keeps its ids", || {

@@ -451,7 +451,9 @@ Next:
   `mo.md("...")` becomes triple-quoted), so marimo pairs its cells by code when the file changes
   (#442); that save shows as a diff with no edit. A markdown cell that marimo will write in
   another form (a backslash at the end of its text, `"""` with a backslash, or keyword arguments
-  to `mo.md`) carries a `markdown_in_file` note saying how to keep it (#449). Not on
+  to `mo.md`) carries a `markdown_in_file` note saying how to keep it (#449). A deleted cell
+  leaves marimo's kernel too, so what it defined is gone from the session as it is from the file,
+  and the cells that read it turn stale (#410). Not on
   Windows. Known gaps: no tool moves
   the package date (#352), ids shift after a reload (#353), `set_input` and
   `view_cell_output` of HTML aren't there, and uv isn't installed for the user
