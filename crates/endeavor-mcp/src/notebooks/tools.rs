@@ -52,8 +52,9 @@ const OUTPUT_END: usize = 4_000;
 /// The same for a cell that ran along with the ones a run asked for (`Ran::along`).
 const DEPENDENT_TEXT_MAX: usize = 200;
 /// The notes a run's reply leaves out for a cell that only ran along, and gives after the
-/// others; `read_cell` has them.
-const QUIET_NOTES: [&str; 2] = ["printed", "logged_info"];
+/// others; `read_cell` has them. A `markdown_in_file` note is about the cell's own code, which
+/// that run didn't change, so it is said only when the cell itself was asked for.
+const QUIET_NOTES: [&str; 3] = ["printed", "logged_info", "markdown_in_file"];
 /// How many notes a run's reply carries, and how many bytes of them: a run of every cell
 /// (`run_all_cells`) would otherwise send back what each one printed.
 const RUN_NOTES_MAX: usize = 10;
