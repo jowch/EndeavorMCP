@@ -5,7 +5,7 @@
     { "check": "no_errored_cells" },
     { "check": "code_contains", "texts": ["plot_ly"] },
     { "check": "called", "tool": "view_cell_output" },
-    { "check": "final_message_contains_any", "texts": ["check", "couldn't see", "could not see", "can't see", "haven't seen"], "soft": true },
+    { "check": "final_message_contains_any", "texts": ["check that", "check the hover", "check the tooltip", "please check", "confirm that", "couldn't see", "could not see", "can't see", "haven't seen"], "soft": true },
     { "check": "agent_tools_not_used", "tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"] }
   ]
 }
