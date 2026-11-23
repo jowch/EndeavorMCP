@@ -472,6 +472,19 @@ fn a_server_that_asks_for_a_password_gets_it_from_a_page_in_the_browser() {
     assert!(!added.to_string().contains(&pages[0]), "the agent never sees the page's link: {added}");
     front.finish();
 
+    // A page nobody answers in time ends as a sign-in nobody answered, which a reconnect tries again,
+    // not as a refused one; Cancel on the page is a refusal.
+    let place = Place::with("signin-unanswered", &[("ENDEAVOR_TEST_ASK", ask), ("ENDEAVOR_TEST_SIGN_IN_WAIT_MS", "300")]);
+    let mut front = start_front(&place, &[("ENDEAVOR_TEST_BROWSER", opened.to_str().unwrap())]);
+    front.click_pages(None);
+    front.initialize();
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": place.julia.display().to_string() }));
+    assert!(failed && text(&said).contains("stopped waiting for the sign-in"), "{said}");
+    front.click_pages(Some("x&cancel=1"));
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": place.julia.display().to_string() }));
+    assert!(failed && !text(&said).contains("stopped waiting for the sign-in"), "{said}");
+    front.finish();
+
     // Without a browser to open, ssh runs in batch mode and has no askpass to ask.
     let place = Place::with("signin-no-browser", &[("ENDEAVOR_TEST_ASK", ask)]);
     let mut front = place.front();

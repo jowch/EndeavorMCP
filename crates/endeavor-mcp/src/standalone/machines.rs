@@ -20,7 +20,7 @@ use super::install_page::Clicked;
 use super::projects::Remembered;
 use super::target::{OtherBuild, Provider, Target, local_server};
 use super::{Relay, Route, tool_failure};
-use crate::client::{Asker, Auth, Cluster, Config, InstallInfo, Launcher, Messages, Outcome, Running, RuntimeInfo, Server, Session, State, Status, Transport, Want, ssh_config_hosts, this_platform};
+use crate::client::{Asker, Auth, Reply, Cluster, Config, InstallInfo, Launcher, Messages, Outcome, Running, RuntimeInfo, Server, Session, State, Status, Transport, Want, ssh_config_hosts, this_platform};
 use crate::mcp::{browser_link, to_json, tool_error};
 use crate::notebooks::Folder;
 
@@ -60,7 +60,7 @@ pub(super) fn test_var(name: &str) -> Option<std::ffi::OsString> {
 /// share a runtime); `ENDEAVOR_TEST_JULIA_AT_START` starts Julia with the runtime; `ENDEAVOR_TEST_ASK` is a command that runs in the shell before each connect
 /// (`Transport::Shell`'s `ask`), and a failure of it fails the connect.
 fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>, wanted: &Arc<Mutex<Instant>>) -> Result<(Session, Option<Asker>), String> {
-    let id = server.id.clone();
+    let (id, name) = (server.id.clone(), server.display_name());
     let asker = sign_in(&server, wanted);
     let var = |name: &str| test_var(name).and_then(|v| v.into_string().ok()).unwrap_or_default().replace("{id}", &id);
     let helper = |os: &str, arch: &str| {
@@ -88,10 +88,12 @@ fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>,
         // The front tells its agent of another build's runtime itself (`Relay::decorate`), with `stop_machine`.
         tell_other_build: false,
     };
-    if let Some(asker) = &asker {
-        config.auth = Auth::Env(asker.env(&askpass_program()?));
+    // Without a program for ssh to ask through, it signs in with keys only, as without a browser.
+    let asker = asker.and_then(|asker| askpass_program().map_err(|e| eprintln!("┌ Warning: {e}; {name} signs in with keys only")).ok().map(|program| (asker, program)));
+    if let Some((asker, program)) = &asker {
+        config.auth = Auth::Env(asker.env(program));
     }
-    Ok((Session::new(config)?, asker))
+    Ok((Session::new(config)?, asker.map(|(asker, _)| asker)))
 }
 
 /// This program, as ssh runs it to ask (`SSH_ASKPASS`). On Linux not `/proc/self/exe`, which in ssh
@@ -107,8 +109,10 @@ fn askpass_program() -> Result<std::path::PathBuf, String> {
 /// to be put to the user: a connection made again in the background, when no one asked for it, isn't.
 const SIGN_IN_WINDOW: Duration = Duration::from_secs(2 * 60);
 
-/// How long one sign-in question waits for the user's answer on its page.
-const SIGN_IN_WAIT: Duration = Duration::from_secs(2 * 60);
+/// How long one sign-in question waits for the user's answer on its page: less than the 2 minutes a
+/// server gives a sign-in by default (sshd's `LoginGraceTime`), so that a question nobody answers ends
+/// as one that wasn't answered, which a reconnect tries again, before the server closes the connection.
+const SIGN_IN_WAIT: Duration = Duration::from_secs(100);
 
 /// The sign-in pages of this front's machines (`signin_page`).
 static SIGN_IN: std::sync::LazyLock<super::signin_page::SignIn> = std::sync::LazyLock::new(Default::default);
@@ -122,12 +126,17 @@ fn sign_in(server: &Server, wanted: &Arc<Mutex<Instant>>) -> Option<Asker> {
         return None;
     }
     let (name, wanted) = (server.display_name(), wanted.clone());
-    Asker::start(move |ask| {
+    Asker::replying(move |ask| {
         if wanted.lock().unwrap().elapsed() > SIGN_IN_WINDOW {
             eprintln!("[ Info: {name} asked to sign in while no machine tool waited for it; not asking the user");
-            return None;
+            return Reply::GaveUp;
         }
-        SIGN_IN.ask(&name, &ask, SIGN_IN_WAIT, &open_page)
+        // A debug build's test waits less (`ENDEAVOR_TEST_SIGN_IN_WAIT_MS`).
+        let wait = test_var("ENDEAVOR_TEST_SIGN_IN_WAIT_MS").and_then(|ms| ms.into_string().ok()?.parse().ok()).map_or(SIGN_IN_WAIT, Duration::from_millis);
+        let reply = SIGN_IN.ask(&name, &ask, wait, &open_page);
+        // The user is there: a second question after a slow first one (a code after the password) is theirs too.
+        *wanted.lock().unwrap() = Instant::now();
+        reply
     })
     .map_err(|e| eprintln!("┌ Warning: {e}; {} signs in with keys only", server.display_name()))
     .ok()

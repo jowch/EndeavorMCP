@@ -828,10 +828,13 @@ user's browser, the same on macOS, Linux and Windows (#106,
 `standalone/signin_page.rs`). The `endeavor mcp` process that is connecting
 serves the page on 127.0.0.1, opened with a one-time secret in its address,
 like the install page. It takes an answer only from its own form, and the
-answer goes from the page to `ssh` and never through the agent. The page
-waits 2 minutes; Cancel, or no answer, ends the sign-in. A question that comes
-more than 2 minutes after a tool last used the connection (a reconnect in the
-background) isn't put on a page, so no page opens by surprise.
+answer goes from the page to `ssh` and never through the agent. Cancel on the
+page refuses the sign-in. The page waits 100 seconds, less than the 2 minutes
+a server gives a sign-in by default; a question nobody answered ends with
+"stopped waiting for the sign-in", which the next call tries again. A question
+that comes more than 2 minutes after a tool last used the connection (a
+reconnect in the background) isn't put on a page, so no page opens by
+surprise; it ends the same way.
 
 Where no browser can be opened, `ssh` runs in batch mode and fails instead of
 asking. Three cases fail, each with a message that says what to do:

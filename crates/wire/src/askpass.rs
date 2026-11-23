@@ -32,10 +32,14 @@ pub struct Ask {
     pub prompt: String,
 }
 
-/// App → helper: one JSON line. `None` means the user cancelled.
+/// App → helper: one JSON line. `None` means the user cancelled, or, with `gave_up`, that nobody
+/// answered (no one was there to ask, or not in time): the askpass then says so on ssh's stderr, so the
+/// connect fails as one to try again rather than as a refused sign-in.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Answer {
     pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gave_up: bool,
 }
 
 impl Ask {

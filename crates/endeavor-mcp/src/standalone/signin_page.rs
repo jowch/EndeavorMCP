@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use wire::askpass::{Ask, Kind};
 
+use crate::client::Reply;
 use crate::http::{self, Head};
 
 /// Where the pages are, before each one's secret.
@@ -57,29 +58,32 @@ struct Page {
 }
 
 impl SignIn {
-    /// Ask the user `ask`, ssh's question for `machine`, on a page in their browser: their answer, or
-    /// None if they cancelled, no browser could be opened, or `wait` ran out. `open` opens a link in the
-    /// user's browser and says whether it could.
-    pub(super) fn ask(&self, machine: &str, ask: &Ask, wait: Duration, open: &dyn Fn(&str) -> bool) -> Option<String> {
-        let port = self.port()?;
-        let secret = crate::random_hex::<16>().ok()?;
+    /// Ask the user `ask`, ssh's question for `machine`, on a page in their browser: their answer,
+    /// `Refused` if they cancelled, or `GaveUp` if no page could be opened or `wait` ran out. `open`
+    /// opens a link in the user's browser and says whether it could.
+    pub(super) fn ask(&self, machine: &str, ask: &Ask, wait: Duration, open: &dyn Fn(&str) -> bool) -> Reply {
+        let Some(port) = self.port() else { return Reply::GaveUp };
+        let Ok(secret) = crate::random_hex::<16>() else { return Reply::GaveUp };
         let page = Page { machine: machine.to_owned(), ask: ask.clone(), answer: None, asked: Instant::now() };
         self.shared.pages.lock().unwrap().insert(secret.clone(), page);
         // The link goes from here to the browser only: never into a tool result.
         if !open(&format!("http://127.0.0.1:{port}{PATH}{secret}")) {
             self.shared.pages.lock().unwrap().remove(&secret);
-            return None;
+            return Reply::GaveUp;
         }
         let until = Instant::now() + wait.min(KEEP);
         let mut pages = self.shared.pages.lock().unwrap();
         loop {
             if pages.get(&secret).is_some_and(|page| page.answer.is_some()) {
-                return pages.remove(&secret).and_then(|page| page.answer).flatten();
+                return match pages.remove(&secret).and_then(|page| page.answer).flatten() {
+                    Some(text) => Reply::Answered(text),
+                    None => Reply::Refused,
+                };
             }
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 pages.remove(&secret);
-                return None;
+                return Reply::GaveUp;
             }
             pages = self.shared.answered.wait_timeout(pages, left).unwrap().0;
         }
@@ -255,7 +259,7 @@ mod tests {
     }
 
     /// Ask `ask` on a thread, and hand back the page's link and the answer when it comes.
-    fn asked(pages: &Arc<SignIn>, ask: Ask) -> (String, std::thread::JoinHandle<Option<String>>) {
+    fn asked(pages: &Arc<SignIn>, ask: Ask) -> (String, std::thread::JoinHandle<Reply>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let pages = pages.clone();
         let waiting = std::thread::spawn(move || {
@@ -281,7 +285,7 @@ mod tests {
         assert_eq!(post(&url, "", Some(&origin)).0, 400);
         let (status, said) = post(&url, "answer=p%40ss+word%26", Some(&origin));
         assert!(status == 200 && said.contains("Sent"), "{said}");
-        assert_eq!(waiting.join().unwrap().as_deref(), Some("p@ss word&"));
+        assert_eq!(waiting.join().unwrap(), Reply::Answered("p@ss word&".into()));
         // Handed over once, then forgotten: the page is gone.
         assert_eq!(get(&url).0, 404);
         assert_eq!(post(&url, "answer=again", Some(&origin)).0, 404);
@@ -295,20 +299,20 @@ mod tests {
         assert!(get(&url).1.contains("value=\"yes\""));
         assert_eq!(post(&url, "answer=maybe", Some(&origin)).0, 400);
         post(&url, "answer=yes", Some(&origin));
-        assert_eq!(waiting.join().unwrap().as_deref(), Some("yes"));
+        assert_eq!(waiting.join().unwrap(), Reply::Answered("yes".into()));
 
         let (url, waiting) = asked(&pages, Ask { kind: Kind::Secret, prompt: "Verification code:".into() });
         post(&url, "cancel=1&answer=", Some(&url[..url.find(PATH).unwrap()]));
-        assert_eq!(waiting.join().unwrap(), None);
+        assert_eq!(waiting.join().unwrap(), Reply::Refused, "Cancel is a no, not a question nobody answered");
     }
 
     #[test]
     fn without_a_browser_or_an_answer_in_time_there_is_no_answer() {
         let pages = SignIn::default();
         let ask = Ask { kind: Kind::Secret, prompt: "Password:".into() };
-        assert_eq!(pages.ask("lab", &ask, Duration::from_secs(20), &|_| false), None);
+        assert_eq!(pages.ask("lab", &ask, Duration::from_secs(20), &|_| false), Reply::GaveUp);
         assert!(pages.shared.pages.lock().unwrap().is_empty(), "no page is left to answer");
-        assert_eq!(pages.ask("lab", &ask, Duration::from_millis(50), &|_| true), None);
+        assert_eq!(pages.ask("lab", &ask, Duration::from_millis(50), &|_| true), Reply::GaveUp);
         assert!(pages.shared.pages.lock().unwrap().is_empty(), "nor once the wait ran out");
     }
 }
