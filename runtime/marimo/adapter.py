@@ -1654,6 +1654,7 @@ class Adapter:
         return {"interrupted": busy}
 
     async def restart(self, nb):
+        """A new session for the notebook, every cell not run."""
         if not nb.allowed:
             raise argument_error("execution_blocked", "The notebook is in safe preview; Run notebook starts it")
         # marimo's restart closes the session (its page then reloads, which starts a new one); we start it.
