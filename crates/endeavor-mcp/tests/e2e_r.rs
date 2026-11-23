@@ -1045,15 +1045,16 @@ fn stand_in_importing(repository: &Path, label: &str, broken: bool, listed: Opti
     sha[..12].to_owned()
 }
 
-/// A package `name` at `version` that imports `imports`, built into the CRAN-like repository `cran`,
-/// whose index is written again.
+/// A package `name` at `version` that imports `imports` (in its NAMESPACE too, so loading it loads
+/// them), built into the CRAN-like repository `cran`, whose index is written again.
 fn cran_package(cran: &Path, name: &str, version: &str, imports: &str) {
     let source = fresh(cran.with_extension("source")).join(name);
     std::fs::create_dir_all(source.join("R")).unwrap();
+    let names: String = imports.split(',').map(|i| i.split('(').next().unwrap().trim()).filter(|i| !i.is_empty()).map(|i| format!("importFrom({i}, v)\n")).collect();
     let imports = if imports.is_empty() { String::new() } else { format!("Imports: {imports}\n") };
     std::fs::write(source.join("DESCRIPTION"), format!("Package: {name}\nVersion: {version}\nTitle: Stand-in\nDescription: Stand-in.\nLicense: MIT\n{imports}")).unwrap();
     std::fs::write(source.join("R/v.R"), format!("v <- function() \"{version}\"\n")).unwrap();
-    std::fs::write(source.join("NAMESPACE"), "export(v)\n").unwrap();
+    std::fs::write(source.join("NAMESPACE"), format!("export(v)\n{names}")).unwrap();
     let contrib = cran.join("src/contrib");
     std::fs::create_dir_all(&contrib).unwrap();
     assert!(Command::new("R").args(["CMD", "build", "--no-manual"]).arg(&source).current_dir(&contrib).stdout(Stdio::null()).status().unwrap().success());
@@ -1092,6 +1093,44 @@ fn a_dependency_too_old_for_ember_is_installed_beside_it() {
     let libs = format!("{}:{}:{}", folder.join(&a).display(), folder.join("deps").display(), site.display());
     let out = Command::new("Rscript").args(["-e", "cat(ember::build(), endeavorlow::v())"]).env("R_LIBS", libs).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "a 2.0", "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// A package install.R installs into `deps` loads there although an older copy of what it needs was
+/// loaded by the checks before the install (#216). `endeavormid`, already installed, loads the user's
+/// `endeavorlow` 1.0; `endeavortop` needs 2.0, which goes into `deps` with it. Checked in the same R,
+/// `endeavortop` failed on the loaded 1.0 and the start ended with "Couldn't install"; the next start
+/// worked.
+#[test]
+#[ignore = "starts real R: cargo test -p endeavor-mcp --test e2e_r -- --ignored"]
+fn a_package_needing_a_newer_copy_than_one_already_loaded_installs() {
+    if !Command::new("Rscript").arg("--version").stderr(Stdio::null()).status().is_ok_and(|s| s.success()) {
+        eprintln!("SKIPPED: no Rscript on the PATH.");
+        return;
+    }
+    let work = fresh(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-r-loaded-old-copy"));
+    let (repository, folder, cran, site) = (work.join("repository"), work.join("ember"), work.join("cran"), fresh(work.join("site")));
+    cran_package(&cran, "endeavorlow", "1.0", "");
+    cran_package(&cran, "endeavormid", "1.0", "endeavorlow");
+    for file in ["endeavorlow_1.0.tar.gz", "endeavormid_1.0.tar.gz"] {
+        let file = cran.join("src/contrib").join(file);
+        assert!(Command::new("R").args(["CMD", "INSTALL", "--no-test-load", "-l"]).arg(&site).arg(&file).env("R_LIBS", &site).stdout(Stdio::null()).status().unwrap().success());
+    }
+    std::fs::remove_file(cran.join("src/contrib/endeavorlow_1.0.tar.gz")).unwrap();
+    cran_package(&cran, "endeavorlow", "2.0", "");
+    cran_package(&cran, "endeavortop", "1.0", "endeavorlow (>= 2.0)");
+    let a = stand_in_importing(&repository, "a", false, None, "endeavormid, endeavortop");
+    let out = Command::new("Rscript")
+        .args(["--vanilla", concat!(env!("CARGO_MANIFEST_DIR"), "/../../runtime/r/install.R")])
+        .arg(&folder)
+        .arg(format!("file://{}", repository.display()))
+        .env("ENDEAVOR_CRAN", format!("file://{}", cran.display()))
+        .env("R_LIBS", &site)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let libs = format!("{}:{}:{}", folder.join(&a).display(), folder.join("deps").display(), site.display());
+    let out = Command::new("Rscript").args(["-e", "cat(ember::build(), endeavortop::v(), endeavorlow::v())"]).env("R_LIBS", libs).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "a 1.0 2.0", "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 /// The adapter's pure functions (the install status, the errors' fixes), checked by

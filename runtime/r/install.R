@@ -156,11 +156,31 @@ too_old <- function(pkg) {
   !is.na(found) && package_version(found) < wanted[[pkg]]
 }
 loads <- function(pkg) !too_old(pkg) && suppressWarnings(requireNamespace(pkg, quietly = TRUE))
+# Which of `pkgs` don't load in a new R with `lib` as its library path, as R's
+# adapter will start. Not checked in this process: the checks above loaded
+# whatever copies they found, and an old one stays loaded even once a newer
+# copy is installed into `deps`, so a package that needs the newer one would
+# fail here but load in the adapter (#216). R's reasons go to stderr.
+fails_fresh <- function(pkgs, lib) {
+  script <- tempfile("ember-check", fileext = ".R")
+  on.exit(unlink(script))
+  writeLines(c(
+    paste0(".libPaths(", paste(deparse(lib), collapse = ""), ")"),
+    paste0("for (pkg in ", paste(deparse(pkgs), collapse = ""), ") tryCatch(suppressWarnings(suppressPackageStartupMessages(loadNamespace(pkg))), error = function(e) {"),
+    "  message(pkg, \": \", conditionMessage(e))",
+    "  cat(\"failed\", pkg, \"\\n\")",
+    "})",
+    "cat(\"checked\\n\")"), script)
+  out <- suppressWarnings(system2(file.path(R.home("bin"), "Rscript"), c("--vanilla", shQuote(script)), stdout = TRUE))
+  # An R that ended before it was through counts every package as failed.
+  if (!("checked" %in% trimws(out))) return(pkgs)
+  intersect(pkgs, sub("^failed ", "", trimws(grep("^failed ", out, value = TRUE))))
+}
 missing <- tree[!vapply(tree, loads, logical(1))]
 if (length(missing)) {
   message("Installing ", paste(missing, collapse = ", "), " for R notebooks")
   install.packages(missing, lib = deps, repos = cran)
-  still <- missing[!vapply(missing, loads, logical(1))]
+  still <- union(Filter(too_old, missing), fails_fresh(missing, .libPaths()))
   if (length(still)) fail(paste("Couldn't install", paste(still, collapse = ", "), "for R notebooks; R's messages are above."), blame = FALSE)
 }
 
@@ -185,13 +205,7 @@ sha256_of <- function(file) {
 got <- if (!is.na(build[["SHA256"]])) sha256_of(file) else NA
 if (!is.na(got) && got != build[["SHA256"]]) fail(paste0("The download of Ember ", name, " from ", where$contriburl, " isn't the file its index lists (SHA256 ", got, ")"), blame = FALSE)
 install.packages(file, lib = part, repos = NULL, type = type)
-loaded <- tryCatch({
-  loadNamespace("ember", lib.loc = c(part, .libPaths()))
-  TRUE
-}, error = function(e) {
-  message(conditionMessage(e))
-  FALSE
-})
+loaded <- length(fails_fresh("ember", c(part, .libPaths()))) == 0
 if (!loaded || !dir.exists(file.path(part, "ember"))) fail(paste("Ember", name, "didn't install or load; R's messages are above."))
 # Another start may have installed it first.
 if (!file.rename(part, file.path(folder, name))) unlink(part, recursive = TRUE)
