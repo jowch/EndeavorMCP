@@ -905,8 +905,12 @@ impl Notebooks {
     /// `open_notebook` joins it as already open.
     fn open_waited(&self, owner: &str, method: &str, params: Value, key: String, wait: Duration, doing: &str) -> Result<(Value, Value), String> {
         let began = Instant::now();
-        self.start_engine(engines::of_params(&params), wait)?;
-        let why = "the first notebook in a new Julia process takes a while to compile";
+        let backend = engines::of_params(&params);
+        self.start_engine(backend, wait)?;
+        let why = match backend {
+            Backend::Pluto => "the first notebook in a new Julia process takes a while to compile".to_owned(),
+            other => format!("{} can take a while to start a notebook, the first time most of all", engines::language(other)),
+        };
         self.waited(owner, method, params, key, (began + wait).saturating_duration_since(Instant::now()), &format!("{doing} is taking longer than one call waits: {why}"))
     }
 
