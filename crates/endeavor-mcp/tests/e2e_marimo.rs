@@ -425,9 +425,14 @@ fn a_python_notebook_through_the_runtime() {
         let ends = r#"mo.md("a path: C:\\")"#;
         let added = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": math, "code": ends }));
         assert!(added.get("code").is_none(), "kept as sent: {added}");
+        let path_cell = added["cell_id"].as_str().unwrap().to_owned();
         agent.ok("submit_changes", json!({ "notebook_id": nb, "wait_for_completion": true }));
+        // marimo's save still writes it another way, and its note says so (#449); a cell marimo keeps has none.
+        let read = agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": path_cell }));
+        assert!(read["notes"].as_array().is_some_and(|n| n.iter().any(|n| n.as_str().unwrap_or_default().starts_with("markdown_in_file::"))), "{read}");
         let read = agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": math, "include_code": true }));
         assert_eq!(read["code"], raw, "{read}");
+        assert!(read.get("notes").is_none(), "{read}");
         assert!(!read.to_string().contains('\u{7}'), "no bell in the output: {read}");
         let file = folder.join("headings.py");
         let in_file = "    mo.md(r\"\"\"\n    $\\alpha + \\beta$\n    \"\"\")";
