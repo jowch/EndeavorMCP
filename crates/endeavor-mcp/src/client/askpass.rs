@@ -1,13 +1,3 @@
-//! The app's side of askpass over loopback TCP (`wire::askpass`): a port on
-//! 127.0.0.1 and a random token, one per listener, that a connection must send
-//! first. Each `Ask` that comes with the token goes to the caller's `answer`,
-//! which may wait for the user. It works on every platform, and is the only way
-//! on Windows. A caller passes `Auth::Env(asker.env(askpass))` to the connect.
-//!
-//! 127.0.0.1 is open to every user's processes; the token, which only ssh's
-//! environment holds, keeps other users' out. It doesn't keep out this user's
-//! own processes, which can read that environment, as they can a Unix socket.
-
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::Path;
@@ -17,30 +7,21 @@ use std::time::{Duration, Instant};
 
 use wire::askpass::{ADDRESS_ENV, Answer, Ask, TOKEN_ENV};
 
-/// How long a connection has to send the token and its question, in all.
 const READ_LIMIT: Duration = Duration::from_secs(10);
 
-/// The most a connection may send: the token and one question, which ssh keeps short.
 const MOST_BYTES: u64 = 16 * 1024;
 
-/// Connections served at once; more are closed at once.
 const MOST_AT_ONCE: usize = 8;
 
-/// What answers a question.
 pub type AnswerFn = dyn Fn(Ask) -> Reply + Send + Sync;
 
-/// The answer to one of ssh's questions.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reply {
     Answered(String),
-    /// The user said no (Cancel): ssh takes it as a refused sign-in.
     Refused,
-    /// Nobody answered: no one was there to ask, or not in time. ssh's error then says the sign-in
-    /// wasn't answered (`SIGN_IN_GAVE_UP`), which a reconnect tries again, not that it was refused.
     GaveUp,
 }
 
-/// Listens until dropped.
 pub struct Asker {
     port: u16,
     token: String,
@@ -48,7 +29,6 @@ pub struct Asker {
 }
 
 impl Asker {
-    /// An asker whose `answer` gives the text, or None when the user cancelled.
     pub fn start(answer: impl Fn(Ask) -> Option<String> + Send + Sync + 'static) -> Result<Asker, String> {
         Asker::replying(move |ask| answer(ask).map_or(Reply::Refused, Reply::Answered))
     }
@@ -87,10 +67,6 @@ impl Asker {
         self.port
     }
 
-    /// The variables for ssh to ask through this listener, with `askpass` (the
-    /// `endeavor` binary, or the app acting as it) as its askpass program.
-    /// `SSH_ASKPASS_REQUIRE=force`: ssh then asks it even with a terminal, and
-    /// Windows' ssh uses an askpass only then.
     pub fn env(&self, askpass: &Path) -> Vec<(String, String)> {
         vec![
             ("SSH_ASKPASS".into(), askpass.display().to_string()),
@@ -104,16 +80,12 @@ impl Asker {
 impl Drop for Asker {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::SeqCst);
-        // Wakes the accept so the thread sees it.
         let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port));
     }
 }
 
-/// How long a connection's last bytes are read, after its answer or its refusal, before it is closed.
 const DRAIN_LIMIT: Duration = Duration::from_millis(500);
 
-/// One askpass: the token, then its `Ask`, within `MOST_BYTES` and `READ_LIMIT`; a connection
-/// without the token is closed unanswered.
 fn serve(socket: TcpStream, token: &str, answer: &AnswerFn) {
     let socket = wire::Shared::new(socket);
     answer_one(socket.clone(), token, answer);
@@ -139,22 +111,16 @@ fn answer_one(socket: wire::Shared, token: &str, answer: &AnswerFn) {
     let _ = writer.write_all(reply.as_bytes());
 }
 
-/// End the connection so that the client reads its answer, or the empty refusal, to the end. A socket
-/// closed with bytes it hasn't read sends a reset instead of an end, which the client may get before
-/// the answer, as Windows' does (#112). So the write half is shut first, and what the client still
-/// sends is read for a moment (at most `MOST_BYTES` more, or until it closes its end).
 fn close(socket: &wire::Shared) {
     let _ = socket.shutdown(std::net::Shutdown::Write);
     let mut rest = Until { socket: socket.clone(), until: Instant::now() + DRAIN_LIMIT }.take(MOST_BYTES);
     let _ = std::io::copy(&mut rest, &mut std::io::sink());
 }
 
-/// Whether `a` and `b` are the same, in a time that doesn't depend on where they differ.
 fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
-/// A socket whose reads all end by `until`, however slowly the other side sends.
 struct Until {
     socket: wire::Shared,
     until: Instant,
@@ -210,9 +176,6 @@ mod tests {
         assert_eq!(asked.lock().unwrap().len(), 2, "only the two with the token reached the user");
     }
 
-    /// What the client sends after the line that is refused still reaches the Asker, which reads it before it
-    /// closes: closed with those bytes unread, it would send a reset, and the client's read would fail
-    /// instead of ending empty (#112).
     #[test]
     fn a_refused_client_that_is_still_sending_reads_an_empty_reply_not_a_reset() {
         let asker = Asker::start(|_| Some("x".into())).unwrap();
@@ -239,7 +202,6 @@ mod tests {
         .unwrap();
         let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, asker.port())).unwrap();
         socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        // Twice what is read, with no line break; the write may fail once the listener has closed.
         let _ = socket.write_all(&vec![b'a'; 2 * MOST_BYTES as usize]);
         let mut reply = Vec::new();
         let read = socket.read_to_end(&mut reply);

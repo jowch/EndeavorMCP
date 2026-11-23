@@ -24,12 +24,10 @@ fn diagnoses_common_failures_or_shows_the_log() {
     assert_eq!(diagnose(&[]), "It printed nothing.");
 }
 
-/// The helper's end of a channel, scripted: what it says is pushed with `say`, and what the client sent is `sent`.
 struct Scripted {
     channel: Arc<Channel>,
     say: mpsc::Sender<Vec<u8>>,
     sent: Arc<Mutex<Vec<u8>>>,
-    /// Set when the client ends the helper's input.
     closed: Arc<AtomicBool>,
 }
 
@@ -86,7 +84,6 @@ impl Scripted {
         self.say.send(message.frame().encode()).unwrap();
     }
 
-    /// Every control message the client has sent so far.
     fn requests(&self) -> Vec<ToHelper> {
         let bytes = self.sent.lock().unwrap().clone();
         let mut bytes = &bytes[..];
@@ -97,7 +94,6 @@ impl Scripted {
         out
     }
 
-    /// Wait until the client has sent `n` requests that `pick` takes: their ids.
     fn ids(&self, n: usize, pick: fn(&ToHelper) -> Option<u32>) -> Vec<u32> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -110,18 +106,14 @@ impl Scripted {
         }
     }
 
-    /// Wait until the client has sent `n` `Stop`s: their ids.
     fn stops_sent(&self, n: usize) -> Vec<u32> {
         self.ids(n, |request| if let ToHelper::Stop { id, .. } = request { Some(*id) } else { None })
     }
 
-    /// Wait until the client has sent `n` `StartRuntime`s: their ids.
     fn starts_sent(&self, n: usize) -> Vec<u32> {
         self.ids(n, |request| if let ToHelper::StartRuntime { id, .. } = request { Some(*id) } else { None })
     }
 
-    /// Start the runtime, say it's ready, and call `notice` with what the
-    /// watcher hears of its end.
     fn started(&self, listener: &Arc<Listener>, notice: impl FnOnce(Notice) + Send + 'static) {
         let starting = self.starting(listener, notice);
         let id = *self.starts_sent(1).last().unwrap();
@@ -129,7 +121,6 @@ impl Scripted {
         starting.join().unwrap().expect("ready");
     }
 
-    /// A start on its own thread.
     fn starting(&self, listener: &Arc<Listener>, notice: impl FnOnce(Notice) + Send + 'static) -> std::thread::JoinHandle<Result<Runtime, String>> {
         std::thread::spawn({
             let (channel, listener) = (self.channel.clone(), listener.clone());
@@ -137,13 +128,11 @@ impl Scripted {
         })
     }
 
-    /// A stop on its own thread.
     fn stopping(&self) -> std::thread::JoinHandle<Result<(), String>> {
         let channel = self.channel.clone();
         std::thread::spawn(move || channel.stop())
     }
 
-    /// Wait until the client has sent a frame holding `text`.
     fn sent_has(&self, text: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !String::from_utf8_lossy(&self.sent.lock().unwrap()).contains(text) {
@@ -269,7 +258,6 @@ fn the_answers_of_two_starts_are_not_confused() {
     let helper = Scripted::new();
     let listener = Listener::start("lab").unwrap();
 
-    // The first ended, and a stray answer for it comes during the next.
     let first = helper.starting(&listener, |_| {});
     let [one] = helper.starts_sent(1)[..] else { panic!() };
     helper.tell(&ToApp::StartFailed { id: one, message: "no".into() });
@@ -366,7 +354,6 @@ fn a_channel_that_was_detached_or_quit_is_left_alone_when_dropped() {
     let helper = Scripted::new();
     helper.channel.quit(true);
     helper.sent_has("Detach");
-    // The helper's output stays open, so only the drop could end its input.
     let Scripted { channel, say, closed, .. } = helper;
     drop(channel);
     assert!(!closed.load(Ordering::SeqCst));
@@ -405,7 +392,6 @@ fn two_stops_at_once_are_each_answered_by_id_and_leave_nothing_for_the_next_star
     let helper = Scripted::new();
     let (first, second) = (helper.stopping(), helper.stopping());
     let ids = helper.stops_sent(2);
-    // The second to be sent is answered first, and the other one is refused.
     helper.tell(&ToApp::NotStopped { id: ids[1], message: "no lock".into() });
     helper.tell(&ToApp::Stopped { id: ids[0] });
     let (first, second) = (first.join().unwrap(), second.join().unwrap());
@@ -501,13 +487,10 @@ fn a_stop_that_gave_up_and_was_refused_later_leaves_the_runtime_watched() {
     assert!(matches!(notice, Notice::Died(_)), "{notice:?}");
 }
 
-/// What the listener says to an MCP call, which tells how it is away. A
-/// connection the listener never answers or closes fails the test here.
 fn says(listener: &Listener) -> String {
     let mut socket = TcpStream::connect(("127.0.0.1", listener.port())).unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_notebooks"}}"#;
-    // A listener that can't relay the call closes it, maybe before all of it is written.
     let _ = write!(socket, "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer t\r\nContent-Length: {}\r\n\r\n{body}", body.len());
     let mut response = String::new();
     if let Err(e) = socket.read_to_string(&mut response)
@@ -518,7 +501,6 @@ fn says(listener: &Listener) -> String {
     response
 }
 
-/// `channel.closed()`, failing the test if the helper's end isn't heard in 10 s.
 fn closed_within(channel: &Arc<Channel>) -> Option<Notice> {
     let (tx, rx) = mpsc::channel();
     let channel = channel.clone();
@@ -572,7 +554,6 @@ fn a_helper_that_ends_unexpectedly_is_a_drop_and_after_the_client_let_it_go_is_n
 fn a_helper_that_ends_as_its_runtime_is_ready_is_a_drop() {
     let listener = Listener::start("lab").unwrap();
     let helper = Scripted::new();
-    // The start hears `Ready` only after the helper's channel has ended.
     let (heard, wait) = mpsc::channel::<()>();
     let (release, released) = mpsc::channel::<()>();
     let starting = std::thread::spawn({

@@ -32,8 +32,6 @@ fn batch_mode_adds_batchmode_and_env_does_not() {
     assert_eq!(set, [("SSH_ASKPASS".to_owned(), Some("/x/askpass".to_owned())), ("SSH_ASKPASS_REQUIRE".to_owned(), Some("force".to_owned()))]);
 }
 
-/// On Windows, Windows' own ssh build when it is installed, whatever `ssh` comes first on the PATH
-/// (Git's, in Git Bash); elsewhere the PATH's.
 #[test]
 fn the_ssh_is_windows_own_when_there_is_one() {
     if !cfg!(windows) {
@@ -49,7 +47,6 @@ fn the_ssh_is_windows_own_when_there_is_one() {
 fn ssh_gets_its_usual_arguments_and_the_script_last() {
     let command = Transport::Ssh { host: "jc@lab".into(), port: Some(2222) }.command("echo hi", &Auth::Batch).unwrap();
     let mut expected = vec!["-T", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2"];
-    // Not on Windows, whose ssh then gives up on the first address that refuses (#35).
     if !cfg!(windows) {
         expected.extend(["-o", "ConnectTimeout=20"]);
     }
@@ -83,13 +80,11 @@ fn the_bootstrap_holds_nothing_a_login_shell_would_change() {
     }
 }
 
-/// `script` run as a login shell would run ssh's command, with `preamble` on stdin.
 #[cfg(unix)]
 fn run_script(script: &str, preamble: &str, home: &Path) -> String {
     run_script_in(script, preamble, home, &[])
 }
 
-/// `run_script`, with more variables set (a `PATH`, for one).
 #[cfg(unix)]
 fn run_script_in(script: &str, preamble: &str, home: &Path, env: &[(&str, &str)]) -> String {
     let mut shell = Command::new("sh").arg("-c").arg(format!("sh -c '{script}'")).env("HOME", home).envs(env.iter().copied()).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
@@ -98,7 +93,6 @@ fn run_script_in(script: &str, preamble: &str, home: &Path, env: &[(&str, &str)]
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// The shells that stand for the server's `sh` here: dash, bash and busybox's, whichever are installed.
 #[cfg(unix)]
 fn shells() -> Vec<(&'static str, PathBuf)> {
     let found: Vec<_> = ["dash", "bash", "busybox"].into_iter().filter_map(|name| ["/usr/bin", "/bin"].iter().map(|dir| Path::new(dir).join(name)).find(|path| path.exists()).map(|path| (name, path))).collect();
@@ -106,8 +100,6 @@ fn shells() -> Vec<(&'static str, PathBuf)> {
     found
 }
 
-/// A `PATH` folder where `sh` is `shell`, the tools the script uses are the system's, and `squeue` lists
-/// `listed` (is absent for `None`), so that the real scheduler isn't asked. `ps` is the system's unless `ps` says otherwise.
 #[cfg(unix)]
 fn server_path(dir: &Path, shell: &Path, listed: Option<&str>, ps: Option<&str>) -> String {
     let _ = std::fs::remove_dir_all(dir);
@@ -143,7 +135,6 @@ fn the_bootstrap_runs_under_a_shell_and_asks_for_an_install() {
     }
 }
 
-/// A `v1` install under `root` whose `endeavor` says how it was run.
 #[cfg(unix)]
 fn fake_install(root: &Path) {
     let dir = root.join("v1");
@@ -153,7 +144,6 @@ fn fake_install(root: &Path) {
     crate::test_exec::write_executable(&helper, "#!/bin/sh\nfor a in \"$@\"; do echo \"arg:$a\"; done\n");
 }
 
-/// The `connect` arguments the script gives the helper, as lines.
 #[cfg(unix)]
 fn connect_args(home: &Path, preamble: &str) -> Vec<String> {
     let said = run_script(&bootstrap_script("v1", false, false, false), preamble, home);
@@ -196,16 +186,13 @@ fn exit_idle_and_own_with_client_reach_the_helper_with_the_same_six_lines() {
     }
 }
 
-/// What the script says about a server with no helper, with `launcher` and the state folder given.
 #[cfg(unix)]
 fn needs_line(home: &Path, state: &Path, launcher: &str, path: &str) -> String {
     let mut shell = Command::new("sh").arg("-c").arg(format!("sh -c '{}'", bootstrap_script("v1", false, false, false))).env("HOME", home).env("PATH", path).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-    // It waits for the byte count, and the end of its input ends it.
     shell.stdin.take().unwrap().write_all(format!("{}/root\n{}\n\n--julia\nauto\n{launcher}\n--r\nauto\n", home.display(), state.display()).as_bytes()).unwrap();
     String::from_utf8_lossy(&shell.wait_with_output().unwrap().stdout).into_owned()
 }
 
-/// A stand-in process that is ended when it is dropped, whatever a test did before.
 #[cfg(unix)]
 struct KillOnDrop(std::process::Child);
 
@@ -225,10 +212,7 @@ fn a_server_without_the_helper_is_described_and_nothing_is_written() {
         let state = home.join("st");
         std::fs::create_dir_all(&state).unwrap();
         let bin = |listed: Option<&str>, ps: Option<&str>| server_path(&home.join("bin"), &shell, listed, ps);
-        // A process whose command is a core's, a quoted node name that holds "pid", and a recorded job.
         let child = std::os::unix::process::CommandExt::arg0(Command::new("sleep").arg("60"), "endeavor core --state-dir fake").spawn().unwrap();
-        // Just after the spawn the kernel may not have set the new command line yet, and `ps` then shows
-        // `[sleep]`: wait until it shows the core's.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !String::from_utf8_lossy(&Command::new("ps").args(["-p", &child.id().to_string(), "-o", "args="]).output().unwrap().stdout).contains("--state-dir") {
             assert!(std::time::Instant::now() < deadline, "the fake core never showed its command line");
@@ -239,15 +223,12 @@ fn a_server_without_the_helper_is_described_and_nothing_is_written() {
         let write = |text: String| std::fs::write(state.join("runtime.json"), text).unwrap();
         write(format!(r#"{{"launcher":"process","node":"rapid-pid1","pid":{pid},"port":5,"token":"t"}}"#));
         let line = needs_line(&home, &state, "process", &bin(None, None));
-        // Busybox's own `ps` has no -p, so it can only say that the process is alive.
         let seen = if name == "busybox" { "process-recorded" } else { "process" };
         assert!(line.contains(&format!(" need {seen}:{pid} first {}/root/v1", home.display())), "{name}: {line}");
         assert!(needs_line(&home, &state, "slurm", &bin(None, None)).contains(" need none first "), "{name}: a plain runtime isn't a job");
-        // A `ps` that can't say: alive, and recorded only. One that says another command: not it.
         assert!(needs_line(&home, &state, "process", &bin(None, Some("exit 1"))).contains(&format!(" need process-recorded:{pid} first ")), "{name}");
         if name != "busybox" {
             assert!(needs_line(&home, &state, "process", &bin(None, Some("echo sleep 60"))).contains(" need none first "), "{name}: a pid that was reused");
-            // A `ps` that cuts `args` short unless given -ww, and one that refuses -ww (#430).
             let cuts = r#"[ "$1" = -ww ] && echo 'endeavor core --state-dir fake' || echo 'endeavor core'"#;
             let refuses = r#"[ "$1" = -ww ] && exit 1; echo 'endeavor core --state-dir fake'"#;
             for ps in [cuts, refuses] {
@@ -288,7 +269,6 @@ fn ids_that_are_not_digits_are_not_reported_and_values_are_never_read_as_escapes
             assert!(needs_line(&home, &state, "slurm", &path).contains(" need none "), "{name}: {text}");
         }
         assert!(!home.join("pwned").exists() && !state.join("pwned").exists());
-        // `\c` ends an echo's output in dash and busybox, and `\n` is a line break there: the line is printed as it is.
         for odd in [r"x\cy", r"a\nb", "with space", "$HOME"] {
             let root = home.join(odd);
             let mut sh = Command::new("sh").arg("-c").arg(format!("sh -c '{}'", bootstrap_script("v1", false, false, false))).env("HOME", &home).env("PATH", &path).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
@@ -417,13 +397,10 @@ fn in_batch_mode_a_sign_in_failure_says_what_to_do() {
     assert!(host_key.contains(&format!("Run `{ssh} lab` once in a terminal and accept its host key")), "{host_key}");
     let denied = say("jc@lab: Permission denied (publickey).");
     assert!(denied.contains("ssh-add") && denied.contains("password or a code, and Endeavor couldn't open a page in a browser here"), "{denied}");
-    // Windows ships its agent turned off, so there it also says how to turn it on.
     assert_eq!(denied.contains("Start-Service ssh-agent"), cfg!(windows), "{denied}");
-    // The same words for a password server: ssh lists its methods.
     assert_eq!(say("jc@lab: Permission denied (publickey,password,keyboard-interactive)."), denied);
     let with_port = explain(&Transport::Ssh { host: "lab".into(), port: Some(2222) }, &Auth::Batch, &["Host key verification failed.".to_owned()], None, false, false);
     assert!(with_port.contains(&format!("`{ssh} -p 2222 lab`")), "{with_port}");
-    // The rest reads the same as without batch mode.
     assert!(say("ssh: connect to host lab port 22: Operation timed out").contains("timed out"));
 }
 
@@ -449,14 +426,11 @@ fn exited_with(code: i32) -> Option<ExitStatus> {
 fn only_ssh_own_failures_are_explained_as_sign_in_or_network_problems() {
     let denied = ["jc@lab: Permission denied (publickey).".to_owned()];
     let says = |status: Option<ExitStatus>, signed_in: bool| explain(&lab(), &Auth::Batch, &denied, status, false, signed_in);
-    // ssh's own status, or none known (killed, or not asked).
     for status in [exited_with(255), None, Some(std::os::unix::process::ExitStatusExt::from_raw(9))] {
         assert!(says(status, false).contains("refused the sign-in"), "{status:?}");
     }
-    // Any other status is the remote command's: its own words.
     assert_eq!(says(exited_with(1), false), "The connection to lab ended: jc@lab: Permission denied (publickey).");
     assert_eq!(says(exited_with(0), false), says(exited_with(1), false));
-    // And never once signed in, whatever the status.
     assert_eq!(says(exited_with(255), true), "The connection to lab ended: jc@lab: Permission denied (publickey).");
     assert_eq!(explain(&lab(), &Auth::Batch, &[], exited_with(3), false, false), "The connection to lab ended before Endeavor could start (exit status: 3).");
 }
@@ -472,7 +446,6 @@ fn the_collected_stderr_survives_a_line_that_is_not_utf8() {
 fn a_cancel_holds_ssh_while_the_helper_lives_and_lets_go_once_it_has_exited() {
     let dir = crate::client::scratch("cancel-pid");
     std::fs::write(dir.join("frames"), ToApp::Hello { protocol: wire::PROTOCOL, version: "0".into(), node: "n".into(), home: "/".into(), slurm: false, uploads: false, launcher: String::new() }.frame().encode()).unwrap();
-    // Says hello, then stays until the client sends it anything (a detach).
     let script = dir.join("helper");
     crate::test_exec::write_executable(&script, &format!("#!/bin/sh\ncat '{}'\nhead -c 1 >/dev/null\n", dir.join("frames").display()));
     let fake = |_: &str, _: &str| Ok(script.clone());
@@ -516,7 +489,6 @@ fn a_cancel_forgets_ssh_once_it_has_exited() {
     assert_eq!(*slot.lock().unwrap(), None);
 }
 
-/// What the script hands the helper for `root`, `state` and `depot` under `home`.
 #[cfg(unix)]
 fn where_they_land(home: &Path, root: &str, state: &str, depot: &str) -> (String, String, String) {
     let args = connect_args(home, &format!("{root}\n{state}\n{depot}\n--julia\nauto\nprocess\n--r\nauto\n"));
@@ -531,7 +503,6 @@ fn a_leading_tilde_is_the_servers_home() {
     let h = home.display().to_string();
     fake_install(&home.join("r"));
     assert_eq!(where_they_land(&home, "~/r", "~/s", "~/d:"), (format!("{h}/s"), format!("{h}/r/v1/runtime"), format!("{h}/d:")));
-    // Only the depot's first entry is the home's; a `~` that is not first or not leading stays as it is.
     assert_eq!(where_they_land(&home, "~/r", "rel", "~/d:/x/~/y:").2, format!("{h}/d:/x/~/y:"));
     assert_eq!(where_they_land(&home, "~/r", "rel", "/a:~/b:").2, "/a:~/b:");
     assert_eq!(where_they_land(&home, "~/r", "rel", "~:").2, format!("{h}:"));
@@ -563,14 +534,11 @@ fn only_sign_in_and_host_key_failures_end_a_reconnect() {
 
 #[test]
 fn a_sign_in_the_server_stopped_waiting_for_is_tried_again_however_ssh_ends() {
-    // The askpass gave up on an unanswered question (#64): after a key's passphrase ssh says
-    // "Permission denied"; after a password the connection just closes.
     let ask = Auth::Env(vec![("SSH_ASKPASS".into(), "/askpass".into())]);
     for after in ["jc@lab: Permission denied (publickey).", "Connection closed by 10.0.0.1 port 22"] {
         let stderr = [SIGN_IN_GAVE_UP.to_owned(), after.to_owned()];
         assert_eq!(explain_retry(&lab(), &ask, &stderr, None, false, false), ("lab stopped waiting for the sign-in.".to_owned(), true), "{after}");
     }
-    // A refusal with no askpass giving up still ends the reconnect.
     assert!(!explain_retry(&lab(), &ask, &["jc@lab: Permission denied (publickey).".to_owned()], None, false, false).1);
 }
 
@@ -600,16 +568,12 @@ fn the_bootstrap_script_settles_auto_as_the_helper_does() {
     assert_eq!(pick("auto", &path), if wire::slurm::has("sinfo") { "slurm" } else { "process" }, "on this computer's PATH the script and `has` agree");
 }
 
-/// A server's core is never started with `--own-r`: the core also reads it as "this is the user's own
-/// computer" and then lets Python notebooks start there (`core::MarimoStarter`), which a server's
-/// runtime isn't set up for (#354). Offering Endeavor's R on a server needs its own flag first (#423).
 #[test]
 fn a_servers_core_is_never_told_it_is_this_computer() {
     for flags in 0..8u8 {
         let script = bootstrap_script("v1", flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
         assert!(!script.contains("--own-r") && !script.contains("--install-r"), "{script}");
     }
-    // The script's R flag comes from the server's R setting, which is only ever `--r` or `--r-shell`.
     for r in [None, Some(""), Some("/usr/bin/Rscript"), Some("~/R/bin/R"), Some("module load R"), Some("--own-r")] {
         let server = crate::client::Server { r: r.map(str::to_owned), ..Default::default() };
         assert!(["--r", "--r-shell"].contains(&server.r_args()[0].as_str()), "{r:?}");
