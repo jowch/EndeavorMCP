@@ -552,6 +552,45 @@ end
         @test isfile(joinpath(other, "z.so"))
     end
 
+    @testset "lifecycle: a compiled set of ours whose runtime folder is gone is removed" begin
+        include(joinpath(@__DIR__, "..", "..", "cache_guard.jl"))
+        # The same small package in two runtime folders, as two builds unpack it: each compiles a
+        # set of its own into the one depot (#382).
+        depot, uuid = mktempdir(), UUIDs.uuid4()
+        sep = Sys.iswindows() ? ';' : ':'
+        function folder()
+            project = mktempdir()
+            mkpath(joinpath(project, "EndeavorRuntimeWarm", "src"))
+            write(joinpath(project, "EndeavorRuntimeWarm", "Project.toml"), "name = \"EndeavorRuntimeWarm\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n")
+            write(joinpath(project, "EndeavorRuntimeWarm", "src", "EndeavorRuntimeWarm.jl"), "module EndeavorRuntimeWarm\nf() = 1\nend\n")
+            write(joinpath(project, "Project.toml"), "[deps]\nEndeavorRuntimeWarm = \"$uuid\"\n\n[sources]\nEndeavorRuntimeWarm = {path = \"EndeavorRuntimeWarm\"}\n")
+            write(joinpath(project, "Manifest.toml"), "julia_version = \"$VERSION\"\nmanifest_format = \"2.0\"\n\n[[deps.EndeavorRuntimeWarm]]\npath = \"EndeavorRuntimeWarm\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n")
+            project
+        end
+        julia(script, at) = addenv(`$(Base.julia_cmd()) --startup-file=no --project=$at -e $script`,
+            "JULIA_DEPOT_PATH" => depot * sep, "JULIA_LOAD_PATH" => join(["@", "@stdlib"], sep))
+        check = "exit(Base.isprecompiled(Base.identify_package(\"EndeavorRuntimeWarm\")) ? 0 : 1)"
+        old, new = folder(), folder()
+        @test success(julia("using EndeavorRuntimeWarm", old))
+        dir = only(filter(isdir, [joinpath(v, "EndeavorRuntimeWarm") for v in readdir(joinpath(depot, "compiled"); join=true)]))
+        first_set = only(filter(endswith(".ji"), readdir(dir)))
+        @test success(julia("using EndeavorRuntimeWarm", new))
+        @test length(filter(endswith(".ji"), readdir(dir))) == 2
+        # While both folders are there, both sets are kept.
+        @test endeavor_drop_unreadable_caches(depot; log=devnull) == String[]
+        rm(old; recursive=true)
+        stem = splitext(first_set)[1]
+        mkpath(joinpath(dir, stem * ".dylib.dSYM"))
+        removed = endeavor_drop_unreadable_caches(depot; log=devnull)
+        @test !isempty(removed) && all(p -> startswith(basename(p), stem * "."), removed)
+        @test !any(n -> startswith(n, stem * "."), readdir(dir))
+        @test length(filter(endswith(".ji"), readdir(dir))) == 1
+        @test success(julia(check, new))
+        # A file that isn't a compiled set, by a .ji's name, is kept.
+        write(joinpath(dir, "junk.ji"), "x")
+        @test endeavor_drop_unreadable_caches(depot; log=devnull) == String[]
+    end
+
     @testset "lifecycle: a compiled file of ours that can't be read is removed, then compiled again" begin
         include(joinpath(@__DIR__, "..", "..", "cache_guard.jl"))
         # A small package by the warm-up's name, in a project and a depot of its own. Loading it
