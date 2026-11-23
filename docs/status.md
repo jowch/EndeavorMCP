@@ -426,6 +426,9 @@ Next:
   runs every notebook in its own uv environment from the notebook's header; a new
   notebook's header pins marimo and an `exclude-newer` package date, and a
   package a run imports is installed and written there at its exact version.
+  An opened notebook whose header doesn't name marimo (or that has no header)
+  gets marimo pinned at the server's version when it goes live, not the
+  `marimo>=<newest>` marimo's sandbox would write (#352).
   A package new to the notebook (not in its header) waits for the user's OK
   first, as in Julia (#355): the cells stay queued, `packages.step` is
   `asking`, and `approve_install` installs it; the app's Auto mode doesn't ask,

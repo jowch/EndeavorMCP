@@ -437,6 +437,7 @@ class Notebook:
 
     async def go_live(self):
         """Make marimo's session for the notebook (its sandbox builds now), then watch it."""
+        await asyncio.to_thread(pin_marimo, self.path)
         url = f"ws://127.0.0.1:{self.m.port}{BASE_URL}/ws"
         query = urllib.parse.urlencode({"file": self.path, "access_token": self.m.token})
         maker = await websockets.connect(f"{url}?session_id=endeavor-{secrets.token_hex(6)}&{query}", max_size=None)
@@ -943,6 +944,25 @@ def output_text(out, console):
         parts.append(f"[{', '.join(sorted(bundle))} output]")
     parts = [p.rstrip("\n") for p in parts if p]
     return cap("\n".join(parts))
+
+
+def pin_marimo(path):
+    """Add marimo, at the server's version, to a notebook header that doesn't name it (#352).
+
+    marimo's sandbox adds `marimo` to such a header itself, with `uv add --script`, which writes
+    `marimo>=<newest>`: wrong for anyone who runs the file elsewhere, and its kernel can come up newer
+    than the server. Done first, with the version pinned, marimo's finds marimo there and leaves it.
+    As marimo's, a file with no header gets one."""
+    from marimo._environments import script_metadata
+    try:
+        if not script_metadata.should_add_marimo(path):
+            return
+        script_metadata.ensure_metadata_block(path)
+        with script_metadata.materialized_for_edit(path) as target:
+            script_metadata.uv(["add", "--script", target.path, f"marimo=={marimo.__version__}"],
+                               env=script_metadata.script_command_env(), timeout=30, cwd=target.directory)
+    except Exception as e:  # noqa: BLE001 - marimo's sandbox then adds its own, as before
+        print(f"endeavor marimo: couldn't pin marimo in {path}'s header: {e}", file=sys.stderr)
 
 
 def package_date(path):

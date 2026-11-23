@@ -473,6 +473,39 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("close_notebook", json!({ "notebook_id": id }));
     });
 
+    step("a header without marimo gets the pinned marimo, not a loose one", || {
+        // marimo's sandbox adds `marimo>=<newest>` to a header that doesn't name marimo, which is wrong for
+        // anyone who runs the file elsewhere, and can bring a kernel newer than the server (#352).
+        let file = folder.join("loose.py");
+        std::fs::write(&file, GROWTH.replace("#     \"marimo==0.25.1\",\n", "")).unwrap();
+        assert!(!std::fs::read_to_string(&file).unwrap().contains("marimo=="));
+        let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        let id = agent.ok("open_notebook", json!({ "path": "loose.py" }))["notebook_id"].clone();
+        agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": true }));
+        let cells = agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"].clone();
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cells[1] }));
+        assert!(read["output"].as_str().unwrap_or_default().contains("21"), "{read}");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("\"marimo==0.25.1\"") && !text.contains("marimo>="), "{text}");
+        agent.ok("close_notebook", json!({ "notebook_id": id }));
+        // A file with no header gets one, as marimo's would, with the pinned marimo in it.
+        let file = folder.join("bare.py");
+        let bare = GROWTH.split_once("# ///\n\n").unwrap().1;
+        assert!(!bare.contains("# /// script"));
+        std::fs::write(&file, bare).unwrap();
+        let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        let id = agent.ok("open_notebook", json!({ "path": "bare.py" }))["notebook_id"].clone();
+        agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": true }));
+        let cells = agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"].clone();
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cells[1] }));
+        assert!(read["output"].as_str().unwrap_or_default().contains("21"), "{read}");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("# /// script") && text.contains("\"marimo==0.25.1\"") && !text.contains("marimo>="), "{text}");
+        agent.ok("close_notebook", json!({ "notebook_id": id }));
+    });
+
     step("a new notebook pins marimo and a package date", || {
         // A session works on one notebook: another agent makes it.
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
