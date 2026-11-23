@@ -2331,7 +2331,7 @@ fn view_cell_output_says_an_interactive_output_was_not_seen_working() {
     // A picture of a tall output that stops at the window says so (Endeavor #163).
     let cut = super::tools::screenshot_result(Y, crate::Picture { png: "iVBORw==".into(), cut: Some((855, 920)) }, &error).unwrap();
     let said: Value = serde_json::from_str(cut["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(said["cut"], "The picture shows the top 855 px of an output 920 px tall; the rest is missing.");
+    assert_eq!(said["cut"], "The picture shows 855 px of an output 920 px tall; the rest is missing.");
 }
 
 #[test]

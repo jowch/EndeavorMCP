@@ -2465,7 +2465,7 @@ pub(crate) fn screenshot_result(cell: &str, picture: crate::Picture, result: &Va
         meta["shown_as"] = json!(shown_as);
     }
     if let Some((shown, whole)) = cut {
-        meta["cut"] = json!(format!("The picture shows the top {shown} px of an output {whole} px tall; the rest is missing."));
+        meta["cut"] = json!(format!("The picture shows {shown} px of an output {whole} px tall; the rest is missing."));
     }
     // A picture of the notebook shows how it looks, still not that its controls work.
     if said["interactive"] == true || said["message"].as_str().is_some_and(|m| m.contains(INTERACTIVE_UNSEEN)) {
