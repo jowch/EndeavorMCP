@@ -1,12 +1,3 @@
-//! The notebook tools: every rule the agent's tools follow, applied here and
-//! carried out through the engine's adapter. Results and errors are what the
-//! Julia runtime gave before, to the byte, but for the order of lists Julia
-//! kept in hash tables (now notebook order) and errors for argument types
-//! Julia reported with its own stack of candidate methods.
-//!
-//! An error is the text of the exception Julia raised: `ArgumentError: kind::message`
-//! names its kind (see `mcp::tool_error`).
-
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -17,72 +8,35 @@ use crate::host_tools::julia_repr;
 use crate::mcp::julia_string;
 use wire::backend::Backend;
 
-/// How long the app's report of a user's run counts. (Also sent as the
-/// `timeout` of runs the engine is not asked to wait for, which it ignores.)
 pub(super) const TIMEOUT_SECONDS: f64 = 60.0;
-/// The most a tool call waits for the user's answer and then a run, from the
-/// start of the call: under the 60 seconds that Claude Code (by default, and
-/// whatever progress it hears) and Codex give a tool call. The wait for the
-/// user's own run of the same cells (`ran_after_user`) comes out of it.
 pub const WAIT_SECONDS: f64 = 45.0;
-/// The least a run is waited for, however much of `WAIT_SECONDS` went before.
 pub const WAIT_FLOOR_SECONDS: f64 = 5.0;
-/// The most `interrupt_notebook` waits for the cells to stop. One still running then is
-/// usually in compiled code that ignores interrupts; Ember offers its restart 3 s after a Stop.
 const INTERRUPT_WAIT_SECONDS: f64 = 10.0;
-/// Claude accepts images up to about 5 MB; plots are typically tens of KB.
 const MAX_IMAGE_BYTES: usize = 4_000_000;
-/// How long a package step can take before the agent is told it is taking
-/// longer than usual and to stop waiting unless the package log moves.
 const INSTALL_USUAL_SECONDS: u64 = 600;
-/// How `read_notebook_code` starts each cell of a Pluto notebook, as Pluto's file does.
 const CELL_MARKER: &str = "# ╔═╡ ";
-/// And of an Ember notebook, as an Ember `.R` file does.
 const EMBER_CELL_MARKER: &str = "# %% id=";
-/// What `open_notebook` says about a notebook in safe preview, so the agent passes it on.
 pub(super) const NOT_RUN: &str = "Safe preview: none of this notebook's code has run, so its cells have no outputs yet. Tell the user that when you describe it. It runs only once the user allows it.";
-/// How much of each output's text a change's receipt carries; `read_cell` has
-/// the rest.
 const RECEIPT_TEXT_MAX: usize = 2_000;
-/// How much of a text output `read_cell` and receipts carry, as the runtime cuts an
-/// output's text form (`_TEXT_MAX` in `Output.jl`): a `Text` of 200,000 lines is 1.3 MB.
 const OUTPUT_MAX: usize = 16_000;
-/// Of that, how much comes from the output's end, where a long print's result is.
 const OUTPUT_END: usize = 4_000;
-/// The same for a cell that ran along with the ones a run asked for (`Ran::along`).
 const DEPENDENT_TEXT_MAX: usize = 200;
-/// The notes a run's reply leaves out for a cell that only ran along, and gives after the
-/// others; `read_cell` has them. A `markdown_in_file` note is about the cell's own code, which
-/// that run didn't change, so it is said only when the cell itself was asked for.
 const QUIET_NOTES: [&str; 3] = ["printed", "logged_info", "markdown_in_file"];
-/// The notes that come from a cell's code rather than its last run: while an edited cell waits
-/// to run, they stay `notes` in the edit's reply, and the others become `previous_notes`.
 const CODE_NOTES: [&str; 1] = ["markdown_in_file"];
-/// How many notes a run's reply carries, and how many bytes of them: a run of every cell
-/// (`run_all_cells`) would otherwise send back what each one printed.
 const RUN_NOTES_MAX: usize = 10;
 const RUN_NOTES_BYTES: usize = 4_000;
-/// How many of a session's calls a read or write of a cell counts as recent: within them, `read_cell`
-/// leaves out code it hasn't changed (`code_unchanged`), as the agent still has it.
 const RECENT_CALLS: u64 = 10;
 
-/// A tool's result: JSON, or a PNG with JSON describing it.
 pub enum Reply {
     Json(Value),
     Image { meta: Value, png_base64: String },
 }
 
 impl Notebooks {
-    /// A notebook tool call by `owner` ("" for the app): its result, or the
-    /// error Julia raised for it. `folder` is the session's working folder,
-    /// where `new_notebook` puts notebooks and relative paths start. `began` is
-    /// when the call arrived, which a waited run's cap counts from.
     pub fn tool(&self, owner: &str, name: &str, args: &Value, folder: &Folder, began: Instant) -> Result<Reply, String> {
         self.tool_watched(owner, name, args, folder, began, &|| false)
     }
 
-    /// `tool` for a caller that can hang up: `gone` says it has, which ends a
-    /// wait in the call early.
     pub fn tool_watched(&self, owner: &str, name: &str, args: &Value, folder: &Folder, began: Instant, gone: &dyn Fn() -> bool) -> Result<Reply, String> {
         *self.state.lock().unwrap().calls.entry(owner.to_owned()).or_default() += 1;
         let t = Call { nbs: self, owner, args, began, gone };
@@ -125,7 +79,6 @@ impl Notebooks {
         Ok(Reply::Json(result))
     }
 
-    /// The engine's status, with the idle limit now in force (0: never) and whether the runtime ends itself when idle.
     fn session_status(&self) -> Result<Value, String> {
         let mut status = self.call("status", json!({}))?;
         if let Value::Object(fields) = &mut status {
@@ -136,8 +89,6 @@ impl Notebooks {
         Ok(status)
     }
 
-    /// An edit that was to run after (`run_after`), when the user chose not
-    /// to run it: the edit is made, staged and not run, and its receipt says why.
     pub fn tool_unrun(&self, owner: &str, name: &str, args: &Value, folder: &Folder, began: Instant) -> Result<Reply, String> {
         let mut args = args.clone();
         args["run_after"] = false.into();
@@ -150,13 +101,6 @@ impl Notebooks {
         Ok(reply)
     }
 
-    /// `endeavor/run_preview`, for the app's approval card: what a run tool
-    /// call would run. `cells` are the cells it targets (named by what they
-    /// define), `all` means the whole notebook, `needed_ids` the cells they
-    /// depend on that never ran and so run first, `dependents` counts the
-    /// other cells that re-run with them, and `packages` are those a
-    /// whole-notebook run loads, in notebook order. For `allow_execution`,
-    /// `count` is the notebook's size whether or not it runs.
     pub fn run_preview(&self, tool: &str, args: &Value) -> Result<Value, String> {
         let t = Call { nbs: self, owner: "", args, began: Instant::now(), gone: &|| false };
         let nb = t.notebook()?;
@@ -172,7 +116,6 @@ impl Notebooks {
         } else {
             Vec::new()
         };
-        // allow_execution with run_notebook=false only lifts safe preview.
         let all = tool == "run_all_cells" || (tool == "allow_execution" && args.get("run_notebook").is_none_or(|run| *run != false));
         let whole = all || tool == "allow_execution";
         let needed = if all { Vec::new() } else { self.never_run_upstream(&nb, &targets)? };
@@ -181,7 +124,6 @@ impl Notebooks {
         let cells: Vec<Value> = targets.iter().map(|id| json!({ "id": id, "name": graph.name(id), "code": nb.cells[id].code })).collect();
         let mut packages: Vec<String> = Vec::new();
         if whole {
-            // The cells as they are now: in safe preview some were never analysed.
             let fresh = self.graph(&nb.id, GraphQuery { fresh: true, packages: true, ..Default::default() })?;
             for package in nb.order.iter().filter_map(|id| fresh.node(id)).flat_map(|node| &node.packages) {
                 if !packages.contains(package) {
@@ -200,16 +142,10 @@ impl Notebooks {
         }))
     }
 
-    /// The cells `targets` depend on, directly or not, that have never run
-    /// (as after leaving safe preview without a run), in notebook order. A
-    /// run of the targets runs these too, so they don't fail on names those
-    /// cells define. None while the notebook isn't running code.
     fn never_run_upstream(&self, nb: &Snapshot, targets: &[String]) -> Result<Vec<String>, String> {
         Ok(self.upstream(nb, targets)?.into_iter().filter(|id| nb.cells.get(id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c))).collect())
     }
 
-    /// The cells `targets` depend on, directly or not, the targets left out,
-    /// in notebook order. None while the notebook isn't running code.
     fn upstream(&self, nb: &Snapshot, targets: &[String]) -> Result<Vec<String>, String> {
         if targets.is_empty() || !nb.execution_allowed {
             return Ok(Vec::new());
@@ -219,54 +155,38 @@ impl Notebooks {
     }
 }
 
-/// How recent another session's edit of a cell must be for a session's first read of it to say so (#108).
 const OTHER_SESSION_RECENT: f64 = 600.0;
 
-/// Who may have changed a cell since a session read it, as its replies say.
 pub(crate) const CHANGED_BY: &str = "by the user, by another Endeavor session, or by this conversation before it was resumed";
 
-/// The owner of a change the user made through the app (`endeavor/restore_cells`): no session's.
 pub const USER: &str = "(the user)";
 
 fn other_owner(change: &Change, owner: &str) -> bool {
     !change.owner.is_empty() && change.owner != owner
 }
 
-/// What a run did, for its receipt.
 #[derive(Default)]
 struct Ran {
     warnings: Vec<String>,
-    /// The cells it ran, a waited run's dependents that reran with them too.
     cells: Vec<String>,
-    /// A waited run whose wait ended with it unfinished: its cells and their
-    /// dependents, which may still be running. Empty otherwise.
     going: Vec<String>,
-    /// A run not waited for: the dependents it will rerun after its cells (#192).
     will_run: Vec<String>,
-    /// Of `cells`, those that ran along with the ones the call asked for, other than one edited since
-    /// it last ran: the dependents that reran, and the stale cells they needed (`also`). Their output
-    /// text is cut shorter.
     along: Vec<String>,
 }
 
-/// One tool call: who makes it and its arguments.
 struct Call<'a> {
     nbs: &'a Notebooks,
     owner: &'a str,
     args: &'a Value,
     began: Instant,
-    /// Whether the caller has hung up.
     gone: &'a dyn Fn() -> bool,
 }
 
 impl Call<'_> {
-    /// What is left of `WAIT_SECONDS`.
     fn wait_left(&self) -> Duration {
         Duration::from_secs_f64(WAIT_SECONDS).saturating_sub(self.began.elapsed())
     }
 
-    /// How long a run is waited for: what is left of `WAIT_SECONDS`, but not
-    /// less than `WAIT_FLOOR_SECONDS`.
     fn run_wait(&self) -> Duration {
         self.wait_left().max(Duration::from_secs_f64(WAIT_FLOOR_SECONDS))
     }
@@ -275,7 +195,6 @@ impl Call<'_> {
         self.args.get(name).ok_or_else(|| key_error(name))
     }
 
-    /// The notebook `notebook_id` names, as it is now.
     fn notebook(&self) -> Result<Snapshot, String> {
         let value = self.arg("notebook_id")?;
         let shown = julia_string(value);
@@ -283,7 +202,6 @@ impl Call<'_> {
         self.nbs.snapshot(&id).map_err(|e| if e.contains("notebook_not_found::") { notebook_not_found(&shown, self.nbs.open_now().as_deref()) } else { e })
     }
 
-    /// The cell `cell_id` names.
     fn cell(&self, nb: &Snapshot) -> Result<String, String> {
         cell_named(nb, self.arg("cell_id")?)
     }
@@ -292,14 +210,10 @@ impl Call<'_> {
         (self.nbs.clock)()
     }
 
-    /// The owner reads a cell's code (it counts as reading it before an edit).
     fn record_read(&self, id: &str, cell: &str, code: &str) {
         self.record_read_of(id, cell, code, true);
     }
 
-    /// As `record_read`; `sent` is false when the reply left the code out. That read still counts
-    /// before an edit, but not as the agent having been given the code: else reads every few calls
-    /// would keep code it lost to a compaction "unchanged" for good.
     fn record_read_of(&self, id: &str, cell: &str, code: &str, sent: bool) {
         let mut state = self.nbs.state.lock().unwrap();
         state.seq += 1;
@@ -314,10 +228,6 @@ impl Call<'_> {
         notebook.reads.insert(key, (code.to_owned(), seq, at));
     }
 
-    /// The code of `cell` that this session read or wrote within its last `RECENT_CALLS` calls, if any:
-    /// what its agent can be taken to still have. An older read may have left the agent's context (a
-    /// compaction, old tool results cleared), and an agent that is told it has code it lost edits
-    /// from memory.
     fn recent_read(&self, id: &str, cell: &str) -> Option<String> {
         let state = self.nbs.state.lock().unwrap();
         let key = (self.owner.to_owned(), cell.to_owned());
@@ -327,7 +237,6 @@ impl Call<'_> {
         (now.saturating_sub(*at) <= RECENT_CALLS).then(|| code.clone())
     }
 
-    /// The owner changed a cell through the tools.
     fn note_changed(&self, id: &str, cell: &str) {
         let mut state = self.nbs.state.lock().unwrap();
         state.seq += 1;
@@ -336,11 +245,6 @@ impl Call<'_> {
         notebook.changes.insert(cell.to_owned(), Change { owner: self.owner.to_owned(), seq, at: self.nbs.now() });
     }
 
-    /// How many seconds ago another agent session changed `cell`, when this session has never read it and
-    /// that was within `OTHER_SESSION_RECENT`. Asked before the read is recorded. `changed_since_read` tells a
-    /// session that had read the cell; one reading it for the first time took another session's fresh edit
-    /// for the notebook as it is, and replaced it with neither told (#108). The user's own changes aren't news
-    /// of this kind, and the app's calls (no owner) are never told.
     fn edited_by_other_session(&self, id: &str, cell: &str) -> Option<u64> {
         if self.owner.is_empty() {
             return None;
@@ -355,7 +259,6 @@ impl Call<'_> {
         (ago <= OTHER_SESSION_RECENT).then_some(ago.round() as u64)
     }
 
-    /// An edit needs the owner to have read the cell's current code.
     fn require_fresh_read(&self, nb: &Snapshot, cell: &str) -> Result<(), String> {
         let state = self.nbs.state.lock().unwrap();
         let read = state.notebooks.get(&nb.id).and_then(|n| n.reads.get(&(self.owner.to_owned(), cell.to_owned())));
@@ -366,13 +269,6 @@ impl Call<'_> {
         }
     }
 
-    /// What this session last read of `cell`, if someone else has changed it since: the user, another
-    /// session, or this conversation before it was resumed. Asked before the read is recorded. An
-    /// agent that read the new code without being told it was new replaced it without a word to the
-    /// user (#504). Not for the app's calls (no owner), and not for a snapshot the engine took before
-    /// the cell's last edit through the tools, which still shows the code from before. An engine that
-    /// numbers its snapshots (`seq`) says which those are; with one that doesn't, a cell whose last
-    /// change was this session's is taken as unchanged by anyone else.
     fn changed_since_read(&self, nb: &Snapshot, cell: &str) -> Option<String> {
         if self.owner.is_empty() {
             return None;
@@ -400,14 +296,10 @@ impl Call<'_> {
         self.nbs.with_state(&nb.id, |state| state.pending_run(nb))
     }
 
-    /// Carry out `ops` in the engine: its reply, with `inserted` cells and its `seq` after.
     fn apply(&self, id: &str, ops: Vec<Value>) -> Result<Value, String> {
         self.nbs.call("apply", json!({ "notebook_id": id, "ops": ops }))
     }
 
-    /// The cells another session changed since this owner last read them that
-    /// `targets` depend on (the targets included), in notebook order, as a
-    /// `run_conflict::` message.
     fn run_conflict(&self, nb: &Snapshot, targets: &[String]) -> Result<Option<String>, String> {
         if self.owner.is_empty() {
             return Ok(None);
@@ -442,11 +334,8 @@ impl Call<'_> {
         }
     }
 
-    /// Run cells, and the cells they need that never ran, waiting for them
-    /// or not.
     fn run(&self, nb: &Snapshot, targets: &[String], wait: bool) -> Result<Ran, String> {
         self.nbs.with_state(&nb.id, |state| state.prune(nb));
-        // Edited and not yet run: a dependent of these that reran is code the agent hasn't seen run.
         let staged = self.pending_run(nb);
         let upstream = self.nbs.upstream(nb, targets)?;
         let needed: Vec<String> = upstream.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c))).cloned().collect();
@@ -456,10 +345,6 @@ impl Call<'_> {
         self.ran(nb, targets, &upstream, needed, cells, &reply, wait, &staged)
     }
 
-    /// What a run of `cells` did, from the engine's `reply` (`run`'s, or `set_input`'s, which reruns
-    /// the cells that read an input): it records the run for the session and says what the receipt
-    /// needs. `needed` are the cells `targets` needed that had never run, which the run ran first.
-    /// `staged` are the cells edited and not yet run before the run started (`pending_run`).
     #[allow(clippy::too_many_arguments)]
     fn ran(&self, nb: &Snapshot, targets: &[String], upstream: &[String], needed: Vec<String>, mut cells: Vec<String>, reply: &Value, wait: bool, staged: &[String]) -> Result<Ran, String> {
         let ids = |key: &str| reply[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
@@ -468,28 +353,13 @@ impl Call<'_> {
             let cell = ids("exited").first().map(|id| graph.and_then(|g| g.name(id)).unwrap_or_else(|| id.clone()));
             return Err(argument_error(&format!("process_exited::{}", exited_message(super::engines::language(super::engines::of_path(&nb.path)), cell.as_deref()))));
         }
-        // The cells that depend on `cells`, which autorun reruns: those the graph links to them,
-        // and those the engine says it reruns besides (`dependents`), less the ancestors it
-        // runs first: Ember reruns the readers of a name a cell's last run defined, which the
-        // graph no longer links once the cell drops the name (#228). The run is under way by
-        // now, so a graph that can't be read leaves only the engine's.
         let dependents_of = |cells: &[String]| -> HashSet<String> {
             let mut out = self.nbs.graph(&nb.id, GraphQuery { edges: true, ..Default::default() }).map(|g| g.downstream_of(cells)).unwrap_or_default();
             out.extend(ids("dependents").into_iter().filter(|id| !upstream.contains(id)));
             out
         };
         let mut warnings = Vec::new();
-        // Cells the targets need that the engine ran first, as Ember does one
-        // edited since it last ran (a staged edit) or stale (an ancestor ran
-        // since): this run's cells too, so the receipt shows them (#187).
-        // Known once it is over, from what ran rather than from the engine's
-        // plan, so it misses an ancestor still running when the wait ends (it
-        // stays staged) and counts one the user ran during the wait.
         let mut also = Vec::new();
-        // The dependents that reran with a waited run, as autorun reruns them: the
-        // run's cells too, so its receipt shows their outputs and errors (#192).
-        // Known the same way, from what ran, so it misses one still running when
-        // the wait ends (that one is in `going`) and counts one the user ran during it.
         let mut reran = Vec::new();
         let mut dependents = HashSet::new();
         if reply["accepted"] == true && wait {
@@ -528,33 +398,23 @@ impl Call<'_> {
             }
             warnings.push(warning);
         } else if wait {
-            // The run's own cells, which the receipt looks at after the wait: its
-            // cells and the cells that depend on them.
             if !ids("timed_out").is_empty() {
                 going = nb.order.iter().filter(|id| cells.contains(*id) || dependents.contains(*id)).cloned().collect();
             }
         } else {
             warnings.push("async_execution::cells running; read them for the result".into());
-            // The dependents autorun reruns after these cells: those that have run
-            // since the notebook started, as Ember skips one that hasn't (Pluto has
-            // none). In lazy mode they go stale instead.
             if !nb.lazy {
                 let dependents = dependents_of(&cells);
                 will_run = nb.order.iter().filter(|id| dependents.contains(*id) && !cells.contains(id) && nb.cells.get(*id).is_some_and(|c| !c.not_run && !c.off && !c.hidden)).cloned().collect();
             }
         }
-        // A run of these cells was accepted: they are no longer staged, whether or not they have finished.
         if reply["accepted"] == true {
             self.nbs.with_state(&nb.id, |state| {
-                // Its cells that haven't finished: a waited run's that did finish are done, and
-                // so are all of a run that ended before this records it.
                 let finished: Vec<String> = ids("completed").into_iter().chain(also.iter().cloned()).collect();
                 let run = reply["run"].as_str().map(str::to_owned);
                 let ended = run.as_ref().is_some_and(|run| state.ended.contains(run));
                 state.ended.retain(|r| Some(r) != run.as_ref());
                 let unfinished: HashSet<String> = cells.iter().filter(|c| !finished.contains(c)).cloned().collect();
-                // A run the engine named goes on until its `run_finished`, the cells that depend
-                // on its cells too, even once its own cells have finished.
                 if !self.owner.is_empty() && !ended && (run.is_some() || !unfinished.is_empty()) {
                     let follows = will_run.iter().filter_map(|id| Some((id.clone(), nb.cells.get(id)?.last_run))).collect();
                     state.started.push(Started { owner: self.owner.to_owned(), run, cells: unfinished, follows });
@@ -577,24 +437,16 @@ impl Call<'_> {
         Ok(Ran { warnings, cells, going, will_run, along })
     }
 
-    /// An edit's run_after: the edit stands either way, but a run that
-    /// conflicts with another session's unread changes is left staged.
     fn run_or_stage(&self, nb: &Snapshot, cell: &str, run_after: bool) -> Result<Ran, String> {
         let cells = [cell.to_owned()];
         let conflict = if run_after { self.run_conflict(nb, &cells)? } else { None };
         if run_after && conflict.is_none() {
-            // Not waited for: a long run would hold up the agent's other calls.
             return self.run(nb, &cells, false);
         }
         self.mark_pending(&nb.id, &cells);
         Ok(Ran { warnings: conflict.map(|c| vec![format!("{c} The edit is staged, not run.")]).unwrap_or_default(), ..Default::default() })
     }
 
-    /// Whether `targets` have all run since the user's run reached them
-    /// while the agent's approval card waited: cells the tools changed and
-    /// haven't run since that have run since anyway, or cells the app just
-    /// said the user ran anyway (`endeavor/run_anyway`). A run of them still
-    /// under way is waited for, within the call's `WAIT_SECONDS`.
     fn ran_after_user(&self, nb: &Snapshot, targets: &[String]) -> Result<bool, String> {
         let now = self.now();
         let marks: Option<Vec<(Option<f64>, Option<f64>)>> = self.nbs.with_state(&nb.id, |state| {
@@ -610,7 +462,6 @@ impl Call<'_> {
         let ran = |cell: &super::Cell, (edited, before): &(Option<f64>, Option<f64>)| {
             edited.is_some_and(|edited| cell.ran_since(edited)) || before.is_some_and(|before| !(cell.running || cell.queued) && cell.last_run > before)
         };
-        // Leaves the run its floor.
         let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs_f64(WAIT_FLOOR_SECONDS));
         loop {
             let now = self.nbs.snapshot(&nb.id)?;
@@ -618,7 +469,6 @@ impl Call<'_> {
             if cells.iter().zip(&marks).all(|(cell, mark)| ran(cell, mark)) {
                 return Ok(true);
             }
-            // Cells that wait for the user's OK to a package don't run by themselves (#355).
             if !cells.iter().any(|c| c.running || c.queued) || now.held() || Instant::now() > deadline {
                 return Ok(false);
             }
@@ -626,14 +476,10 @@ impl Call<'_> {
         }
     }
 
-    /// The cells the tools changed that have run since, though not by the
-    /// tools, in notebook order.
     fn ran_since_tool_edit(&self, nb: &Snapshot) -> Vec<String> {
         self.nbs.with_state(&nb.id, |state| nb.order.iter().filter(|id| state.tool_edits.get(*id).is_some_and(|edited| nb.cells[*id].ran_since(*edited))).cloned().collect())
     }
 
-    /// A run left out because its cells already ran after the user's change:
-    /// the usual receipt, for those cells, saying so.
     fn already_ran(&self, id: &str, mutation: Value, cells: &[String]) -> Result<Map<String, Value>, String> {
         self.nbs.with_state(id, |state| {
             for cell in cells {
@@ -645,21 +491,15 @@ impl Call<'_> {
         Ok(self.receipt(id, mutation, cells, vec![warning], None)?.0)
     }
 
-    /// What every change reports: the notebook's order and run state after it.
     fn receipt(&self, id: &str, mutation: Value, cells_run: &[String], warnings: Vec<String>, status: Option<&str>) -> Result<(Map<String, Value>, Snapshot), String> {
         self.receipt_of_run(id, mutation, Ran { warnings, cells: cells_run.to_vec(), ..Default::default() }, status)
     }
 
-    /// `receipt` for a run.
     fn receipt_of_run(&self, id: &str, mutation: Value, ran: Ran, status: Option<&str>) -> Result<(Map<String, Value>, Snapshot), String> {
         let Ran { mut warnings, cells: cells_run, going, will_run, along } = ran;
         let cells_run = &cells_run[..];
         let nb = self.nbs.snapshot(id)?;
-        // The cells of a run that ran out of its wait that are running now, read
-        // after the wait: some may have finished meanwhile.
         let still_running: Vec<String> = nb.order.iter().filter(|id| going.contains(id) && nb.cells.get(*id).is_some_and(|c| c.running || c.queued)).cloned().collect();
-        // A cell of this run waiting on a prompt ends the wait at once (#261). A run waiting on
-        // the user's OK for a download didn't run out of time: the message says what it waits for.
         let asks = nb.prompted().filter(|id| still_running.contains(id) || cells_run.contains(id)).cloned();
         if let Some(cell) = &asks {
             warnings.push(format!("waiting_for_input::Cell {cell} is waiting for input; the run goes on once it is answered"));
@@ -673,9 +513,6 @@ impl Call<'_> {
                 derived => derived.to_owned(),
             },
         };
-        // A blocked run touched no cell; existing outputs are not this run's result.
-        // A cell still running or queued has the output of its last run, so it
-        // isn't listed: a run not waited for comes back before its cells finish (#190).
         let ran: &[String] = if status == "blocked" { &[] } else { cells_run };
         let changed: Vec<Value> = ran
             .iter()
@@ -683,11 +520,7 @@ impl Call<'_> {
             .filter_map(|id| Some((id, nb.cells.get(id)?)))
             .filter(|(_, cell)| !cell.output.is_empty() && !cell.running && !cell.queued)
             .map(|(id, cell)| {
-                // The output of a cell that only ran along is the agent's to read if it wants it: a run of
-                // a cell many others read sent back each one's table, most of a long session's run
-                // replies. An error isn't cut.
                 let max = if along.contains(id) && cell.error.is_none() { DEPENDENT_TEXT_MAX } else { RECEIPT_TEXT_MAX };
-                // A long text output too: a `Text` of 200,000 lines came back whole, 1.5 MB.
                 let summary = if cell.errored { cell.output.clone() } else { cut_middle(&cell.output, max, max / 4, "read_cell shows more.") };
                 let mut entry = json!({ "cell_id": id, "output_summary": summary });
                 if let Some(error) = &cell.error {
@@ -705,26 +538,12 @@ impl Call<'_> {
                 Ok(entry)
             })
             .collect::<Result<_, String>>()?;
-        // The notes Ember shows under a cell this run ran, such as a value
-        // another cell defines changed in place, whose readers don't rerun
-        // (#207), and what a Pluto cell printed and logged, such as a `@warn`
-        // that rows were dropped (#257): an agent that doesn't see them reads a
-        // wrong result as right.
         let finished: Vec<(&String, &Cell)> = ran.iter().filter(|id| !still_running.contains(id)).filter_map(|id| Some((id, nb.cells.get(id).filter(|c| !c.running && !c.queued)?))).collect();
         warnings.extend(run_notes(&finished, &along));
-        // Haiku 4.5 read a logged warning in `warnings` and reported the result as clean (N11).
-        // The first one is quoted in the message: the agent passes on what it reads there.
         let logged: Vec<&str> = warnings.iter().filter(|w| w.starts_with("logged_warning::") || w.starts_with("logged_error::")).map(String::as_str).collect();
-        // A result made at a control the user moved on the page isn't what a rerun of the file
-        // gives: said in the message too, for the same reason.
         let moved: Vec<&str> = warnings.iter().filter(|w| w.starts_with("uses_moved_input::")).map(String::as_str).collect();
         let logged_message = logged_message(&logged).or_else(|| moved_message(&moved));
         let pending = self.pending_run(&nb);
-        // The notebook's order isn't in it: two lists of every cell's id grow
-        // with the notebook and come back on every change, and an agent that
-        // needs an order asks for it (`get_cell_order`, `get_execution_order`;
-        // cells that can't run, in a cycle or defining a name twice, show
-        // their error in `read_cell`).
         let receipt = json!({
             "applied": true,
             "mutation": mutation,
@@ -741,11 +560,6 @@ impl Call<'_> {
         if !will_run.is_empty() {
             receipt["execution"]["will_run"] = json!(will_run);
         }
-        // In lazy mode the run's dependents don't run: they're marked stale,
-        // which the agent wouldn't otherwise learn until it read them (#196).
-        // The list is every stale cell an earlier run left too, not only this
-        // run's dependents, leaving out the ones that are pending, running,
-        // queued or hidden. A notebook with none says nothing.
         if nb.lazy && status != "blocked" {
             let stale_cells: Vec<&String> = nb
                 .order
@@ -784,9 +598,6 @@ impl Call<'_> {
         Ok((receipt, nb))
     }
 
-    /// The text form of a cell's output when Pluto shows it as something else
-    /// (HTML, a table, a tree), rendered by the runtime; none for text, errors
-    /// and empty outputs.
     fn output_text(&self, nb: &Snapshot, id: &str) -> Result<Option<String>, String> {
         let cell = &nb.cells[id];
         if cell.errored || cell.output.is_empty() {
@@ -796,7 +607,6 @@ impl Call<'_> {
         Ok(rendered["text"].as_str().map(str::to_owned))
     }
 
-    /// A cell as `read_cell` shows it.
     fn cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
         let cell = &nb.cells[id];
         let stale = cell.stale || self.pending_run(nb).iter().any(|p| p == id);
@@ -823,11 +633,6 @@ impl Call<'_> {
         out
     }
 
-    /// The cell an edit changed, as `read_cell` shows it without its code:
-    /// the agent sent that code, and gets it back from `read_cell`. While the
-    /// edited cell is running or queued, or staged and not yet run, its output and
-    /// error are the ones from before the edit, so they are `previous_output`,
-    /// `previous_errored` and `previous_error` (#190, #435).
     fn changed_cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
         let mut out = self.cell_json(nb, id);
         out.remove("code");
@@ -837,7 +642,6 @@ impl Call<'_> {
                     out.insert(format!("previous_{key}"), previous);
                 }
             }
-            // A note on the cell's code is about the code the agent just sent, not the last run (#449).
             if let Some(Value::Array(previous)) = out.remove("previous_notes") {
                 let (now, before): (Vec<Value>, Vec<Value>) = previous.into_iter().partition(|n| n.as_str().is_some_and(|n| CODE_NOTES.iter().any(|kind| n.starts_with(&format!("{kind}::")))));
                 if !now.is_empty() {
@@ -855,14 +659,12 @@ impl Call<'_> {
         let snapshots = self.nbs.snapshots()?;
         let bound = self.nbs.bound(self.owner);
         let paths: Vec<String> = snapshots.iter().map(|nb| canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone())).collect();
-        // A session that may work on several notebooks can't say which is the conversation's (`allow_several`).
         let several = self.nbs.several(self.owner);
         let own = |at: usize| !several && bound.as_ref().is_some_and(|bound| paths[at] == *bound);
         match bound.as_ref() {
             Some(bound) if !paths.contains(bound) => {
                 self.nbs.unbind(self.owner, bound);
             }
-            // Its own notebook, open again: it closes as any notebook does (#520).
             Some(_) => self.nbs.seen_open(self.owner),
             None => {}
         }
@@ -870,11 +672,6 @@ impl Call<'_> {
         Ok(Value::Array(snapshots.iter().enumerate().map(|(at, nb)| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(at))).collect()))
     }
 
-    /// Wait, within the call's `WAIT_SECONDS`, for the runs this session started in `nb` to end:
-    /// the cells seen running or that finished a run during the wait, with the ones still running
-    /// or queued if a run is still going at its end. A queued cell that never ran (an interrupt
-    /// dropped it) isn't one. A cell another run ran meanwhile counts too: the snapshots don't
-    /// say whose run ran a cell.
     fn wait_for_own_run(&self, nb: &Snapshot) -> Result<(Vec<String>, Vec<String>), String> {
         let mut nb = self.nbs.snapshot(&nb.id)?;
         let before: HashMap<String, f64> = nb.cells.iter().map(|(id, c)| (id.clone(), c.last_run)).collect();
@@ -884,8 +681,6 @@ impl Call<'_> {
         let deadline = Instant::now() + self.wait_left().saturating_sub(Duration::from_secs(1));
         let mut going = Vec::new();
         while self.nbs.own_run_going(self.owner, &nb) {
-            // A prompt holds the run until it is answered, and an install waiting for the
-            // user's OK doesn't go on by itself: waiting longer only spends the call.
             if Instant::now() >= deadline || nb.prompted().is_some() || nb.held() {
                 going = nb.order.iter().filter(|id| busy(&nb, id)).cloned().collect();
                 break;
@@ -898,7 +693,6 @@ impl Call<'_> {
             ran.extend(running(&nb));
         }
         ran.extend(nb.cells.iter().filter(|(id, c)| before.get(*id).is_some_and(|last| c.last_run != *last)).map(|(id, _)| id.clone()));
-        // A cell still busy once the session's runs ended is another run's.
         ran.retain(|id| !busy(&nb, id) || going.contains(id));
         ran.extend(going.iter().cloned());
         Ok((nb.order.iter().filter(|id| ran.contains(*id)).cloned().collect(), going))
@@ -907,39 +701,22 @@ impl Call<'_> {
     fn read_cell(&self) -> Result<Value, String> {
         let mut nb = self.notebook()?;
         let cell = self.cell(&nb)?;
-        // A cell waiting on a package step is waited for, within the call's
-        // `WAIT_SECONDS`: an agent that reads it at once sees no change and
-        // gives up long before a first install ends. So is a cell that a run
-        // this session started is running or will run: an agent that reads it
-        // at once reads it again, each read a whole request of the agent's
-        // context. The user's own run, or another session's, isn't waited for,
-        // nor a queued cell once the install waits for the user's OK with
-        // nothing running (`held`): only approve_install moves it on. Cells that
-        // don't need the held packages still run, and are waited for. (Asked
-        // on every read, so that a run seen to end is forgotten.)
         let waits = |nb: &Snapshot| {
             let own = self.nbs.own_run_going(self.owner, nb);
-            // A cell waiting on a prompt, or behind one, waits until it is answered: not waited for.
             nb.prompted().is_none() && (nb.cells.get(&cell).is_some_and(|c| (c.running && own) || (c.queued && !nb.held() && (nb.installing() || own))) || (own && !nb.held() && self.nbs.own_run_will_run(self.owner, nb, &cell)))
         };
         let waited = Instant::now();
         let deadline = waited + self.wait_left().saturating_sub(Duration::from_secs(1));
         while waits(&nb) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(500));
-            // Nobody will see this read, so it doesn't count as one.
             if crate::mcp::waiting_on(crate::mcp::Waits::CELLS, self.gone) {
                 return Err(argument_error("client_gone::The caller hung up during the wait"));
             }
             nb = self.nbs.snapshot(&nb.id)?;
         }
-        // The wait ran out with the cell still going. An agent can't tell how long a call took,
-        // so it is told (#203); else it reads an answer like an immediate one, and reports that
-        // the read didn't wait.
         let ran_out = (waits(&nb) && waited.elapsed() >= Duration::from_millis(500)).then(|| self.began.elapsed().as_secs());
         let Some(code) = nb.cells.get(&cell).map(|c| c.code.clone()) else { return Err(key_error(&format!("cell_not_found::No cell with id '{cell}' in notebook"))) };
         let include_code = bool_arg(self.args, "include_code", false)?;
-        // Code this session read or wrote a few calls ago, unchanged since, isn't sent again: an agent
-        // that reads each cell it just ran gets its own code back each time, a tenth of a long session.
         let left_out = !include_code && self.recent_read(&nb.id, &cell).is_some_and(|read| read == code);
         let was = self.changed_since_read(&nb, &cell);
         let other = self.edited_by_other_session(&nb.id, &cell);
@@ -948,7 +725,6 @@ impl Call<'_> {
         if left_out {
             out.remove("code");
             out.insert("code_unchanged".into(), json!(true));
-            // Which code it means, so the app keeps its copy only if it is that one.
             out.insert("code_sha".into(), json!(code_sha(&code)));
         }
         if let Some(text) = self.output_text(&nb, &cell)? {
@@ -962,7 +738,6 @@ impl Call<'_> {
         }
         let asks = nb.prompted().filter(|asks| **asks == cell || nb.cells.get(&cell).is_some_and(|c| c.running || c.queued)).cloned();
         if let Some(asks) = asks {
-            // The cell asking, or one queued behind it.
             if asks != cell {
                 out.insert("waiting_for_input".into(), waiting_json(&nb, &asks));
             }
@@ -976,7 +751,6 @@ impl Call<'_> {
                 if nb.cells.get(&cell).is_some_and(|c| c.running) { "running" } else { "queued" }
             )));
         } else if let Some(cell_now) = nb.cells.get(&cell).filter(|c| !c.running && !c.queued) {
-            // The same message as a run's, for a read of a cell that logged a warning or an error.
             let with_cell = |kinds: &[&str]| -> Vec<String> { cell_now.notes.iter().filter(|n| kinds.iter().any(|k| n.starts_with(k))).map(|n| n.replacen("::", &format!("::Cell {cell}: "), 1)).collect() };
             let logged = with_cell(&["logged_warning::", "logged_error::"]);
             let moved = with_cell(&["uses_moved_input::"]);
@@ -1013,7 +787,6 @@ impl Call<'_> {
         if shown.errored {
             return Err(argument_error(&format!("no_image::Cell {cell} errored; read_cell shows the error")));
         }
-        // A cell that hasn't run yet has no output to render, which isn't the same as a text output.
         if shown.output.is_empty() && (shown.running || shown.queued || shown.not_run) {
             let then = if shown.running || shown.queued { "read_cell says when it has finished" } else { "run it first (execute_cell)" };
             let why = if shown.running { "is running" } else if shown.queued { "is queued to run" } else { "hasn't run" };
@@ -1021,9 +794,6 @@ impl Call<'_> {
         }
         let rendered = self.nbs.call("render_png", json!({ "notebook_id": nb.id, "cell_id": cell }))?;
         let mime = rendered["mime"].as_str().unwrap_or_default();
-        // An interactive plot or widget: what the agent may tell the user goes in the result it
-        // reads as it answers, since the skill's text alone didn't stop Haiku claiming hover and
-        // zoom worked, or switching packages to get a picture (#393's smoke runs).
         let interactive = rendered["interactive"] == true;
         let Some(png) = rendered["png"].as_str() else {
             let unseen = if interactive { format!(". {INTERACTIVE_UNSEEN}") } else { String::new() };
@@ -1034,13 +804,9 @@ impl Call<'_> {
             return Err(argument_error(&format!("image_too_large::Cell {cell} renders to {bytes} bytes (max {MAX_IMAGE_BYTES})")));
         }
         let mut meta = json!({ "cell_id": cell, "shown_as": mime, "png_bytes": bytes });
-        // An image read from the output's HTML (a widget's static picture), not rendered from the value.
         if let Some(source) = rendered["source"].as_str() {
             meta["source"] = json!(source);
         }
-        // The output of the cell's last run, while it runs again or after its code or an ancestor
-        // changed: said so, or an agent takes an old plot for its new code's (trial 25). From the
-        // state before the render, so a run that ends during it is still called running.
         let edited = self.pending_run(&nb).contains(&cell);
         let state = if shown.running { Some("running") } else if shown.queued { Some("queued") } else if shown.stale || edited { Some("stale") } else { None };
         if let Some(state) = state {
@@ -1055,10 +821,6 @@ impl Call<'_> {
         if interactive {
             interactive_picture(&mut meta);
         } else {
-            // Any picture the runtime didn't find scripts or controls in, whatever its MIME type:
-            // a plot can come back as HTML that wraps its PNG (#407's smoke run).
-            // A picture with no controls (a PNG, an SVG, an animated GIF), such as Plots.jl's default (GR) backend draws: Haiku promised hover
-            // and zoom on one (#407).
             meta["interactive"] = json!(false);
             meta["message"] = json!(match meta["message"].as_str() {
                 Some(said) => format!("{said} {STATIC_PICTURE}"),
@@ -1080,7 +842,6 @@ impl Call<'_> {
         ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
         let applied = self.apply(&nb.id, ops)?;
         let code = code.as_str().unwrap_or_default();
-        // The engine may keep the code in another form (marimo's file form): the owner knows that one.
         let stored = kept_code(&applied, &cell, code);
         self.edited(&nb.id, &applied, &cell, &before, &stored);
         let ran = self.run_or_stage(&nb, &cell, run_after)?;
@@ -1092,9 +853,6 @@ impl Call<'_> {
         Ok(Value::Object(receipt))
     }
 
-    /// What the core keeps of an edit the tools made (`applied`, the
-    /// engine's reply): who changed the cell, that the owner knows its new
-    /// code, and the code it replaced.
     fn edited(&self, id: &str, applied: &Value, cell: &str, before: &str, code: &str) {
         self.note_changed(id, cell);
         self.record_read(id, cell, code);
@@ -1128,7 +886,6 @@ impl Call<'_> {
             ops.extend(folded.map(|folded| json!({ "op": "fold", "cell_id": cell, "folded": folded })));
         }
         let applied = self.apply(&nb.id, ops)?;
-        // Each cell's code where the engine kept it in another form (marimo's file form), as edit_cell gives it.
         let mut reformed = Map::new();
         for (edit, cell) in edits.iter().zip(&cells) {
             let code = edit["code"].as_str().unwrap_or_default();
@@ -1141,7 +898,6 @@ impl Call<'_> {
         self.mark_pending(&nb.id, &cells);
         let mutation = json!({ "type": "edit_cells", "cell_ids": cells });
         let (mut receipt, after) = self.receipt(&nb.id, mutation, &[], Vec::new(), None)?;
-        // Each cell's fold after the edits, as `edit_cell`'s `code_folded` says its cell's.
         let folds: Map<String, Value> = cells.iter().filter_map(|c| Some((c.clone(), json!(after.cells.get(c)?.folded)))).collect();
         receipt["mutation"]["code_folded"] = Value::Object(folds);
         if !reformed.is_empty() {
@@ -1183,8 +939,6 @@ impl Call<'_> {
         self.edited(&nb.id, &applied, &cell, "", &code);
         let ran = self.run_or_stage(&added, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "add_cell", "cell_id": cell }), ran, None)?;
-        // Its code only if the engine changed what the agent sent: the agent has it, and the app
-        // takes it from the call too.
         let mut added = self.cell_json(&after, &cell);
         if self.args.get("code").and_then(Value::as_str) == Some(code.as_str()) {
             added.remove("code");
@@ -1202,7 +956,6 @@ impl Call<'_> {
             state.reads.retain(|(_, read), _| *read != cell);
         });
         self.note_changed(&nb.id, &cell);
-        // Pluto's reactive cleanup of what the cell defined, not waited for.
         self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": [], "wait": false, "timeout": TIMEOUT_SECONDS, "ask_new": self.nbs.asks_new_packages(self.owner) }))?;
         let warnings = vec!["async_execution::cell deletion cleanup queued".to_owned()];
         Ok(Value::Object(self.receipt(&nb.id, json!({ "type": "delete_cell", "cell_id": cell }), &[], warnings, Some("completed"))?.0))
@@ -1222,8 +975,6 @@ impl Call<'_> {
         Ok(Value::Object(self.receipt_of_run(&nb.id, mutation, ran, None)?.0))
     }
 
-    /// Answer the prompt a running cell waits on (`readline()`, `menu()` and the like, #261),
-    /// which lets the run go on; waited for as `execute_cell` waits for a run.
     fn answer_prompt(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
         let cell = self.cell(&nb)?;
@@ -1237,8 +988,6 @@ impl Call<'_> {
         if nb.prompted() != Some(&cell) {
             return Err(argument_error(&format!("no_prompt::Cell {cell} isn't waiting for input")));
         }
-        // An answer for a question that has gone (menu() asking again, the user answering first)
-        // isn't given to the next one; Ember checks too, in case it changes before the answer lands.
         let waiting = nb.cells[&cell].prompt.as_ref().map(|p| p["id"].clone()).unwrap_or_default();
         if asked.as_ref().is_some_and(|id| waiting.as_f64() != id.as_f64()) {
             return Err(argument_error(&format!("stale_prompt::Cell {cell} is asking something else now; read it and answer what it asks")));
@@ -1247,7 +996,6 @@ impl Call<'_> {
         let mutation = json!({ "type": "answer_prompt", "cell_id": cell });
         let ran = if wait {
             let (cells, going) = self.wait_for_own_run(&nb)?;
-            // A run the user or another session started isn't waited for, so this cell is read as it is now.
             let cells = if cells.is_empty() { vec![cell] } else { cells };
             Ran { cells, going, ..Default::default() }
         } else {
@@ -1291,11 +1039,6 @@ impl Call<'_> {
             }
         }
         if targets.is_empty() {
-            // Nothing staged, but a run this session started may still be going (its dependents,
-            // say): a waited call waits for it, as `read_cell` does, rather than say it completed
-            // while it runs (#151).
-            // Its receipt says how the cells that ran meanwhile went: "errored" if one of them
-            // did, as for the cells a call runs itself (#171).
             if wait == true {
                 let (ran, going) = self.wait_for_own_run(&nb)?;
                 let status = ran.is_empty().then_some("completed");
@@ -1345,7 +1088,6 @@ impl Call<'_> {
         };
         self.apply(&nb.id, vec![json!({ "op": "move", "cell_id": cell, "index": index })])?;
         let mutation = json!({ "type": "move_cell", "cell_id": cell, "old_index": old_index + 1, "new_index": index + 1 });
-        // A move is about the order, so its receipt has it.
         let (mut receipt, after) = self.receipt(&nb.id, mutation, &[], Vec::new(), Some("completed"))?;
         receipt.insert("cell_order".into(), json!(after.order));
         Ok(Value::Object(receipt))
@@ -1364,7 +1106,6 @@ impl Call<'_> {
             Some("execution") => self.nbs.graph(&nb.id, GraphQuery::default())?.order,
             _ => return Err(argument_error(&format!("invalid_order::order must be 'execution' or 'visual', got '{}'", julia_string(&order)))),
         };
-        // An Ember file's text cells are already `#'` comments, so they need no `# md:`.
         let ember = self.nbs.backend_of(&nb.id) == Backend::Ember;
         let marker = if ember { EMBER_CELL_MARKER } else { CELL_MARKER };
         let mut ids = Vec::new();
@@ -1412,8 +1153,6 @@ impl Call<'_> {
         if left_out > 0 {
             result["markdown_cells_left_out"] = left_out.into();
         }
-        // Said again where the agent reads the code it describes: Haiku 4.5 read the code after
-        // open_notebook's note and described it as if it had run (#163).
         if !nb.execution_allowed {
             result["note"] = json!(NOT_RUN);
         }
@@ -1462,8 +1201,6 @@ impl Call<'_> {
         Ok(json!({ "downstream": downstream }))
     }
 
-    /// `find_symbol_definitions` or `find_symbol_references`: the cells whose
-    /// `field` has the symbol, each with the first line mentioning it.
     fn find_symbol(&self, field: &str) -> Result<Value, String> {
         let nb = self.notebook()?;
         let symbol = julia_string(self.arg("symbol")?);
@@ -1481,10 +1218,6 @@ impl Call<'_> {
         Ok(Value::Array(found))
     }
 
-    /// For a Pluto cell that fails with "Multiple definitions for x", which other cells define x
-    /// and what to do, beside its error. Haiku 4.5 put a second `using StatsPlots` in a later cell
-    /// and left both erroring (#242); the error alone doesn't say where the other one is.
-    /// Ember's error has the same words, but its advice doesn't fit R, so Pluto's only.
     fn defined_elsewhere(&self, nb: &Snapshot, id: &str, cell: &Cell) -> Option<String> {
         if self.nbs.backend_of(&nb.id) != Backend::Pluto {
             return None;
@@ -1506,11 +1239,6 @@ impl Call<'_> {
         ))
     }
 
-    /// For an R cell that fails because Ember couldn't install a package it needs, what to do beside
-    /// its error. After Posit's broken Rsamtools build failed an install (#390), Haiku 4.5 restarted
-    /// R and reran three times, put an install of BiocManager into a cell, and gave the answer from
-    /// memory (#394). Ember's error is `missing_package`, like a package the code doesn't name, whose
-    /// fix is a rerun; this one has none.
     fn install_failed(&self, nb: &Snapshot, cell: &Cell) -> Option<&'static str> {
         if self.nbs.backend_of(&nb.id) != Backend::Ember {
             return None;
@@ -1550,7 +1278,6 @@ impl Call<'_> {
         if !std::path::Path::new(path).exists() {
             return Err(argument_error(&format!("file_not_found::No file at '{path}'")));
         }
-        // A plain script isn't opened: Pluto would leave a backup copy of it next to it before refusing it.
         match wire::backend::Backend::of_file(std::path::Path::new(path)) {
             None => return Err(argument_error(&format!("not_a_notebook::'{path}' isn't a notebook: it doesn't start with a Pluto or Ember notebook's first line, and it isn't a marimo app"))),
             Some(wire::backend::Backend::Ember) => r_notebooks(&format!("'{path}' is an Ember notebook (R)"))?,
@@ -1560,7 +1287,6 @@ impl Call<'_> {
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(false));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
         let key = format!("open {}", canonical_path(path).unwrap_or_else(|_| path.clone()));
-        // A call made again while an open is under way gets that open, run as that one asked.
         let (opened, run) = match self.nbs.open_waited(self.owner, "open", json!({ "path": path, "run": run, "ask_new": self.nbs.asks_new_packages(self.owner), "timeout": TIMEOUT_SECONDS }), key, self.run_wait(), &format!("Opening '{path}'")) {
             Ok((opened, params)) => (opened, params["run"] == true),
             Err(error) if already_open(&error) => return self.join(path).unwrap_or(Err(error)),
@@ -1587,7 +1313,6 @@ impl Call<'_> {
         }
         let id = opened["notebook_id"].as_str().unwrap_or_default();
         self.nbs.opened_by(self.owner, opened["path"].as_str().unwrap_or_default(), id);
-        // The open's run waits for the user's OK to a package the file doesn't have (#397).
         if run && opened["asking"].is_array()
             && let Ok(nb) = self.nbs.snapshot(id)
         {
@@ -1595,10 +1320,6 @@ impl Call<'_> {
             result["message"] = json!(installing_message(&nb));
             return Ok(result);
         }
-        // The open's run of the whole notebook is the session's, as allow_execution's is (#170): a
-        // read or a waited submit waits for it (#331). Pluto marks every cell queued as it opens
-        // and names no run, so the run goes on while one of its cells hasn't finished.
-        // The notebook is open either way: a snapshot that fails only leaves the run unwaited.
         if run && !self.owner.is_empty()
             && let Ok(nb) = self.nbs.snapshot(id)
         {
@@ -1609,12 +1330,8 @@ impl Call<'_> {
         Ok(result)
     }
 
-    /// `open_notebook` on a notebook that is already open: the session
-    /// works in it as it is. Nothing runs and its safe preview is as it was.
-    /// None if no open notebook has this path after all.
     fn join(&self, path: &str) -> Option<Result<Value, String>> {
         let wanted = canonical_path(path).unwrap_or_else(|_| path.to_owned());
-        // The list of open notebooks has ids and paths, where a snapshot of each would hold every cell.
         let open = match self.nbs.call("status", json!({})) {
             Ok(status) => status,
             Err(error) => return Some(Err(error)),
@@ -1646,7 +1363,6 @@ impl Call<'_> {
             None => {
                 let mut params = match folder {
                     Folder::Unknown => return Err(super::folder_unknown()),
-                    // The engine's own naming, like Pluto's "Create a new notebook", in the session's folder.
                     Folder::In(folder) if std::path::Path::new(folder).is_dir() => {
                         if read_only(folder) {
                             return Err(not_writable(folder, "this session's folder"));
@@ -1655,7 +1371,6 @@ impl Call<'_> {
                     }
                     _ => json!({}),
                 };
-                // In the session's kind, when its client said it.
                 match self.nbs.kind(self.owner) {
                     Some(kind @ wire::backend::Backend::Ember) => {
                         r_notebooks("This session's notebooks are R notebooks")?;
@@ -1680,7 +1395,6 @@ impl Call<'_> {
                     }
                     _ => {}
                 }
-                // The engine saves the file before it opens it, so a creation still under way has made it already.
                 let held = self.nbs.opening(&format!("new {path}"));
                 if !held && std::path::Path::new(&path).exists() {
                     return Err(argument_error(&format!("file_exists::'{path}' already exists; use open_notebook to load it")));
@@ -1696,7 +1410,6 @@ impl Call<'_> {
             }
             Some(_) => return Err(argument_error("invalid_path::path must be a string")),
         };
-        // A new notebook without a path is the session's one being made, whatever name the engine gives it.
         let (key, doing) = match params["path"].as_str() {
             Some(path) => (format!("new {path}"), format!("Creating '{path}'")),
             None => (format!("new in {} for {}", params["folder"].as_str().unwrap_or_default(), self.owner), "Creating the notebook".to_owned()),
@@ -1704,7 +1417,6 @@ impl Call<'_> {
         let (made, _) = self.nbs.open_waited(self.owner, "new", params, key, self.run_wait(), &doing)?;
         let id = made["notebook_id"].as_str().unwrap_or_default();
         let mut cell_ids = Vec::new();
-        // The caller knows these cells are empty; without a read first, the first edit would be refused.
         for cell in made["cells"].as_array().into_iter().flatten() {
             let cell_id = cell["cell_id"].as_str().unwrap_or_default();
             self.record_read(id, cell_id, cell["code"].as_str().unwrap_or_default());
@@ -1731,16 +1443,11 @@ impl Call<'_> {
         }
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(true));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
-        // Leaving safe preview starts a new process for the notebook, which can outlast the
-        // call; a call made again while it is under way gets its result. While it starts the
-        // runtime answers nothing else, so that call waits for it without reading the notebook.
         let shown = julia_string(&self.args["notebook_id"]);
         let id = uuid_value(&self.args["notebook_id"]).ok_or_else(|| argument_error(&format!("invalid_notebook_id::Invalid notebook ID: '{shown}'")))?;
         let key = format!("allow {id}");
         if !self.nbs.opening(&key) {
             let nb = self.notebook()?;
-            // Already out of safe preview, perhaps still starting from an earlier call whose result
-            // was collected: the engine would refuse it as not in safe preview.
             if nb.execution_allowed {
                 return Ok(json!({
                     "notebook_id": nb.id, "execution_allowed": true, "already_allowed": true, "ran": false, "process_status": nb.process_status,
@@ -1755,7 +1462,6 @@ impl Call<'_> {
             "notebook_id": id, "execution_allowed": true, "already_allowed": allowed["already_allowed"], "ran": ran,
             "process_status": allowed["process_status"],
         });
-        // Its run waits for the user's OK to a package the notebook doesn't have (#397).
         if ran && allowed["asking"].is_array() {
             let nb = self.notebook()?;
             result["packages"] = nb.packages.clone().unwrap_or_default();
@@ -1765,9 +1471,6 @@ impl Call<'_> {
         if ran {
             let nb = self.notebook()?;
             self.nbs.with_state(&nb.id, |state| state.prune(&nb));
-            // The run of the whole notebook is the session's, as one `submit_changes` starts is: a
-            // read or a waited submit waits for it (#170). The engine names it; one that didn't
-            // goes on while a cell it started hasn't finished.
             let run = allowed["run"].as_str().map(str::to_owned);
             self.nbs.with_state(&nb.id, |state| {
                 let ended = run.as_ref().is_some_and(|run| state.ended.contains(run));
@@ -1781,11 +1484,6 @@ impl Call<'_> {
         Ok(result)
     }
 
-    /// The page's Stop, for the agent (#161): interrupt the notebook's run, whoever started it.
-    /// The running cells end interrupted and the queued ones don't run. Pluto's interrupt
-    /// returns once the run has stopped (ending the process if a cell won't); Ember's sends
-    /// SIGINT and returns, so the cells are watched until they stop, for at most
-    /// `INTERRUPT_WAIT_SECONDS` and within the call's `WAIT_SECONDS`.
     fn interrupt_notebook(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
         let busy = |nb: &Snapshot, id: &String| nb.cells.get(id).is_some_and(|c| c.running || c.queued);
@@ -1795,8 +1493,6 @@ impl Call<'_> {
             return Ok(json!({ "notebook_id": nb.id, "interrupted": false, "message": "Nothing was running." }));
         }
         let reply = self.nbs.call("interrupt", json!({ "notebook_id": nb.id }))?;
-        // The notebook's process is still starting, so its run hasn't started a cell, and it skips
-        // them all once the process is up (#179): they are dropped, however long the start takes.
         let pending = reply["pending"] == true;
         let mut now = self.nbs.snapshot(&nb.id)?;
         let deadline = Instant::now() + self.wait_left().min(Duration::from_secs_f64(INTERRUPT_WAIT_SECONDS));
@@ -1822,10 +1518,6 @@ impl Call<'_> {
         } else if now.process_status != nb.process_status && now.process_status == "no_process" {
             result["message"] = json!("A cell didn't stop, so the notebook's process was ended. Its values are gone: the next run starts a new process.");
         } else {
-            // An R notebook marks stale the cells the run didn't get to, a dependent of a stopped cell
-            // among them, and they keep the earlier run's output, which an agent would otherwise take for
-            // this run's (#260). Ember needn't have shown them queued, so this is every stale cell, as a
-            // lazy-mode run lists them.
             let stale: Vec<&String> = now.order.iter().filter(|id| now.cells.get(*id).is_some_and(|c| c.stale && !c.running && !c.queued && !c.hidden && !c.off)).collect();
             if !stale.is_empty() {
                 result["message"] = json!("The cells in `stale_cells` are stale: they show an earlier run's output, not this one's. Run them when they should be current.");
@@ -1835,29 +1527,19 @@ impl Call<'_> {
         Ok(result)
     }
 
-    /// Close the notebook, as the app's "Stop notebook" does: its process ends, for every session and
-    /// the user's browser too. Pluto saved the file with every change, so nothing is lost but the values.
     fn close_notebook(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
         let stopped = self.nbs.stop_notebook(&nb.path)?;
         let path = canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone());
-        // Not stopped: it was no longer open (its engine ended meanwhile).
         if stopped["stopped"] != true {
             self.nbs.unbind(self.owner, &path);
             return Err(argument_error(&format!("notebook_not_found::{} is no longer open.", nb.path)));
         }
-        // Closing its own notebook doesn't free the session for another (#520).
         self.nbs.closed_by(self.owner, &path);
         self.nbs.unbind(self.owner, &path);
         Ok(json!({ "notebook_id": nb.id, "path": nb.path, "closed": true }))
     }
 
-    /// The page's Restart, for the agent (#202): a new process for the notebook, with every value
-    /// gone. Pluto's then runs every cell, and that run is the session's, as `allow_execution`'s
-    /// is: a read or a waited submit waits for it. Since it runs every cell, a cell that was running
-    /// runs again, so the result names those (`running_again`): a restart meant to end a stuck cell
-    /// doesn't, unless the cell was edited first. Ember's leaves every cell not run. The engines
-    /// refuse it in safe preview.
     fn restart_notebook(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
         let running: Vec<String> = nb.order.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.running)).cloned().collect();
@@ -1867,7 +1549,6 @@ impl Call<'_> {
         }
         let now = self.nbs.snapshot(&nb.id)?;
         let mut result = json!({ "notebook_id": nb.id, "restarted": true, "process_status": now.process_status });
-        // The restart's run waits for the user's OK to a new package (#397).
         if now.asking() {
             result["packages"] = now.packages.clone().unwrap_or_default();
             result["message"] = json!(installing_message(&now));
@@ -1897,9 +1578,6 @@ impl Call<'_> {
         Ok(result)
     }
 
-    /// The session's notebook, if it is an R notebook: only Ember's packages have a snapshot date.
-    /// The notebook, if it has a package date: an R notebook's snapshot date, or a Python notebook's
-    /// `exclude-newer` (#352).
     fn dated_notebook(&self) -> Result<Snapshot, String> {
         let nb = self.notebook()?;
         if !matches!(self.nbs.backend_of(&nb.id), Backend::Ember | Backend::Marimo) {
@@ -1908,10 +1586,6 @@ impl Call<'_> {
         Ok(nb)
     }
 
-    /// A new value for an R notebook's input (emberui, Ember's docs/inputs.md), as moving its
-    /// widget on the page does: Ember's `set_input()`. R checks the value against the input; in
-    /// autorun the cells that read its name rerun, as a run of those cells, and in lazy mode they
-    /// are marked stale. The input's own cell doesn't rerun, and the value isn't saved in the file.
     fn set_input(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
         if self.nbs.backend_of(&nb.id) != Backend::Ember {
@@ -1921,14 +1595,11 @@ impl Call<'_> {
         let value = self.arg("value")?.clone();
         let wait = bool_arg(self.args, "wait_for_completion", false)?;
         let timeout = if wait { self.run_wait().as_secs_f64() } else { TIMEOUT_SECONDS };
-        // Edited and not yet run, as `run` takes them before its call.
         let staged = self.pending_run(&nb);
         let reply = self.nbs.call("set_input", json!({ "notebook_id": nb.id, "name": name, "value": value, "wait": wait, "timeout": timeout }))?;
         self.nbs.publish();
         let cells: Vec<String> = reply["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
         let mutation = json!({ "type": "set_input", "name": name, "cell_id": reply["cell"], "value": reply["value"] });
-        // R reads the value only once its running cell finishes. Not read by the wait's end,
-        // it is still on its way: said so, not reported as refused (it would land anyway).
         if reply["pending"] == true {
             let (mut receipt, _) = self.receipt(&nb.id, mutation, &[], Vec::new(), Some("running"))?;
             receipt.insert("pending".into(), json!(true));
@@ -1954,14 +1625,6 @@ impl Call<'_> {
         Ok(Value::Object(receipt))
     }
 
-    /// Ember's preview of moving an R notebook's snapshot date, which its package versions come
-    /// from (#201): what would change, with nothing changed yet. Without `date` it is today, the
-    /// page's "Update" (the newest packages). Fetching that date's index can take a while, so it
-    /// is waited for within the call. A day not published yet is previewed at the newest day that
-    /// is, and the result's `date` is that day. With `package` (and `version`, else CRAN's newest),
-    /// the date is Ember's for that package (`preview_update`, #266): the first day a newer
-    /// version was current, or the last day an older one was, so the others move as little as
-    /// they can. Every package moves with the date.
     fn preview_package_update(&self) -> Result<Value, String> {
         let nb = self.dated_notebook()?;
         let arg = |name: &str| self.args.get(name).cloned().unwrap_or(Value::Null);
@@ -1984,12 +1647,9 @@ impl Call<'_> {
         if reason.is_string() {
             result["reason"] = reason;
         }
-        // A day not published yet is previewed at the newest one that is, an earlier `date` (#247).
         let asked = result.as_object_mut().and_then(|r| r.remove("asked"));
         let earlier = asked.as_ref().is_some_and(|a| a.is_string() && *a != result["date"]);
         let none = result["changes"].as_array().is_none_or(Vec::is_empty);
-        // With no packages yet there is nothing to change, but applying still moves the date, which
-        // every package added later comes from (#269). An adapter that doesn't say counts as having some.
         let no_packages = result.as_object_mut().and_then(|r| r.remove("packages")).is_some_and(|n| n == 0);
         let said = match result["status"].as_str() {
             Some("ready") if none && no_packages => "The notebook has no packages yet, so none would change. apply_package_update with this date still moves the notebook's date to it, and every package added later comes from that date: tell the user, since an old date can give old versions or none at all.",
@@ -2009,9 +1669,6 @@ impl Call<'_> {
         Ok(result)
     }
 
-    /// Apply the preview of `date` (Ember's `set_date`), refused unless that preview is ready
-    /// and current. The header's date and the lock change and the file is saved; the library
-    /// installs, and if R had a changed package loaded it restarts once the library is ready.
     fn apply_package_update(&self) -> Result<Value, String> {
         let nb = self.dated_notebook()?;
         let date = self.arg("date")?.clone();
@@ -2021,7 +1678,6 @@ impl Call<'_> {
         let mut result = self.nbs.call("set_package_date", json!({ "notebook_id": nb.id, "date": date }))?;
         self.nbs.publish();
         result["notebook_id"] = json!(nb.id);
-        // In safe preview Ember installs nothing until the user lets the notebook run, nor does marimo.
         result["message"] = json!(if result["process_status"] == "waiting_for_permission" {
             "The notebook's package date has moved. Its library installs once the user allows the notebook to run (the notebook's page, or allow_execution): nothing installs or runs until then."
         } else if self.nbs.backend_of(&nb.id) == Backend::Marimo {
@@ -2032,16 +1688,9 @@ impl Call<'_> {
         Ok(result)
     }
 
-    /// The user's OK for an R notebook's install that stopped before a large download (Ember
-    /// #37's `approve_install`), or a Julia notebook's run that stopped before a package the
-    /// notebook doesn't have yet (#397), or a Python notebook's import of one (#355). The tool's
-    /// description and the asking message say to call it only after the user said yes. Refused when
-    /// no install waits for one.
     fn approve_install(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
         if matches!(self.nbs.backend_of(&nb.id), Backend::Pluto | Backend::Marimo) {
-            // The packages the user said yes to, where the yes named them (#418): the runtime
-            // approves only those, and asks again about any held since.
             let mut call = json!({ "notebook_id": nb.id, "timeout": TIMEOUT_SECONDS });
             if let Some(packages) = self.args.get("packages").filter(|p| p.is_array()) {
                 call["packages"] = packages.clone();
@@ -2050,7 +1699,6 @@ impl Call<'_> {
             self.nbs.publish();
             let cells: HashSet<String> = result["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
             self.nbs.with_state(&nb.id, |state| {
-                // A yes that approved nothing started nothing.
                 if !self.owner.is_empty() && result["approved"] != false {
                     state.started.push(Started { owner: self.owner.to_owned(), run: result["run"].as_str().map(str::to_owned), cells, follows: HashMap::new() });
                 }
@@ -2059,7 +1707,6 @@ impl Call<'_> {
             result["message"] = json!(if result["asking"].is_array() {
                 let again = installing_message(&self.nbs.snapshot(&nb.id)?);
                 let list = |key: &str| result[key].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", ");
-                // The yes named fewer packages than wait now (#418): the rest ask on their own.
                 if result["approved"] == true {
                     format!("The user's yes covers {}. The notebook also needs {}, added since they were asked, which needs their OK of its own before anything installs. {again}", list("packages"), list("asking"))
                 } else if result["approved"] == false {
@@ -2085,7 +1732,6 @@ impl Call<'_> {
     }
 }
 
-/// The cell a `cell_id` argument names, refused as Julia's lookup refused it.
 fn cell_named(nb: &Snapshot, value: &Value) -> Result<String, String> {
     let shown = julia_string(value);
     let id = cell_id_in(nb, value).ok_or_else(|| argument_error(&format!("invalid_cell_id::Invalid cell ID: '{shown}'")))?;
@@ -2095,7 +1741,6 @@ fn cell_named(nb: &Snapshot, value: &Value) -> Result<String, String> {
     Ok(id)
 }
 
-/// Whether a run touched its cells, and how it went.
 fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) -> String {
     let warned = |kind: &str| warnings.iter().any(|w| w.starts_with(kind));
     let status = if warned("execution_blocked::") {
@@ -2106,8 +1751,6 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
         "staged"
     } else {
         let cells: Vec<_> = cells_run.iter().filter_map(|id| nb.cells.get(id)).collect();
-        // A cell still to run carries its last result's error until it runs, so
-        // that error isn't this run's: a run waiting at a prompt is still running.
         if cells.iter().any(|c| c.errored && !c.running && !c.queued) {
             "errored"
         } else if cells.iter().any(|c| c.running || c.queued) {
@@ -2119,16 +1762,11 @@ fn execution_status(nb: &Snapshot, cells_run: &[String], warnings: &[String]) ->
     status.to_owned()
 }
 
-/// What the agent hears while a notebook's cells wait on a package step, in
-/// plain words: what is going on, that it is slow only the first time, and
-/// how to wait; past `INSTALL_USUAL_SECONDS`, to wait only while the log moves.
-/// The prompt `cell` waits on, as the tools show it.
 fn waiting_json(nb: &Snapshot, cell: &str) -> Value {
     let prompt = nb.cells.get(cell).and_then(|c| c.prompt.clone()).unwrap_or_default();
     json!({ "cell_id": cell, "prompt_id": prompt["id"], "prompt": prompt["text"].as_str().unwrap_or_default(), "choices": prompt["choices"].as_array().cloned().unwrap_or_default() })
 }
 
-/// What the agent is told while `cell` waits on a prompt.
 fn prompt_message(nb: &Snapshot, cell: &str) -> String {
     let menu = nb.cells.get(cell).and_then(|c| c.prompt.as_ref()).and_then(|p| p["choices"].as_array()).is_some_and(|c| !c.is_empty());
     let how = if menu { " (a choice's number or its text)" } else { "" };
@@ -2152,7 +1790,6 @@ fn installing_message(nb: &Snapshot) -> String {
     let last = packages["last_line"].as_str().map(|line| format!(" Last line of the package log: {line}")).unwrap_or_default();
     let language = super::engines::language(super::engines::of_path(&nb.path));
     let mut what = format!("{language} is getting {which} ready for this notebook ({step}, {so_far} so far). The cells are queued and run when that is done.");
-    // Ember's notice that these build from source (Ember #19), as the Packages tab says it.
     let source: Vec<&str> = packages["source_builds"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     if !source.is_empty() {
         what.push_str(&format!(
@@ -2174,31 +1811,20 @@ fn installing_message(nb: &Snapshot) -> String {
     }
 }
 
-/// What to do about an R package Ember couldn't install (`install_failed`).
 pub(crate) const INSTALL_FAILED: &str = "Ember couldn't install a package this cell needs; the error says why. Trying again on your own gets the same failure: don't rerun the notebook, restart R, or install the package from a cell yourself (an install there also skips the user's OK for a large download). Tell the user plainly which package failed and the error's reason, and stop there. If they fix the cause (a system library, disk space, the network) and ask you to try again, run the cell once more. If you answer their question anyway, say the notebook didn't compute it.";
 
-/// What the asking message tells the agent to do. The plugin's front puts its own words in its place
-/// where it asks the user itself (`standalone::consent`).
 pub(crate) const ASK_STEP: &str = "Stop here and ask the user whether to install it, then end your reply. approve_install doesn't ask the user: it is their yes, so call it only once they have answered yes in a later message.";
 
-/// What the agent hears while an R notebook's install waits for an OK before a large download
-/// (Ember #37): what it would download and how much, and that the user decides. Only the user
-/// can say yes to it, so the agent asks them and doesn't wait.
 pub(super) fn asking_message(nb: &Snapshot) -> String {
     let download = nb.packages.as_ref().map(|p| p["download"].clone()).unwrap_or_default();
-    // A Julia notebook's run that would add packages it doesn't have yet (#397), or a Python
-    // notebook's import of one (#355).
     if nb.packages.as_ref().is_some_and(|p| p["new"] == true) {
         let names: Vec<&str> = download["packages"].as_array().into_iter().flatten().filter_map(|p| p["package"].as_str()).collect();
         let which = if names.is_empty() { "packages".to_owned() } else { names.join(", ") };
         let language = super::engines::language(super::engines::of_path(&nb.path));
-        // A name a letter or two from a widely used package's is likely a typo (#416).
         let near: Vec<(&str, &str)> = download["packages"].as_array().into_iter().flatten()
             .filter_map(|p| Some((p["package"].as_str()?, p["close_to"].as_str()?)))
             .collect();
         if !near.is_empty() {
-            // Only a hint: real packages sit close to common ones (pysam and pyyaml), so the agent
-            // changes an import only where it meant the other package.
             let each: Vec<String> = near.iter().map(|(name, close)| format!(
                 "{name} is close to {close}, a widely used package. If you meant {close}, change the import to it, run the cell again, and tell the user you changed it. \
                  If you meant {name} (or the user asked for it), keep it, and say that it is close to {close} when you tell the user about the install"
@@ -2237,8 +1863,6 @@ pub(super) fn asking_message(nb: &Snapshot) -> String {
     )
 }
 
-/// What Claude hears when a notebook's own process (`language`'s, Julia or R) ends during a run it
-/// waits for, in the words of the app's crash page.
 fn exited_message(language: &str, cell: Option<&str>) -> String {
     let stopped = match cell {
         Some(cell) => format!("{language} stopped unexpectedly while running `{cell}`."),
@@ -2247,7 +1871,6 @@ fn exited_message(language: &str, cell: Option<&str>) -> String {
     format!("{stopped} The notebook file is saved; its outputs are gone until the cells run again.")
 }
 
-/// A flag argument: a Bool, or refused.
 fn bool_arg(args: &Value, name: &str, default: bool) -> Result<bool, String> {
     match args.get(name) {
         None => Ok(default),
@@ -2256,13 +1879,11 @@ fn bool_arg(args: &Value, name: &str, default: bool) -> Result<bool, String> {
     }
 }
 
-/// The first 12 hex digits of the code's SHA-256 (Endeavor's `celldiff::code_sha` is the same).
 fn code_sha(code: &str) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(code.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
-/// An edit's `folded`: a Bool, or left out (or null) to keep the cell's fold as it is.
 fn optional_folded(value: Option<&Value>) -> Result<Option<bool>, String> {
     match value {
         None | Some(Value::Null) => Ok(None),
@@ -2271,8 +1892,6 @@ fn optional_folded(value: Option<&Value>) -> Result<Option<bool>, String> {
     }
 }
 
-/// The items Julia's `for x in value` goes through: an array's items, a
-/// string's characters (each a number to `UUID`), a number itself.
 fn julia_iterate(value: &Value) -> Result<Vec<Value>, String> {
     match value {
         Value::Array(items) => Ok(items.clone()),
@@ -2282,13 +1901,10 @@ fn julia_iterate(value: &Value) -> Result<Vec<Value>, String> {
     }
 }
 
-/// Whether the adapter refused to open a path because it is already open:
-/// its error's kind, as for every adapter error (`ArgumentError: kind::message`).
 pub(super) fn already_open(error: &str) -> bool {
     error.strip_prefix("ArgumentError: ").is_some_and(|rest| rest.starts_with("notebook_already_open::"))
 }
 
-/// Whether R notebooks can open here: not on Windows, where Ember doesn't run yet.
 fn r_notebooks(what: &str) -> Result<(), String> {
     if cfg!(windows) {
         return Err(argument_error(&format!("unsupported::{what}. R notebooks don't run on Windows yet; they need macOS or Linux")));
@@ -2296,7 +1912,6 @@ fn r_notebooks(what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether Python notebooks can open here: not on Windows yet, where marimo's adapter hasn't been tried.
 fn python_notebooks(what: &str) -> Result<(), String> {
     if cfg!(windows) {
         return Err(argument_error(&format!("unsupported::{what}. Python notebooks don't run on Windows yet; they need macOS or Linux")));
@@ -2304,9 +1919,6 @@ fn python_notebooks(what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether this process can't make a file in the folder `dir`: a read-only disk (a computer's
-/// files shared read-only into a virtual machine, say) or a folder the user can't write to. Only
-/// checked on Unix; elsewhere the engine's own error says it.
 fn read_only(dir: &str) -> bool {
     #[cfg(unix)]
     {
@@ -2322,8 +1934,6 @@ fn read_only(dir: &str) -> bool {
     }
 }
 
-/// The refusal of a new notebook in the read-only folder `dir` (`which`), before the engine
-/// fails to save it: where to make it instead.
 fn not_writable(dir: &str, which: &str) -> String {
     argument_error(&format!(
         "folder_not_writable::A new notebook can't be saved in {which}, '{dir}': it is read-only. Make it with a `path` in a folder the user can write to, one they name or their home folder, and tell them where it is."
@@ -2334,20 +1944,14 @@ pub fn argument_error(message: &str) -> String {
     format!("ArgumentError: {message}")
 }
 
-/// Julia's `KeyError` for a missing key, as it shows it.
 pub fn key_error(key: &str) -> String {
     format!("KeyError: key {} not found", julia_repr(key))
 }
 
-/// No notebook with `shown`'s id: the error `notebook()` and `notebook_arg`
-/// both raise. `mcp::tool_error` unwraps this back to `notebook_not_found`
-/// with this message.
 pub fn notebook_not_found(shown: &str, open: Option<&[(String, String)]>) -> String {
     key_error(&format!("notebook_not_found::No notebook with id '{shown}' in the current session.{}", open_now(open)))
 }
 
-/// What an agent that named a notebook that isn't open needs to go on without another call (#274): the
-/// open ones by id and path, a few at most. Without them (the engine didn't answer), where to look.
 fn open_now(open: Option<&[(String, String)]>) -> String {
     const SHOWN: usize = 5;
     match open {
@@ -2363,7 +1967,6 @@ fn open_now(open: Option<&[(String, String)]>) -> String {
     }
 }
 
-/// Julia's error for `UUID(s)` on a string that isn't one.
 fn malformed_uuid(value: &Value) -> String {
     match value {
         Value::String(text) => argument_error(&format!("Malformed UUID string: {}", julia_repr(text))),
@@ -2371,7 +1974,6 @@ fn malformed_uuid(value: &Value) -> String {
     }
 }
 
-/// The name of the type Julia parses a JSON value into.
 fn julia_type(value: &Value) -> &'static str {
     match value {
         Value::Null => "Nothing",
@@ -2384,12 +1986,10 @@ fn julia_type(value: &Value) -> &'static str {
     }
 }
 
-/// Julia's error for a value that isn't a Bool where one must be.
 fn non_boolean(value: &Value) -> String {
     format!("TypeError: non-boolean ({}) used in boolean context", julia_type(value))
 }
 
-/// Julia's error for `!value` on anything but a Bool.
 fn no_method_not(value: &Value) -> String {
     format!(
         "MethodError: no method matching !(::{})\nThe function `!` exists, but no method is defined for this combination of argument types.\n\n\
@@ -2399,7 +1999,6 @@ fn no_method_not(value: &Value) -> String {
     )
 }
 
-/// Julia's `isspace`.
 fn julia_space(c: char) -> bool {
     matches!(c, ' ' | '\t'..='\r' | '\u{85}' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}')
 }
@@ -2408,11 +2007,8 @@ fn julia_strip(text: &str) -> &str {
     text.trim_matches(julia_space)
 }
 
-/// The code around the first match of `query`, 40 bytes each side, as Julia
-/// cut it: by byte index, failing as Julia fails when an end lands inside a character.
 pub(super) fn snippet_around(code: &str, query: &str) -> Result<Option<String>, String> {
     let Some(at) = code.find(query) else { return Ok(None) };
-    // Julia's match range: its first byte, and the first byte of its last character (1-based).
     let first = at + 1;
     let last = at + query.len() + 1 - query.chars().next_back().map_or(1, char::len_utf8);
     let start = first.saturating_sub(40).max(1);
@@ -2430,7 +2026,6 @@ pub(super) fn snippet_around(code: &str, query: &str) -> Result<Option<String>, 
     Ok((!snippet.is_empty()).then(|| snippet.to_owned()))
 }
 
-/// Julia's `StringIndexError` for byte `index` (1-based) of `text`.
 fn string_index_error(text: &str, index: usize) -> String {
     let prev = (0..index).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
     let char_at = |i: usize| text[i..].chars().next().map(|c| c.escape_debug().to_string().replace("\\'", "'")).unwrap_or_default();
@@ -2442,8 +2037,6 @@ fn string_index_error(text: &str, index: usize) -> String {
     }
 }
 
-/// The length of what a base64 text decodes to.
-/// `text` cut to at most `max` bytes at a character boundary, saying so.
 pub(super) fn cut(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_owned();
@@ -2452,9 +2045,6 @@ pub(super) fn cut(text: &str, max: usize) -> String {
     format!("{}\n… (cut; read_cell shows more)", &text[..end])
 }
 
-/// `text` cut to about `max` bytes at character boundaries, keeping its start and its last
-/// `end` bytes, saying how much was left out.
-/// `rest` says where the rest is.
 pub(super) fn cut_middle(text: &str, max: usize, end: usize, rest: &str) -> String {
     if text.len() <= max {
         return text.to_owned();
@@ -2464,25 +2054,17 @@ pub(super) fn cut_middle(text: &str, max: usize, end: usize, rest: &str) -> Stri
     format!("{}\n… ({} of this output's {} bytes are left out here. {rest})\n{}", &text[..head], tail - head, text.len(), &text[tail..])
 }
 
-/// Where the rest of an output `read_cell` cut is: nowhere a tool reaches.
 const OUTPUT_REST: &str = "No tool shows them: to see a part, run a cell that picks it out, such as its first or last lines.";
 
-/// A cell's code as the engine kept it after an edit that sent `sent`: the engine's `apply` reply names it in
-/// `codes` when it keeps code in another form (marimo, `file_form`); Pluto and R keep it as sent.
 fn kept_code(applied: &Value, cell: &str, sent: &str) -> String {
     applied["codes"][cell].as_str().unwrap_or(sent).to_owned()
 }
 
-/// What `view_cell_output` tells the agent about an interactive output (an HTML one with scripts or
-/// controls, `_interactive_html` in `Output.jl`) that it has no picture of, and one it has a picture of.
 pub(crate) const INTERACTIVE_UNSEEN: &str = "It is interactive (it has scripts or controls), and you haven't seen it. In your answer, say that you couldn't see it, and ask the user to check that it shows and that its hover, zoom or other controls work. Don't describe how it looks or behaves beyond what its code sets. Keep it as it is: don't switch plotting packages, redraw it another way or install anything to get a picture. If the package it uses fails to load, tell the user and stop.";
 pub(crate) const INTERACTIVE_PICTURE: &str = "This output is interactive (it has scripts or controls). The picture shows how it looks, not that its controls work: you haven't seen them work. In your answer, ask the user to check that its hover, zoom or other controls work, and don't describe them as working. Keep it as it is, and don't switch plotting packages.";
 
-/// What `view_cell_output` tells the agent about a plain image output (#407).
 pub(crate) const STATIC_PICTURE: &str = "This output is a picture with no controls: it has no hover, zoom or other controls of its own. Don't describe it as interactive. If the user asked for an interactive plot, say this one isn't.";
 
-/// Marks a picture of an interactive output as one, with what the agent may say about it after
-/// any message the picture already has.
 fn interactive_picture(meta: &mut Value) {
     meta["interactive"] = json!(true);
     let message = match meta["message"].as_str() {
@@ -2492,16 +2074,10 @@ fn interactive_picture(meta: &mut Value) {
     meta["message"] = json!(message);
 }
 
-/// How `view_cell_output` says an output has no PNG form, and how the runtime says it couldn't ask
-/// the worker for one, or the worker was too busy running cells to render it (`_cell_png` in
-/// `Output.jl`, #62): the failures a picture of the notebook can stand in for.
 const NO_PNG: &str = "has no PNG rendering";
 const NO_WORKER: &str = "has no running worker";
 const BUSY: &str = "is busy running cells";
 
-/// Whether a picture of the output as the notebook draws it (`guard::Snapshot`) shows the agent more
-/// than `view_cell_output`'s `result`: an HTML output with no PNG form, one whose picture came from
-/// its HTML (maybe only part of it), or any output while the notebook has no worker to render it.
 pub(crate) fn snapshot_may_help(result: &Value) -> bool {
     let content = &result["content"];
     if result["isError"] == true {
@@ -2513,9 +2089,6 @@ pub(crate) fn snapshot_may_help(result: &Value) -> bool {
     content[1]["type"] == "image" && meta["source"] == "embedded image"
 }
 
-/// `view_cell_output`'s result for `png` (base64), a picture of cell `cell` as the notebook draws it,
-/// in place of the runtime's `result`, or None if it is over the size an agent takes. It keeps the
-/// output's MIME type when the runtime's result named it.
 pub(crate) fn screenshot_result(cell: &str, picture: crate::Picture, result: &Value) -> Option<Value> {
     let crate::Picture { png, cut } = picture;
     let bytes = base64_len(&png);
@@ -2536,7 +2109,6 @@ pub(crate) fn screenshot_result(cell: &str, picture: crate::Picture, result: &Va
     if let Some((shown, whole)) = cut {
         meta["cut"] = json!(format!("The picture shows {shown} px of an output {whole} px tall; the rest is missing."));
     }
-    // A picture of the notebook shows how it looks, still not that its controls work.
     if said["interactive"] == true || said["message"].as_str().is_some_and(|m| m.contains(INTERACTIVE_UNSEEN)) {
         interactive_picture(&mut meta);
     }
@@ -2556,11 +2128,6 @@ pub(super) fn tool_json(reply: Reply) -> Value {
     }
 }
 
-/// The notes of a run's cells as the reply's warnings, "kind::Cell <id>: text". The same note on
-/// several cells (a `@warn` in a function they all call) is one line, "kind::Cells <id>, <id>:
-/// text". Logged errors come first, then warnings and Ember's notes, then `QUIET_NOTES`, which a cell that
-/// only ran along doesn't give. At most `RUN_NOTES_MAX` lines and `RUN_NOTES_BYTES`, then a
-/// `notes_cut` line.
 fn run_notes(cells: &[(&String, &Cell)], along: &[String]) -> Vec<String> {
     let mut folded: Vec<(&str, &str, Vec<&str>)> = Vec::new();
     for (id, cell) in cells {
@@ -2593,8 +2160,6 @@ fn run_notes(cells: &[(&String, &Cell)], along: &[String]) -> Vec<String> {
     lines
 }
 
-/// A run's or a read's `message` when a result used a control the user moved on the page
-/// (`uses_moved_input`): the agent reports the result at that value, and should say so.
 fn moved_message(moved: &[&str]) -> Option<String> {
     let first = moved.first()?;
     let (_, rest) = first.split_once("::")?;
@@ -2602,9 +2167,6 @@ fn moved_message(moved: &[&str]) -> Option<String> {
     Some(format!("{rest} When you report the result, say which value it used. To keep that value, change the control's default in its cell.{more}"))
 }
 
-/// A run's `message` when a cell it ran logged a warning or an error: the first, quoted, and that
-/// the user should hear it. In N11, Haiku 4.5 read such a warning in `warnings` and reported the
-/// result as clean.
 fn logged_message(logged: &[&str]) -> Option<String> {
     let first = logged.first()?;
     let (kind, rest) = first.split_once("::")?;
