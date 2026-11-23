@@ -91,7 +91,8 @@ fn query_decoded(text: &str) -> Option<String> {
     while i < bytes.len() {
         match bytes[i] {
             b'%' => {
-                out.push(u8::from_str_radix(text.get(i + 1..i + 3)?, 16).ok()?);
+                let hex = text.get(i + 1..i + 3).filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
                 i += 3;
             }
             b'+' => {
@@ -180,6 +181,7 @@ mod tests {
         assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=/w/a+b.py").as_deref(), Some("/w/a b.py"));
         assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=/a.py&file=/b.py"), None, "one file or none");
         assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=%zz"), None);
+        assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=%+f"), None, "a sign isn't a hex digit");
         assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/api/x?file=/w/a.py"), None, "only the page");
         assert_eq!(Backend::Pluto.notebook_path(&url), None);
         assert_eq!(Backend::Marimo.notebook_id("http://127.0.0.1:1234/marimo/edit?id=abc"), None);

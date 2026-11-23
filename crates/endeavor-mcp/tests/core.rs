@@ -1145,6 +1145,7 @@ fn an_app_session_that_shows_python_opens_and_makes_python_notebooks() {
         assert!(refused(&mcp(&core, &call(id + 10, tool, "/w/fit.py"), &older).1), "an app session that didn't say so is still refused: {tool}");
     }
     assert!(!refused(&app_call(&core, r#"{"jsonrpc":"2.0","id":5,"method":"endeavor/new_notebook","params":{"owner":"7"}}"#)));
+    assert!(!refused(&mcp(&core, &call(8, "open_notebook", "/w/fit.py"), &[("X-Endeavor-Client", "app")]).1), "the app's own open, of a file its user picked");
     app_call(&core, r#"{"jsonrpc":"2.0","id":6,"method":"endeavor/set_session_folder","params":{"owner":"7","folder":"/w","shows_python":false}}"#);
     assert!(refused(&mcp(&core, &call(7, "open_notebook", "/w/fit.py"), &shows).1), "said again, it holds");
 }

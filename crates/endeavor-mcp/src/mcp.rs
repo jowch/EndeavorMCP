@@ -665,7 +665,7 @@ impl Bridge {
         if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
             return Some(host_tool_refusal(tool));
         }
-        if caller.app && !self.shows_python(&caller.owner) && opens_python(tool, arguments, self.notebooks.kind(&caller.owner)) {
+        if caller.app && !caller.owner.is_empty() && !self.shows_python(&caller.owner) && opens_python(tool, arguments, self.notebooks.kind(&caller.owner)) {
             return Some(PYTHON_NOT_IN_APP.to_owned());
         }
         let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p.policy == "plan");
