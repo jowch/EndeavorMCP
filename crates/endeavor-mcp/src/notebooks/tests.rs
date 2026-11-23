@@ -3681,6 +3681,31 @@ fn a_julia_run_that_adds_a_package_asks_first_except_in_auto_mode() {
 }
 
 #[test]
+fn the_smoke_checks_that_wait_for_julias_asking_message_still_find_it() {
+    // N7's and L1's `asked_user` check applies only to a run whose reply has the asking message.
+    // Reworded, no reply would have the phrase, and the check would pass as "doesn't apply" every time (#412).
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "using Example")]);
+    let ran = s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    let message = ran["message"].as_str().unwrap();
+    let tasks = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../smoke/tasks");
+    let mut found = Vec::new();
+    for task in std::fs::read_dir(&tasks).unwrap() {
+        let path = task.unwrap().path().join("checks.json");
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let checks: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let checks = checks.as_array().or(checks["checks"].as_array()).cloned().unwrap_or_default();
+        for phrase in checks.iter().filter(|c| c["check"] == "asked_user").flat_map(|c| c["when_reply"].as_array().cloned().unwrap_or_default()) {
+            let phrase = phrase.as_str().unwrap();
+            assert!(message.contains(phrase), "{}: when_reply {phrase:?} isn't in the asking message: {message}", path.display());
+            found.push(path.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned());
+        }
+    }
+    found.sort();
+    assert_eq!(found, ["L1-long-analysis", "N7-plot"], "the smoke tasks with a when_reply");
+}
+
+#[test]
 fn new_notebook_takes_an_r_path_only_where_r_notebooks_open() {
     let s = setup();
     let dir = std::env::temp_dir().to_string_lossy().trim_end_matches(SEP).to_owned();
