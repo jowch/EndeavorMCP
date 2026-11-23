@@ -1,19 +1,3 @@
-//! The cluster path over real ssh, real Slurm and real Julia: the client
-//! library connects to a login node, the helper submits a small job, the runtime
-//! starts in it, the agent's MCP calls reach it through the local listener, a
-//! second client joins the same job, and a stop ends the job. It's ignored by
-//! default and runs only when `ENDEAVOR_TEST_SSH_HOST` names a host this user
-//! can `ssh` to with a key and that has Slurm (`localhost` on a single-node
-//! cluster is one):
-//!
-//!     ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_slurm -- --ignored --nocapture
-//!
-//! It submits one job of 1 CPU, 2 GB and 15 minutes to partition `LocalQ`
-//! (`ENDEAVOR_TEST_SLURM_PARTITION` names another). Julia is found as in
-//! `e2e_client`, and the depot is that test's, so the first run after a clean
-//! target folder takes several minutes. Its install and state folders are under
-//! `target/tmp/e2e-slurm`, which the host has to see at the same path.
-
 #![cfg(unix)]
 
 mod common;
@@ -32,7 +16,6 @@ use serde_json::{Value, json};
 use wire::files::{Reply, Request, RuntimeState};
 use wire::slurm::{JobRequest, Resources};
 
-/// What a client's connect and start told, in order, with the time since the test began.
 #[derive(Clone)]
 struct Log {
     events: Arc<Mutex<Vec<Event>>>,
@@ -70,20 +53,17 @@ fn user() -> String {
     std::env::var("USER").unwrap_or_else(|_| String::from_utf8_lossy(&Command::new("id").arg("-un").output().unwrap().stdout).trim().to_owned())
 }
 
-/// `squeue`'s lines for `args`, as `id|name|user|state|node|partition`.
 fn squeue(args: &[&str]) -> Vec<String> {
     let output = Command::new("squeue").args(["-h", "-o", "%i|%j|%u|%T|%N|%P"]).args(args).output().expect("squeue runs");
     String::from_utf8_lossy(&output.stdout).lines().map(str::to_owned).collect()
 }
 
-/// The ids of this user's jobs named `endeavor`.
 fn endeavor_jobs() -> Vec<String> {
     let mut ids: Vec<String> = squeue(&["-u", &user(), "-n", "endeavor"]).iter().map(|l| l.split('|').next().unwrap().to_owned()).collect();
     ids.sort();
     ids
 }
 
-/// The processes (pid, command line) whose command line has `needle`, apart from this one.
 fn processes(needle: &str) -> Vec<(i32, String)> {
     let output = Command::new("ps").args(["-eo", "pid=,args="]).output().expect("ps runs");
     String::from_utf8_lossy(&output.stdout)
@@ -93,7 +73,6 @@ fn processes(needle: &str) -> Vec<(i32, String)> {
         .collect()
 }
 
-/// `root` and everything below it, by parent pid.
 fn descendants(root: i32) -> Vec<i32> {
     let output = Command::new("ps").args(["-eo", "pid=,ppid="]).output().expect("ps runs");
     let pairs: Vec<(i32, i32)> = String::from_utf8_lossy(&output.stdout)
@@ -114,7 +93,6 @@ fn descendants(root: i32) -> Vec<i32> {
 }
 
 fn alive(pid: i32) -> bool {
-    // A zombie is gone for this purpose.
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| !s.rsplit(") ").next().unwrap_or_default().starts_with('Z'))
 }
 
@@ -127,7 +105,6 @@ fn cancel(job: &str) {
     let _ = Command::new("scancel").arg(job).output();
 }
 
-/// A failed step leaves no job behind: cancels the ones this test submitted that are still listed.
 struct Cancels {
     state: PathBuf,
     logs: Vec<Log>,
@@ -148,7 +125,6 @@ impl Drop for Cancels {
     }
 }
 
-/// An agent on a listener's port, with the session id `initialize` gives.
 struct Agent {
     port: u16,
     token: String,
@@ -161,7 +137,6 @@ impl Agent {
         Agent { port, token: token.to_owned(), id: 0, session: None }
     }
 
-    /// POST `message` to `/mcp` as the agent does: the status line, the head and the body.
     fn post(&self, token: &str, message: &Value) -> (String, String, Value) {
         let body = message.to_string();
         let session = self.session.as_deref().map_or(String::new(), |id| format!("Mcp-Session-Id: {id}\r\n"));
@@ -207,7 +182,6 @@ impl Agent {
     }
 }
 
-/// One client: its channel to a helper on the host, its listener, and what it was told.
 struct Client {
     channel: Arc<Channel>,
     listener: Arc<Listener>,
@@ -244,10 +218,8 @@ fn a_runtime_in_a_slurm_job() {
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let work = tmp.join("e2e-slurm");
     let (root, state, project) = (work.join("root"), work.join("state"), work.join("project"));
-    // The depot e2e_client built, which already has Pluto's packages.
     let depot = tmp.join("e2e-client/depot");
 
-    // A job an earlier run left is ours to cancel: it's recorded in this test's own folder.
     for file in ["job.json", "runtime.json"] {
         if let Some(job) = recorded_job(&state, file)
             && squeue(&["-j", &job, "-u", &user()]).iter().any(|l| l.split('|').nth(1) == Some("endeavor"))
@@ -298,7 +270,6 @@ fn a_runtime_in_a_slurm_job() {
         Client { channel, listener, runtime, lost }
     };
 
-    // What the helper finds without taking the runtime over: the app asks this before it connects.
     let found = |client: &Client| match client.channel.files(Request::Runtime) {
         Ok(Reply::Runtime { runtime }) => runtime,
         other => panic!("the helper answers Runtime: {other:?}"),
@@ -406,7 +377,6 @@ fn a_runtime_in_a_slurm_job() {
     });
 
     step("the first client stops the runtime; the job ends", || {
-        // What belongs to the job, to be gone after the stop: the runtime's tree, and anything naming this test's folders.
         let mut mine: Vec<i32> = descendants(one.runtime.pid as i32);
         mine.extend(processes(work.to_str().unwrap()).into_iter().map(|(pid, _)| pid));
         mine.sort();

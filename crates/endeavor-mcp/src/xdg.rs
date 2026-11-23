@@ -1,10 +1,5 @@
-//! The XDG base folders: a variable counts only if it holds an absolute path.
-//! A relative one would put endeavor's files under whichever folder the process
-//! started in.
-
 use std::path::PathBuf;
 
-/// `name`'s value, if it is set to an absolute path, else `None`.
 pub(crate) fn absolute_var(read: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<PathBuf> {
     read(name).filter(|v| !v.is_empty()).map(PathBuf::from).filter(|p| p.is_absolute())
 }

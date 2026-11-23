@@ -1,11 +1,12 @@
 # Starting and stopping a runtime
 
 `runtime.rs` is the one place that finds the runtime in a state folder,
-starts one, and stops it, for the helper (`endeavor connect`), `serve` and
-`mcp`. The callers differ only in what they say while it goes on and how
-they end it (`Hooks`). The start lock and its rules are in
-[endeavor-mcp.md](endeavor-mcp.md) ("A start, once begun, finishes without
-the process that asked for it"); this is what the code adds to them.
+starts one, and stops it, for the helper (`endeavor connect`,
+[helper.md](helper.md)), `serve` and `mcp`. The callers differ only in what
+they say while it goes on and how they end it (`Hooks`). The start lock and
+its rules are in [endeavor-mcp.md](endeavor-mcp.md) ("A start, once begun,
+finishes without the process that asked for it"); this is what the code adds
+to them.
 
 ## Which state folder
 
@@ -97,6 +98,17 @@ alone unless `force` is given; then its core is ended with Julia and its
 children, as described in endeavor-mcp.md. The lock of a core that was ended
 is waited for a moment: the OS lets it go when the core's last handle closes,
 and a process the core was starting may hold the file a little longer.
+
+### The note a stop leaves (`stopped.rs`)
+
+`DIR/stopped` tells the others still attached to the runtime, or waiting for
+its job, what was stopped and how: "ID HOW", where ID is the runtime's pid,
+or `job:` and the job's id for a job not yet running, and HOW is `stop`
+(`endeavor stop`) or `connection` (a client's Stop). A pid alone, which an
+older `endeavor stop` writes, is `stop`. One note at a time; a stop that
+didn't happen takes it back. A starting runtime clears a pid's note, since the
+pid may come again, but not a job's: job ids aren't reused, and a helper
+still waiting on that job may not have read it.
 
 ## Telling a process from a later one
 

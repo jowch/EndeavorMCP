@@ -1,8 +1,3 @@
-//! Where a session's notebooks run (docs/plugins-and-remote.md): on this computer or on a machine. The
-//! two differ in how the runtime's address is obtained and how it is stopped, which is a `Provider`:
-//! `Local` finds, starts and ends the runtime in the state folder directly, and a machine's is its
-//! `client::Session`. Both answer with the same `Outcome` and `Status`.
-
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
@@ -13,20 +8,11 @@ use crate::client::{Outcome, RuntimeInfo, Server, Session, State, Status, Want};
 use crate::runtime::{self, Ended, Looked};
 use crate::stopped;
 
-/// Finding, starting, looking at and ending one runtime.
 pub(super) trait Provider: Send + Sync {
-    /// Ask for `want` and say how it stands, as soon as that is known or `wait` has passed
-    /// (`Outcome::StillWorking`); a start goes on meanwhile. An `Attach` starts nothing and looks afresh
-    /// when nothing is known to run, waiting for a start that another process has under way. A failure is kept and given to every call until one asks to `retry`.
     fn ensure(&self, want: Want, wait: Duration, retry: bool) -> Outcome;
     fn status(&self) -> Status;
-    /// End the runtime for every client of it, and wait until it is gone. With `force` a start that is
-    /// under way is cancelled, whoever began it; without, only one this session's connection is waiting on.
     fn stop(&self, force: bool) -> Result<(), String>;
-    /// Whether the machine is a Slurm cluster, by the record the connection was made with.
     fn cluster(&self) -> bool;
-    /// Ask a machine's helper about its files, once it is connected (`Session::files`). None on this
-    /// computer, and on a machine that isn't connected by the end of `wait`.
     fn files(&self, _request: wire::files::Request, _wait: Duration) -> Option<Result<wire::files::Reply, String>> {
         None
     }
@@ -48,7 +34,6 @@ impl Provider for Session {
     fn stop(&self, force: bool) -> Result<(), String> {
         let stopped = if force { Session::force_stop(self) } else { Session::stop(self) };
         stopped.map_err(|why| {
-            // Nothing to do about a stop the helper refused.
             if self.connected() {
                 return why;
             }
@@ -65,23 +50,14 @@ impl Provider for Session {
     }
 }
 
-/// Where this session's notebooks run: this computer (`id` is `LOCAL`) or a machine.
 #[derive(Clone)]
 pub(super) struct Target {
-    /// The id in the machines file, which the connection goes by.
     pub id: String,
-    /// What the agent calls it.
     pub name: String,
-    /// The session's folder there, if `use_machine` was given one; else the server's home. On this
-    /// computer none means the front was started with `--no-folder`.
     pub folder: Option<String>,
-    /// The session should have a runtime there: false after `stop_machine`.
     pub active: bool,
-    /// The runtime (its pid) that was told this session's folder.
     pub told: Option<u32>,
-    /// The last notebook call that needed a runtime reported a failure, so the next one asks to try again.
     pub failed: bool,
-    /// How many times `use_machine` has set the target: a call that waited sees that it did, even if the session is back where it was.
     pub moves: u64,
 }
 
@@ -98,61 +74,42 @@ impl Target {
         self.id == LOCAL
     }
 
-    /// The name a machine's runtime knows this session's computer by (`X-Endeavor-Host`); a runtime on this computer is sent none.
     pub(super) fn host(&self) -> Option<String> {
         (!self.is_local()).then(|| crate::mcp::clean_label(&self.name).unwrap_or_else(|| self.id.clone()))
     }
 }
 
-/// This computer, as the record `Target::new` and the tools take.
 pub(super) fn local_server() -> Server {
     Server { id: LOCAL.into(), name: LOCAL.into(), ..Default::default() }
 }
 
-/// This computer's runtime, in the state folder `serve` and `mcp` share. A start runs in a thread of its own
-/// that goes on when the call that asked for it stops waiting.
 pub(super) struct Local {
     options: Options,
     state: Arc<(Mutex<Phase>, Condvar)>,
     builds: Mutex<Builds>,
-    /// The runtime whose network settings were checked (`network_differs`).
     network_checked: Mutex<Option<u32>>,
-    /// The state folder of the runtime this session started or found (`state_dir`), kept while it is
-    /// starting or ready, so that one alive in the other folder never makes it look gone (#434).
     pinned: Mutex<Option<PathBuf>>,
 }
 
-/// What `Local::other_build` has done so far.
 #[derive(Default)]
 struct Builds {
-    /// The runtime whose build was checked.
     checked: Option<u32>,
-    /// A runtime of another build was stopped. It is done once, so that two fronts of different builds don't take turns.
     stopped_one: bool,
-    /// The runtime of another build that was kept, and the agent told of.
     kept: Option<u32>,
 }
 
-/// What `Local::other_build` came to.
 pub(super) enum OtherBuild {
-    /// The runtime is this build's, was checked already, or is left for a call that may start one.
     Fine,
-    /// It was another build's and idle, and was stopped: the call starts one of this build.
     Stopped,
-    /// It is another build's and was kept: what to tell the agent, once.
     Kept(String),
 }
 
-/// How often a look waiting for another process's start looks again.
 const ANOTHER_START_POLL: Duration = Duration::from_millis(500);
 
 enum Phase {
-    /// The state folder says what runs.
     Idle,
-    /// A start is under way, at this step.
     Starting(String),
     Ready(Box<RuntimeInfo>),
-    /// A start ended with this, which every call is told until one asks to try again.
     Failed(String),
 }
 
@@ -161,28 +118,16 @@ impl Local {
         Local { options, state: Arc::new((Mutex::new(Phase::Idle), Condvar::new())), builds: Mutex::default(), network_checked: Mutex::default(), pinned: Mutex::default() }
     }
 
-    /// The state folder: the one of the runtime this session is starting or uses, else as `Options::state_dir`
-    /// decides it now. With no `--state-dir` that is the app's older folder only while a runtime there is alive.
     pub(super) fn state_dir(&self) -> PathBuf {
         let pinned = self.pinned.lock().unwrap().clone();
         pinned.unwrap_or_else(|| self.options.state_dir())
     }
 
-    /// Back to `Phase::Idle`: the folder is decided again at the next start or look.
     fn idle(&self, phase: &mut Phase) {
         *phase = Phase::Idle;
         *self.pinned.lock().unwrap() = None;
     }
 
-    /// This front lists its own build's tools, and the runtime it found running here (`runtime`) runs the
-    /// calls. One of another build that offers this build's interface (`core::INTERFACE`) is used as it is.
-    /// Otherwise, once per runtime: one another build started is stopped if a front started it in the
-    /// background (it ends itself when idle, so nobody relies on its port), no notebook is open in it, and
-    /// the call may start a runtime (`may_start`), so that the call starts one of this build. Any other is
-    /// kept, and the agent is told. A runtime with no notebook open is left for a call that may start one.
-    /// One of this build's interface whose Julia was removed since it started (`crate::julia_removed`), so
-    /// that no notebook can start in it, is stopped in the same way and the same once (#347); kept, it is
-    /// used as it is, and its calls say why they can't start a notebook.
     pub(super) fn other_build(&self, runtime: &RuntimeInfo, may_start: bool) -> OtherBuild {
         let mut builds = self.builds.lock().unwrap();
         if !runtime.reattached || builds.checked == Some(runtime.pid) {
@@ -221,10 +166,6 @@ impl Local {
         OtherBuild::Kept(other_build_notice(LOCAL, LOCAL, state.interface, open))
     }
 
-    /// What to tell the agent, once per runtime, when the runtime it found running here (`runtime`) was
-    /// started with other network settings than this session's (`crate::network_settings`): the runtime's
-    /// downloads, package installs among them, use the settings of the session that started it (#93). None
-    /// for a runtime this session started, or one whose record doesn't say.
     pub(super) fn network_differs(&self, runtime: &RuntimeInfo) -> Option<String> {
         let mut checked = self.network_checked.lock().unwrap();
         if !runtime.reattached || *checked == Some(runtime.pid) {
@@ -238,13 +179,10 @@ impl Local {
         (!differ.is_empty()).then(|| network_notice(&differ))
     }
 
-    /// Whether `pid` is a runtime of another build that `other_build` kept. One it left for a call that may
-    /// start a runtime isn't, since that call stops it.
     pub(super) fn kept(&self, pid: u32) -> bool {
         self.builds.lock().unwrap().kept == Some(pid)
     }
 
-    /// The phase, with a runtime that is no longer the one recorded forgotten. The state folder is read with the lock let go.
     fn phase(&self) -> MutexGuard<'_, Phase> {
         let ready = match &*self.state.0.lock().unwrap() {
             Phase::Ready(runtime) => Some(runtime.pid),
@@ -258,11 +196,8 @@ impl Local {
         phase
     }
 
-    /// The runtime recorded in the state folder, if there is one; none is started. One that is alive and
-    /// doesn't answer is asked again for up to `wait`, and counts as stuck once `silent_wait` has passed.
     fn look(&self, dir: &Path, wait: Duration) -> Outcome {
         let looked_at = Instant::now();
-        // Before the look: a core writes its record before it lets go of the lock.
         let starting = runtime::lock_state(dir).is_held();
         let mut looked = runtime::look(dir, false, true);
         if matches!(looked, Looked::Silent(_)) && !starting && !wait.is_zero() {
@@ -273,7 +208,6 @@ impl Local {
             looked = runtime::ask_again(dir, false, looked_at, wait.min(runtime::silent_wait()), pause).expect("a pause that never stops the wait");
         }
         match looked {
-            // A start another process has under way is a start under way, not nothing.
             Looked::NotRunning | Looked::Dead(_) | Looked::Silent(_) if starting => Outcome::StillWorking("Another process is starting Endeavor".into()),
             Looked::NotRunning | Looked::Dead(_) => Outcome::NothingRunning,
             Looked::Running(state, port) => Outcome::Ready(announce(dir, &state, port, false)),
@@ -309,17 +243,12 @@ impl Local {
     }
 }
 
-/// What the agent is told once about a runtime on the machine `name` (id `id`) that another build started
-/// and that doesn't offer this build's interface, whose core offers `interface`; `open` is how many notebooks
-/// are open in it, when that is known.
 pub(super) fn other_build_notice(name: &str, id: &str, interface: Option<u32>, open: Option<u32>) -> String {
     let place = if name == LOCAL { "this computer" } else { name };
     let open = open.filter(|n| *n > 0).map_or(String::new(), |n| format!(" It has {n} notebook{} open.", if n == 1 { "" } else { "s" }));
     format!("Note: {}", crate::other_version_text(place, id, interface, &open))
 }
 
-/// What the agent is told when the runtime here was started with other values of the network variables `differ`.
-/// Names only: a proxy's address can carry a password.
 pub(super) fn network_notice(differ: &[&str]) -> String {
     format!(
         "Note: Endeavor on this computer was started by another session, with other network settings than this session's ({}). Its downloads, package installs among them, use that session's settings. If one fails to reach the network, don't stop Endeavor yourself: tell the user, and ask whether to restart it, which closes the notebooks open in it. Only if the user says yes, call `stop_machine` with machine \"{LOCAL}\"; the next notebook call then starts it with this session's settings.",
@@ -327,9 +256,6 @@ pub(super) fn network_notice(differ: &[&str]) -> String {
     )
 }
 
-/// A runtime that was found or started, as the session uses it. The user is told on stderr where the
-/// notebooks are, and when another build started it. Not with the token: agents' clients keep stderr in
-/// their logs.
 fn announce(dir: &Path, state: &crate::State, port: u16, started: bool) -> RuntimeInfo {
     eprintln!("Endeavor's notebooks: http://localhost:{port}/ (`endeavor open` lets a browser in)");
     if let Some(message) = (!started).then(|| super::other_build(dir)).flatten() {
@@ -370,12 +296,10 @@ impl Provider for Local {
                     }
                     phase = self.state.1.wait_timeout(phase, left).unwrap().0;
                 }
-                // Looked at with the phase let go: a runtime that is slow to answer holds up no other call.
                 Phase::Idle if matches!(want, Want::Attach { .. }) => {
                     drop(phase);
                     let dir = self.state_dir();
                     let outcome = self.look(&dir, until.saturating_duration_since(Instant::now()));
-                    // A start another process has under way is waited for, like one of this process's.
                     let left = until.saturating_duration_since(Instant::now());
                     if matches!(outcome, Outcome::StillWorking(_)) && !left.is_zero() {
                         std::thread::sleep(left.min(ANOTHER_START_POLL));
@@ -401,7 +325,6 @@ impl Provider for Local {
 
     fn status(&self) -> Status {
         let (state, step) = match &*self.phase() {
-            // A start another process has under way is a start under way.
             Phase::Idle if runtime::lock_state(&self.state_dir()).is_held() => (State::Starting { queue: None }, None),
             Phase::Idle => (State::Connected, None),
             Phase::Starting(step) => (State::Starting { queue: None }, Some(step.clone()).filter(|step| !step.is_empty())),
@@ -413,13 +336,10 @@ impl Provider for Local {
 
     fn stop(&self, force: bool) -> Result<(), String> {
         let dir = &self.state_dir();
-        // First, so that a start another process has under way is waited for, not missed.
         let starting = super::stop_lock(dir)?;
         let (events, _) = mpsc::channel();
-        // Before the stop, which takes a while: a start of this process that ends by it is over by then.
         let began_here = matches!(*self.state.0.lock().unwrap(), Phase::Starting(_));
         let ended = runtime::end(dir, false, stopped::How::Connection, force, &events);
-        // Let go before waiting for this process's own start to settle: it may wait for the lock.
         drop(starting);
         let cancelled = matches!(ended, Ended::Cancelled(_));
         match ended {
@@ -430,7 +350,6 @@ impl Provider for Local {
             Ended::Unidentified => return Err(runtime::START_UNIDENTIFIED.into()),
         }
         let mut phase = self.state.0.lock().unwrap();
-        // A start of this process that was cancelled ends in a failure, which is its own doing and is not kept.
         if cancelled && began_here {
             let until = Instant::now() + Duration::from_secs(10);
             while matches!(*phase, Phase::Starting(_)) && Instant::now() < until {

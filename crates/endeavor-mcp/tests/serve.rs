@@ -1,6 +1,3 @@
-//! `endeavor serve` with a stand-in Julia (see `common`): how it ends when
-//! the runtime it started goes away.
-
 #![cfg(unix)]
 
 mod common;
@@ -11,9 +8,7 @@ use std::process::{Child, Command, Stdio};
 
 use common::*;
 
-/// `endeavor serve` with its state in `dir`, once it has said how to connect.
 fn serve(dir: &Path, bridge: &FakeBridge) -> Child {
-    // The stand-in bridge takes only its own token.
     std::fs::write(dir.join("token"), TOKEN).unwrap();
     let julia = serving_julia(dir, bridge);
     let mut serve = Command::new(env!("CARGO_BIN_EXE_endeavor"))
@@ -41,7 +36,6 @@ fn serve(dir: &Path, bridge: &FakeBridge) -> Child {
     serve
 }
 
-/// Wait for `serve` to end: its exit code and the last line it wrote to stderr.
 fn ended(serve: Child) -> (Option<i32>, String) {
     let output = serve.wait_with_output().unwrap();
     let said = String::from_utf8(output.stderr).unwrap();
@@ -68,7 +62,6 @@ fn julia_dying_ends_serve_with_an_error() {
     let bridge = FakeBridge::start(&dir);
     let serve = serve(&dir, &bridge);
     assert!(!dir.join("julia.pids").exists(), "serve starts no Julia until something needs it");
-    // The page's "Start Julia" link starts it, and is told it's starting.
     let record = read_json(&dir.join("runtime.json"));
     let (port, pages) = (record["port"].as_u64().unwrap() as u16, record["page_token"].as_str().unwrap().to_owned());
     let mut page = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();

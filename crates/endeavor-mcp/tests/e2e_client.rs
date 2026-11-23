@@ -1,17 +1,3 @@
-//! The client library over real ssh and real Julia: sign in with keys
-//! (`Auth::Batch`), install the helper into a folder of the test's own, start the
-//! runtime there, reach it through the local listener's port with the agent's
-//! MCP calls, then stop it. It's ignored by default and runs only when
-//! `ENDEAVOR_TEST_SSH_HOST` names a host that this user can `ssh` to with a key
-//! (`localhost` is one):
-//!
-//!     ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_client -- --ignored --nocapture
-//!
-//! Julia is `ENDEAVOR_E2E_JULIA` if set, else the app's own, else `julia` on the
-//! PATH, and it has to be at the same path on the host. Its depot is the test's
-//! own in the target folder, which keeps what Julia installs and compiles
-//! between runs, so the first run takes several minutes.
-
 #![cfg(unix)]
 
 mod common;
@@ -26,7 +12,6 @@ use common::find_julia;
 use endeavor_mcp::client::{Auth, Cancel, Event, Listener, Options, Server, StartOptions, Transport, connect, start};
 use serde_json::{Value, json};
 
-/// GET `target` on the listener's port with `token` as the bearer: the status line.
 fn get(port: u16, target: &str, token: &str) -> String {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write!(socket, "GET {target} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\r\n").unwrap();
@@ -35,7 +20,6 @@ fn get(port: u16, target: &str, token: &str) -> String {
     String::from_utf8_lossy(&reply).lines().next().unwrap_or_default().to_owned()
 }
 
-/// Every 64-digit hex word in the text files under `dir` (smaller than 1 MB), with its file.
 fn hex_keys(dir: &Path, keys: &mut Vec<(PathBuf, String)>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -53,8 +37,6 @@ fn hex_keys(dir: &Path, keys: &mut Vec<(PathBuf, String)>) {
     }
 }
 
-/// End the runtime recorded in `state`, if one runs: the core, Julia and its
-/// notebook workers are one process group.
 fn end_runtime(state: &Path) {
     let Ok(text) = std::fs::read_to_string(state.join("runtime.json")) else { return };
     if let Some(pid) = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["pid"].as_i64()).filter(|&p| p > 1) {
@@ -63,7 +45,6 @@ fn end_runtime(state: &Path) {
     }
 }
 
-/// A failed step leaves no Julia behind.
 struct EndsRuntime(PathBuf);
 
 impl Drop for EndsRuntime {
@@ -72,7 +53,6 @@ impl Drop for EndsRuntime {
     }
 }
 
-/// POST `body` to `/mcp` on the listener's port as the agent does: the status line and the body.
 fn mcp(port: u16, token: &str, message: &Value) -> (String, Value) {
     let body = message.to_string();
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -110,7 +90,6 @@ fn a_runtime_over_real_ssh() {
     }
     std::fs::create_dir_all(&depot).unwrap();
     let (root, state, depot) = (root.canonicalize().unwrap_or(root), state.canonicalize().unwrap_or(state), depot.canonicalize().unwrap());
-    // Ours first, where Julia writes; the app's behind it, read-only; the defaults last.
     let depot_path = match &app {
         Some(app) => format!("{}:{}:", depot.display(), app.join("depot").display()),
         None => format!("{}:", depot.display()),
@@ -158,7 +137,6 @@ fn a_runtime_over_real_ssh() {
     let (status, _) = mcp(runtime.port, "wrong", &json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {} }));
     assert_eq!(status, "HTTP/1.1 401 Unauthorized", "the token is checked");
 
-    // The MCP token opens neither the pages nor the engines (#100).
     assert_eq!(get(runtime.port, "/", &runtime.token), "HTTP/1.1 401 Unauthorized", "the MCP token on Pluto's page");
     assert_eq!(get(runtime.port, "/", &runtime.page_token), "HTTP/1.1 200 OK", "the pages' token on Pluto's page");
     match std::fs::read_to_string(state.join("julia.json")) {
@@ -174,7 +152,6 @@ fn a_runtime_over_real_ssh() {
         }
         Err(_) => eprintln!("julia.json isn't on this computer ({host} is another machine): /adapter not checked"),
     }
-    // The state folder, where the runtime writes its records and log (the install folder holds packages' own hashes).
     let mut keys = Vec::new();
     hex_keys(&state, &mut keys);
     for (file, key) in &keys {

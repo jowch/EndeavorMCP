@@ -1,9 +1,3 @@
-//! `endeavor status`: what Endeavor has on this computer, for a user or whoever helps them. It
-//! only reads. It makes no folder or file and starts and stops nothing. It asks the runtime
-//! recorded in the state folder for a local ping on 127.0.0.1, to know whether it answers: up to
-//! two pings of at most 5 seconds each (`look`), so at most about 10 seconds in all. There is no
-//! ssh and no other network request. It never prints the runtime's token.
-
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -14,18 +8,15 @@ use crate::paths::Env;
 use crate::runtime::{self, Looked};
 use crate::{embedded, hostname};
 
-/// Folders with more entries than this are not sized: a size that needs a deep walk is skipped.
 const SIZE_LIMIT: usize = 20_000;
 
 #[derive(Serialize)]
 struct Report {
     version: &'static str,
     build: &'static str,
-    /// The release this build was published as; none for a build that was not.
     release: Option<&'static str>,
     program: Option<PathBuf>,
     runtime: RuntimeReport,
-    /// The cluster state folder, only when it holds a record.
     cluster: Option<ClusterReport>,
     machines: MachinesReport,
     projects: ProjectsReport,
@@ -35,32 +26,19 @@ struct Report {
 #[derive(Serialize)]
 struct RuntimeReport {
     state_dir: PathBuf,
-    /// `not_running`, `running`, `stale` (recorded, its process gone) or `other_computer`
-    /// (recorded by another computer that shares the home folder, and not asked).
     state: &'static str,
-    /// A core holds `starting.lock`: a start is under way, whatever `state` says.
     starting: bool,
-    /// The process that holds it, as `starting.lock` names it, when it is that process; none for a core
-    /// of an older build, or one that has just taken the lock.
     starting_pid: Option<i32>,
-    /// The record's, for `running` and `stale` only; `other_computer` has its `node` alone.
     pid: Option<i32>,
     port: Option<u16>,
-    /// The computer that recorded it.
     node: Option<String>,
-    /// The build that started it.
     build: Option<String>,
-    /// Whether that is not this build (`running` only).
     other_build: Option<bool>,
-    /// What `standalone::other_build` says about it, when it is.
     other_build_note: Option<String>,
     folder: Option<String>,
-    /// It was started without a project folder; `folder` is then the home folder it works in.
     no_folder: Option<bool>,
     exits_when_idle: Option<bool>,
-    /// Whether it answered a ping; none when it was not asked.
     answers: Option<bool>,
-    /// `runtime.log`, if there is one.
     log: Option<PathBuf>,
 }
 
@@ -74,7 +52,6 @@ struct ClusterReport {
 struct MachinesReport {
     path: PathBuf,
     exists: bool,
-    /// Why nothing is listed from a file that is there.
     error: Option<String>,
     machines: Vec<MachineReport>,
 }
@@ -84,7 +61,6 @@ struct MachineReport {
     id: String,
     name: String,
     host: String,
-    /// Julia runs in Slurm jobs.
     slurm: bool,
 }
 
@@ -100,9 +76,7 @@ struct Folders {
     plugin_binaries: PluginBinaries,
     helpers: Folder,
     serve_runtime: Folder,
-    /// Named only: what the app and servers install into is never listed or sized.
     server_root: Folder,
-    /// Named only: it can be many GB.
     depot: Folder,
 }
 
@@ -231,7 +205,6 @@ fn folder(path: PathBuf, size: bool) -> Folder {
     Folder { path, exists, size_bytes }
 }
 
-/// The launcher keeps each build in a folder of its own.
 fn plugin_binaries(path: &Path) -> PluginBinaries {
     let mut builds: Vec<String> = std::fs::read_dir(path)
         .into_iter()
@@ -245,7 +218,6 @@ fn plugin_binaries(path: &Path) -> PluginBinaries {
     PluginBinaries { folder: folder(path.to_owned(), true), builds }
 }
 
-/// The size of the files under `path`, links not followed; none if there are more than `SIZE_LIMIT` entries or one can't be read.
 fn size_of(path: &Path) -> Option<u64> {
     let (mut total, mut entries, mut todo) = (0, 0, vec![path.to_owned()]);
     while let Some(dir) = todo.pop() {

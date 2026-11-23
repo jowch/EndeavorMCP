@@ -311,3 +311,24 @@ Still open:
 3. App: one listener port, page URL, bridge URL, guard. Built.
 4. Live check: done (This Mac, the OrbStack server, the Slurm VM).
 5. `endeavor serve`, `mcp` and `stop`. Built and checked.
+
+## The HTTP code (`http.rs`)
+
+Just enough HTTP/1.1 for the core to pass requests through to Pluto and
+Julia's bridge one at a time: heads, and bodies relayed as they arrive in
+the sender's framing (a length, chunks, or until the connection closes), so a
+stream of events reaches the client as it is written; a WebSocket's bytes
+after its upgrade; and whole requests and responses for what the core
+answers itself.
+
+- Heads are at most `MAX_HEAD` bytes. A header value can't end the head
+  early.
+- A body's framing is tracked as its bytes pass through unchanged, and
+  anything after it (a pipelined request) stays for the next.
+- A relayed event stream gives up as soon as the client hangs up: it may
+  write nothing for a long time, and the upstream end should close with it.
+  This isn't ported to Windows (it needs WSAPoll), so there a client that hangs
+  up is noticed only when a write to it fails.
+- `100 Continue` comes before the real response.
+- The loopback calls the core and helper make have a deadline for the whole
+  exchange, each read waiting only for what is left.

@@ -7,7 +7,6 @@ use serde_json::json;
 
 use super::*;
 
-/// A release served on 127.0.0.1: file name to contents. Its URL.
 fn serve(files: HashMap<String, Vec<u8>>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -44,19 +43,16 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 const KEY: &str = "4859266ddff1";
-/// The newest build: a script that answers `--version` as endeavor does.
 const NEW: &[u8] = b"#!/bin/sh\necho 'endeavor 0.1.0 (build 0.1.0-00000000000000aa)'\n";
 
 fn sha(bytes: &[u8]) -> String {
     release::sha256_hex(bytes)
 }
 
-/// A release with NEW for linux-x86_64, whose checksum file says `sum`.
 fn release(sum: &str) -> String {
     release_of(NEW, sum)
 }
 
-/// A release with `binary` for linux-x86_64, whose checksum file says `sum`.
 fn release_of(binary: &[u8], sum: &str) -> String {
     let name = format!("endeavor-{KEY}-linux-x86_64");
     serve(HashMap::from([
@@ -66,7 +62,6 @@ fn release_of(binary: &[u8], sum: &str) -> String {
     ]))
 }
 
-/// An old `endeavor` in `dir/bin`, updating from `release`.
 fn here(dir: &Path, release: String) -> Here {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -120,7 +115,6 @@ fn a_release_without_this_platform_or_unreachable_says_so() {
 #[test]
 fn the_build_main_pins_is_installed_checked_against_mains_checksum() {
     let dir = scratch("pinned");
-    // The release was tampered with: LATEST's binary and the checksum file agree, and main pins another build with its real checksum.
     let pinned = "00000000aaaa";
     let tampered: &[u8] = b"#!/bin/sh\necho tampered\n";
     let pin = |sum: &str| format!("{pinned}\n{}  endeavor-{pinned}-linux-aarch64\n{sum}  endeavor-{pinned}-linux-x86_64\n", sha(b"other")).into_bytes();
@@ -137,7 +131,6 @@ fn the_build_main_pins_is_installed_checked_against_mains_checksum() {
     assert!(error.contains("doesn't match the checksum main pins") && error.contains("is unchanged"), "{error}");
     assert_eq!(std::fs::read(&here.exe).unwrap(), b"old");
 
-    // The pinned build, not LATEST's, and no checksum file on the release for it.
     let release = serve(HashMap::from([
         ("LATEST".to_owned(), format!("{KEY}\n").into_bytes()),
         (format!("endeavor-{pinned}-linux-x86_64"), NEW.to_vec()),
@@ -158,12 +151,10 @@ fn a_pin_that_cant_be_read_or_has_no_checksums_changes_nothing() {
     here.pin = Some(format!("{release}/no-such-pin"));
     let error = update(&here).unwrap_err();
     assert!(error.starts_with("Couldn't read the build main pins") && error.contains("is unchanged") && error.ends_with("run it again with ENDEAVOR_PIN_URL=none."), "{error}");
-    // LATEST's file serves as a pin from before checksums were written: the key alone.
     here.pin = Some(format!("{release}/LATEST"));
     let error = update(&here).unwrap_err();
     assert!(error.contains("doesn't pin a build with checksums") && error.contains("ENDEAVOR_PIN_URL=none"), "{error}");
     assert_eq!(std::fs::read(&here.exe).unwrap(), b"old");
-    // No pin (ENDEAVOR_PIN_URL=none): LATEST, checked against the release's checksum file.
     here.pin = None;
     assert_eq!(update(&here).unwrap(), format!("Updated {} to the newest build ({KEY}).", here.exe.display()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -184,7 +175,6 @@ fn it_ends_with_how_to_switch_when_julia_runs_from_the_old_build() {
 
 #[test]
 fn a_new_binary_that_offers_the_runtimes_interface_says_nothing_of_it() {
-    // NEW from a build that prints its interface, as builds since it was printed do.
     const SAYS: &[u8] = b"#!/bin/sh\necho 'endeavor 0.1.0 (build 0.1.0-00000000000000bb)'\necho 'release 4859266ddff1'\necho 'interface 7'\n";
     let dir = scratch("same-interface");
     let here = here(&dir, release_of(SAYS, &sha(SAYS)));
@@ -194,7 +184,6 @@ fn a_new_binary_that_offers_the_runtimes_interface_says_nothing_of_it() {
     let message = update(&here).unwrap();
     assert_eq!(message, format!("Updated {} to the newest build ({KEY}).", here.exe.display()));
 
-    // Another number: the note, naming the new build.
     std::fs::write(&here.exe, "old").unwrap();
     std::fs::write(here.state_dir.join("runtime.json"), state(6).to_string()).unwrap();
     let message = update(&here).unwrap();
@@ -253,7 +242,6 @@ fn a_running_binary_is_renamed_aside_where_it_cant_be_overwritten() {
     assert_eq!((std::fs::read(&exe).unwrap(), std::fs::read(&aside).unwrap()), (b"new".to_vec(), b"old".to_vec()));
     assert!(!part.exists());
 
-    // A new binary that can't be moved in puts the old one back.
     std::fs::remove_file(&aside).unwrap();
     let error = put_in_place(&dir.join("missing"), &exe, true).unwrap_err();
     assert!(error.starts_with(&format!("Couldn't replace {}", exe.display())), "{error}");

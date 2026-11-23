@@ -1,14 +1,3 @@
-//! Endeavor's own Julia (`--julia own`) for real: downloaded into the cache folder,
-//! and added to juliaup. Each test runs with a HOME of its own in the target folder.
-//! They download Julia (about 300 MB each), so they're ignored by default:
-//!
-//!     ENDEAVOR_TEST_JULIAUP=/path/to/juliaup cargo test -p endeavor-mcp --test own_julia -- --ignored --nocapture --test-threads 1
-//!
-//! The juliaup tests copy the folder of `ENDEAVOR_TEST_JULIAUP` (juliaup and its
-//! `julialauncher`, as juliaup's release tarball has them) into that HOME's
-//! `.juliaup/bin`, where juliaup's installer puts them, and add the `release`
-//! channel as the installer does, so 1.12.6 is not juliaup's default.
-
 #![cfg(unix)]
 
 #[path = "common/exec.rs"]
@@ -21,7 +10,6 @@ use endeavor_mcp::julia::{self, OwnFrom, Source};
 
 const VERSION: &str = julia::JULIA_VERSION;
 
-/// An empty HOME of the test's own, set for this process.
 fn home(name: &str) -> PathBuf {
     let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("own-julia").join(name);
     let _ = std::fs::remove_dir_all(&home);
@@ -34,16 +22,12 @@ fn home(name: &str) -> PathBuf {
     home
 }
 
-/// A HOME with juliaup in it, set up as its installer leaves it: the `release` channel is the default.
 fn home_with_juliaup(name: &str) -> (PathBuf, PathBuf) {
     let (home, juliaup) = home_with_bare_juliaup(name);
     assert!(Command::new(&juliaup).args(["add", "release"]).status().unwrap().success());
     (home, juliaup)
 }
 
-/// A HOME with juliaup in it and no channels yet, as the Microsoft Store leaves it on Windows. Its
-/// `juliaup` is a wrapper that fails as asked: listing the channels as many more times as the file
-/// `fail-list` beside it says, and adding a channel while there is a file `fail-add`.
 fn home_with_bare_juliaup(name: &str) -> (PathBuf, PathBuf) {
     let given = PathBuf::from(std::env::var("ENDEAVOR_TEST_JULIAUP").expect("set ENDEAVOR_TEST_JULIAUP to a juliaup program"));
     let home = home(name);
@@ -141,7 +125,6 @@ fn a_channel_the_person_added_stays_theirs() {
 fn a_channel_the_person_added_isnt_taken_for_endeavors_when_juliaup_cant_list_its_channels() {
     let (_home, juliaup) = home_with_juliaup("theirs-unlisted");
     assert!(Command::new(&juliaup).args(["add", VERSION]).status().unwrap().success());
-    // The look for an installed Julia and the look before adding both fail; juliaup counts the add as done.
     std::fs::write(juliaup.with_file_name("fail-list"), "2").unwrap();
     let own = julia::install_own(&mut |_| {}).unwrap();
     assert_eq!(own.from, OwnFrom::Juliaup { added: false, default: false });

@@ -1,10 +1,3 @@
-//! The helper binary against a stand-in runtime (a `sleep` process plus a
-//! small server on its one loopback port), or the core it starts over a
-//! stand-in Julia, so no Julia is needed: file requests before any runtime,
-//! attaching on request, relaying, several clients on one runtime, a runtime
-//! from before one port per runtime, and each way a connection ends.
-
-// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
 #![allow(clippy::disallowed_methods)]
 
 #![cfg(unix)]
@@ -25,9 +18,6 @@ use wire::{ToApp, ToHelper};
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-/// A runtime as the helper sees one: a live pid and one port, whose calls
-/// check the token and exit the "runtime" on `endeavor/shutdown`, and whose
-/// other paths stand for Pluto's WebSocket: switched, then echoed.
 struct FakeRuntime {
     process: Arc<Mutex<Child>>,
     pid: u32,
@@ -38,12 +28,10 @@ impl FakeRuntime {
         FakeRuntime::start_as(dir, node, serde_json::json!({ "launcher": "process" }), Duration::ZERO)
     }
 
-    /// One that takes `delay` to exit after it's asked to shut down.
     fn slow_to_exit(dir: &Path, node: &str, delay: Duration) -> FakeRuntime {
         FakeRuntime::start_as(dir, node, serde_json::json!({ "launcher": "process" }), delay)
     }
 
-    /// One a Slurm job started: `node-start` wrote its state, with the job's id.
     fn in_job(dir: &Path, node: &str, job: &str) -> FakeRuntime {
         FakeRuntime::start_as(dir, node, serde_json::json!({ "launcher": "slurm", "job": job }), Duration::ZERO)
     }
@@ -52,19 +40,14 @@ impl FakeRuntime {
         FakeRuntime::listing(dir, node, state, delay, TWO_NOTEBOOKS)
     }
 
-    /// One whose `list_notebooks` answers `notebooks`, a JSON list.
     fn listing(dir: &Path, node: &str, state: serde_json::Value, delay: Duration, notebooks: &'static str) -> FakeRuntime {
         FakeRuntime::serving(dir, node, state, delay, notebooks, None)
     }
 
-    /// One whose `list_notebooks` answers `notebooks`, and whose `endeavor/julia_status` names `julia` as
-    /// the Julia it started.
     fn running_julia(dir: &Path, node: &str, state: serde_json::Value, notebooks: &'static str, julia: PathBuf) -> FakeRuntime {
         FakeRuntime::serving(dir, node, state, Duration::ZERO, notebooks, Some(julia))
     }
 
-    /// One that takes `delay` to exit, whose `list_notebooks` answers `notebooks`, and whose
-    /// `endeavor/julia_status` names `julia` as the Julia it started (none: Julia hasn't started).
     fn serving(dir: &Path, node: &str, mut state: serde_json::Value, delay: Duration, notebooks: &'static str, julia: Option<PathBuf>) -> FakeRuntime {
         let process = Command::new("sleep").arg("600").process_group(0).spawn().unwrap();
         let pid = process.id();
@@ -107,7 +90,6 @@ fn serve(handle: impl Fn(TcpStream) + Send + Sync + 'static) -> u16 {
     port
 }
 
-/// What a stand-in runtime's `list_notebooks` answers unless a test says otherwise: two notebooks are open.
 const TWO_NOTEBOOKS: &str = r#"[{"path":"a.jl"},{"path":"b.jl"}]"#;
 
 fn one_port(mut socket: TcpStream, process: &Mutex<Child>, delay: Duration, notebooks: &str, julia: Option<&Path>) {
@@ -179,7 +161,6 @@ impl Helper {
     }
 }
 
-/// A relayed connection to Pluto's WebSocket, switched and ready to echo, with the pages' token `pages`.
 fn websocket(helper: &Helper, pages: &str) -> TcpStream {
     let mut socket = helper.connect();
     write!(socket, "GET /channels HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {pages}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n").unwrap();
@@ -200,7 +181,6 @@ fn state_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// A call relayed through `helper` to the runtime's port.
 fn call(helper: &Helper) -> String {
     let mut call = helper.connect();
     write!(call, "POST /endeavor/call HTTP/1.0\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
@@ -220,7 +200,6 @@ fn several_helpers_attach_and_one_stop_ends_the_runtime_for_all() {
     assert_eq!((launcher.as_str(), node.as_str(), pid), ("process", "labbox3", runtime.pid));
     assert_eq!((token.as_str(), reattached), (TOKEN, true));
 
-    // Both Pluto's WebSocket and the app's calls go to the runtime's one port.
     let mut pluto = websocket(&first, "p");
     pluto.write_all(b"over the relay").unwrap();
     let mut back = [0; 14];
@@ -228,7 +207,6 @@ fn several_helpers_attach_and_one_stop_ends_the_runtime_for_all() {
     assert_eq!(&back, b"over the relay");
     assert!(call(&first).starts_with("HTTP/1.1 200") && call(&first).ends_with(CALL_REPLY_ENDS));
 
-    // A second client attaches to the same runtime; the first goes on, unasked.
     let mut second = Helper::start(&dir, &["--any-node", "--quit-with-client"]);
     let ToApp::Ready { pid: second_pid, reattached, .. } = second.start_runtime() else { unreachable!() };
     assert_eq!((second_pid, reattached), (runtime.pid, true));
@@ -241,7 +219,6 @@ fn several_helpers_attach_and_one_stop_ends_the_runtime_for_all() {
     pluto.read_exact(&mut back).unwrap();
     assert_eq!(&back, b"still here");
 
-    // The first leaving leaves the runtime to the second.
     first.send(ToHelper::Detach);
     first.exits();
     let mut rest = Vec::new();
@@ -249,7 +226,6 @@ fn several_helpers_attach_and_one_stop_ends_the_runtime_for_all() {
     assert!(runtime.alive() && second.control.try_recv().is_err());
     assert!(call(&second).ends_with(CALL_REPLY_ENDS));
 
-    // Stop from one connection ends the runtime for the other, which says why.
     let mut third = Helper::start(&dir, &["--any-node"]);
     assert!(matches!(third.start_runtime(), ToApp::Ready { reattached: true, .. }));
     let stop = second.request_stop();
@@ -285,7 +261,6 @@ fn ready_says_the_build_and_interface_the_runtime_recorded_and_none_for_a_record
     assert_eq!((build, interface), (None, None));
 }
 
-/// The next message after any progress lines and the Julia found, and those lines.
 fn after_lines(helper: &Helper) -> (ToApp, Vec<String>) {
     let mut lines = Vec::new();
     loop {
@@ -299,7 +274,6 @@ fn after_lines(helper: &Helper) -> (ToApp, Vec<String>) {
 
 #[test]
 fn a_runtime_an_older_version_started_with_no_notebook_open_is_stopped_for_this_version() {
-    // No interface recorded, as a build from before it was: an older version's, without R notebooks (#226).
     let dir = state_dir("older-idle");
     let older = FakeRuntime::listing(&dir, "labbox3", serde_json::json!({ "launcher": "process", "build": "0.1.0-0ld" }), Duration::ZERO, "[]");
     let bridge = common::FakeBridge::start(&dir);
@@ -320,14 +294,12 @@ fn a_runtime_an_older_version_started_with_no_notebook_open_is_stopped_for_this_
     helper.exits();
 }
 
-/// A record of this build's interface, on `node`.
 fn this_interface() -> serde_json::Value {
     serde_json::json!({ "launcher": "process", "build": "0.1.0-same", "interface": endeavor_mcp::CORE_INTERFACE })
 }
 
 #[test]
 fn a_runtime_whose_julia_was_removed_with_no_notebook_open_is_stopped_for_a_new_one() {
-    // juliaup removed the version it runs on (#347): no notebook could start in it.
     let dir = state_dir("julia-removed-idle");
     let removed = dir.join("julia-1.12.5").join("bin").join("julia");
     let stale = FakeRuntime::running_julia(&dir, &this_host(), this_interface(), "[]", removed);
@@ -365,9 +337,7 @@ fn a_runtime_whose_julia_was_removed_is_kept_while_a_notebook_is_open_or_on_anot
     };
     let gone = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-such-julia").join("bin").join("julia");
     kept("julia-removed-open", &this_host(), TWO_NOTEBOOKS, gone.clone());
-    // Where Julia is on another computer can't be looked at from here.
     kept("julia-removed-elsewhere", "labbox3", "[]", gone);
-    // It is there: this test's own program stands for it.
     kept("julia-there", &this_host(), "[]", std::env::current_exe().unwrap());
 }
 
@@ -443,9 +413,6 @@ fn without_a_state_dir_the_helper_uses_the_folder_serve_and_mcp_use() {
     helper.exits();
 }
 
-/// The app kept a server's runtime in `~/.cache/endeavor/state` before it used the plugin's folder (#110):
-/// while one there is alive, the helper, `status` and `stop` keep to it, so the app's notebooks aren't
-/// opened again in a second runtime.
 #[test]
 fn without_a_state_dir_a_runtime_alive_in_the_apps_older_folder_is_kept_until_it_stops() {
     let dir = state_dir("apps-old-folder");
@@ -479,8 +446,6 @@ fn without_a_state_dir_a_runtime_alive_in_the_apps_older_folder_is_kept_until_it
     assert!(said.contains(&xdg.join("endeavor/serve").join(this_host()).display().to_string()), "once it stops, the plugin's folder: {said}");
 }
 
-/// Restart Julia after the runtime in the app's older folder stopped: the start goes over the same
-/// connection, and is in the plugin's folder, not again in the older one (#434).
 #[test]
 fn without_a_state_dir_a_restart_after_the_older_folders_runtime_stopped_is_in_the_plugins_folder() {
     let dir = state_dir("apps-old-folder-restart");
@@ -519,9 +484,6 @@ fn without_a_state_dir_a_restart_after_the_older_folders_runtime_stopped_is_in_t
     helper.exits();
 }
 
-/// A connection that only browses (nothing attached) decides the folder when it checks or starts, not when
-/// it began: once the runtime in the app's older folder stopped and the plugin started one in its own
-/// folder, the check finds that one and a start joins it (#434).
 #[test]
 fn without_a_state_dir_an_idle_connection_finds_the_plugins_runtime_once_the_older_one_stopped() {
     let dir = state_dir("apps-old-folder-idle");
@@ -555,7 +517,6 @@ fn without_a_state_dir_an_idle_connection_finds_the_plugins_runtime_once_the_old
     helper.exits();
 }
 
-/// The next message that isn't about how the start is going.
 fn after_start(helper: &Helper) -> ToApp {
     loop {
         match helper.next() {
@@ -565,7 +526,6 @@ fn after_start(helper: &Helper) -> ToApp {
     }
 }
 
-/// The processes whose command line has `needle`.
 fn running(needle: &str) -> usize {
     let out = Command::new("ps").args(["-eo", "args="]).output().unwrap();
     String::from_utf8_lossy(&out.stdout).lines().filter(|l| l.contains(needle)).count()
@@ -588,7 +548,6 @@ fn helpers_asked_to_start_at_once_start_one_runtime_that_serve_then_finds() {
     assert_eq!(running(&format!("core --state-dir {}", dir.display())), 1);
     assert!(a_again != b_again, "one started it and the other attached: {a_again} {b_again}");
 
-    // `serve` in the same folder finds it, and hears when a helper stops it.
     let mut serve = serve_in(&dir);
     let stop = first.request_stop();
     assert_eq!(first.next(), ToApp::Stopped { id: stop });
@@ -603,7 +562,6 @@ fn helpers_asked_to_start_at_once_start_one_runtime_that_serve_then_finds() {
         helper.exits();
     }
 
-    // The next runtime clears the note the stop left, and `endeavor stop` tells both what it was.
     assert!(std::fs::read_to_string(dir.join("stopped")).unwrap().ends_with(" connection"));
     let mut again = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
     again.hello();
@@ -622,7 +580,6 @@ fn helpers_asked_to_start_at_once_start_one_runtime_that_serve_then_finds() {
     again.exits();
 }
 
-/// The cores started for `dir`, ended by pid when the test is over.
 struct Cores(PathBuf);
 
 impl Cores {
@@ -644,7 +601,6 @@ impl Drop for Cores {
     }
 }
 
-/// A helper that has asked for a runtime whose Julia is held back, and heard the first line of its log.
 fn held_start(dir: &Path, julia: &Path, flags: &[&str]) -> Helper {
     let home = dir.join("home").display().to_string();
     let env = [("HOME", home.as_str()), ("XDG_STATE_HOME", home.as_str()), ("XDG_CONFIG_HOME", home.as_str()), ("XDG_CACHE_HOME", home.as_str())];
@@ -658,8 +614,6 @@ fn held_start(dir: &Path, julia: &Path, flags: &[&str]) -> Helper {
     }
 }
 
-/// `leave` ends the client of a start that is held back; the core goes on, and a helper that asks while it is still
-/// starting waits for it and attaches to it.
 fn a_start_outlives_its_client(name: &str, leave: impl FnOnce(&mut Helper)) {
     let dir = state_dir(name);
     let cores = Cores(dir.clone());
@@ -723,8 +677,6 @@ fn a_stop_ends_a_start_and_so_does_the_end_of_input_where_the_runtime_goes_with_
     common::wait_for("the core to end", || !common::pid_alive(core));
 }
 
-/// What the app's Test connection asks for: a start of its own goes with the client, whether still starting or
-/// ready, and one it waited for or found running is left.
 #[test]
 fn the_end_of_input_stops_only_a_start_of_its_own_with_own_with_client() {
     let (dir, cores, julia) = held_dir("start-own-eof");
@@ -767,7 +719,6 @@ fn the_end_of_input_stops_only_a_start_of_its_own_with_own_with_client() {
     assert!(!dir.join("runtime.json").exists());
     first.stdin.0.lock().unwrap().take();
 
-    // A core that starts Julia only when needed is ready at once, and goes the same way.
     let mut lazy = Helper::start(&dir, &["--julia-when-needed", "--own-with-client"]);
     assert!(matches!(lazy.start_runtime(), ToApp::Ready { reattached: false, .. }));
     let core = cores.pids()[0];
@@ -777,13 +728,10 @@ fn the_end_of_input_stops_only_a_start_of_its_own_with_own_with_client() {
     assert!(!dir.join("runtime.json").exists());
 }
 
-/// The app's Keep running setting changes while its helper runs (app #245): an app that is then killed
-/// leaves its runtime, or stops the one it started, as the setting says now, not as it was at the start.
 #[test]
 fn the_end_of_input_does_what_the_keep_running_setting_says_now() {
     let (dir, cores, _julia) = held_dir("start-own-changed");
     std::fs::remove_file(dir.join("hold")).unwrap();
-    // Started with Keep running off, then turned on: the app is killed and the runtime stays.
     let mut kept = Helper::start(&dir, &["--julia-when-needed", "--own-with-client"]);
     assert!(matches!(kept.start_runtime(), ToApp::Ready { reattached: false, .. }));
     let core = cores.pids()[0];
@@ -799,7 +747,6 @@ fn the_end_of_input_does_what_the_keep_running_setting_says_now() {
     common::wait_for("the core to end", || !common::pid_alive(core));
     drop(stopper);
 
-    // Started with Keep running on, then turned off: the runtime goes with the app.
     let mut own = Helper::start(&dir, &["--julia-when-needed"]);
     assert!(matches!(own.start_runtime(), ToApp::Ready { reattached: false, .. }));
     let core = cores.pids()[0];
@@ -810,15 +757,11 @@ fn the_end_of_input_does_what_the_keep_running_setting_says_now() {
     assert!(!dir.join("runtime.json").exists());
 }
 
-/// The app goes and leaves its runtime running (app #274): with `--exit-idle-after-client` the runtime then
-/// ends once no notebook has been open in it for a while, rather than never; an app that comes back first
-/// takes it back.
 #[test]
 fn a_runtime_the_app_leaves_running_ends_once_idle_unless_the_app_is_back() {
     let (dir, cores, _julia) = held_dir("left-running-idle");
     std::fs::remove_file(dir.join("hold")).unwrap();
     let record = || serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(dir.join("runtime.json")).unwrap_or_default()).unwrap_or_default();
-    // A quit, then the app is back before the runtime has been empty long enough.
     let slow = [("ENDEAVOR_TEST_LEFT_GRACE_SECS", "600")];
     let mut app = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--julia-when-needed", "--exit-idle-after-client"], &slow);
     assert!(matches!(app.start_runtime(), ToApp::Ready { reattached: false, .. }));
@@ -832,7 +775,6 @@ fn a_runtime_the_app_leaves_running_ends_once_idle_unless_the_app_is_back() {
     assert!(matches!(again.start_runtime(), ToApp::Ready { reattached: true, .. }));
     common::wait_for("the app to take it back", || record()["exits_when_idle"] == false);
 
-    // Killed: the end of input does the same, and with no notebook open it then ends.
     again.stdin.0.lock().unwrap().take();
     again.exits();
     assert_eq!(record()["exits_when_idle"], true);
@@ -853,7 +795,6 @@ fn a_runtime_the_app_leaves_running_ends_once_idle_unless_the_app_is_back() {
     common::wait_for("the idle runtime to end", || !common::pid_alive(core));
     assert!(!dir.join("runtime.json").exists());
 
-    // Without the flag (a server's helper), a runtime left running stays.
     let mut server = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--julia-when-needed"], &fast);
     assert!(matches!(server.start_runtime(), ToApp::Ready { reattached: false, .. }));
     let core = cores.pids()[0];
@@ -868,8 +809,6 @@ fn a_runtime_the_app_leaves_running_ends_once_idle_unless_the_app_is_back() {
     common::wait_for("the core to end", || !common::pid_alive(core));
 }
 
-/// Keep running turned on while a start of the helper's own is still under way: the app is then killed,
-/// and the start goes on and is recorded (app #245), its lifeline let go.
 #[cfg(unix)]
 #[test]
 fn a_start_goes_on_when_keep_running_is_turned_on_before_it_is_ready_and_the_app_is_killed() {
@@ -891,9 +830,6 @@ fn a_start_goes_on_when_keep_running_is_turned_on_before_it_is_ready_and_the_app
     stopper.exits();
 }
 
-/// A helper with `--own-with-client` that is killed outright, as some ssh servers do when the client goes,
-/// can't stop the start it began; the core then stops it itself (#95). One the app already has, or that the
-/// app detached from while it started, is left.
 #[cfg(unix)]
 #[test]
 fn a_start_of_its_own_ends_when_its_helper_is_killed_before_the_app_has_it() {
@@ -930,7 +866,6 @@ fn a_start_of_its_own_ends_when_its_helper_is_killed_before_the_app_has_it() {
     assert!(common::pid_alive(core) && dir.join("runtime.json").exists(), "a runtime the app has is left");
 }
 
-/// `dir` with a fake Julia that is held back, and the guard that ends the cores started in it.
 fn held_dir(name: &str) -> (PathBuf, Cores, PathBuf) {
     let dir = state_dir(name);
     let cores = Cores(dir.clone());
@@ -941,7 +876,6 @@ fn held_dir(name: &str) -> (PathBuf, Cores, PathBuf) {
     (dir, cores, julia)
 }
 
-/// A binary of ours run in `dir`'s own folders.
 fn endeavor(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
     command.args(args).arg("--state-dir").arg(dir);
@@ -959,7 +893,6 @@ fn a_stop_during_a_start_whose_client_has_gone_stops_nothing_and_says_it_is_stil
     helper.send(ToHelper::Detach);
     helper.exits();
 
-    // The lock the stop needs is held for a moment only, and the stop waits for it a while.
     let held = hold_start_lock(&dir);
     let refused = endeavor(&dir, &["stop"]).env("ENDEAVOR_STOP_LOCK_SECS", "1").output().unwrap();
     assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("Endeavor was not stopped"), "{refused:?}");
@@ -976,7 +909,6 @@ fn a_stop_during_a_start_whose_client_has_gone_stops_nothing_and_says_it_is_stil
     assert!(message.contains("still starting"), "{message}");
     assert!(common::pid_alive(core) && cores.pids() == [core], "nothing was stopped");
 
-    // It comes up, and is then found and stopped as usual.
     std::fs::remove_file(dir.join("hold")).unwrap();
     other.request_start(None, true);
     let ToApp::Ready { pid, reattached, .. } = after_start(&other) else { panic!("expected Ready") };
@@ -988,7 +920,6 @@ fn a_stop_during_a_start_whose_client_has_gone_stops_nothing_and_says_it_is_stil
     other.exits();
 }
 
-/// Whether nothing holds `starting.lock` in `dir`.
 fn start_lock_free(dir: &Path) -> bool {
     std::fs::File::open(dir.join("starting.lock")).is_ok_and(|file| file.try_lock_shared().is_ok())
 }
@@ -1001,11 +932,9 @@ fn a_forced_stop_cancels_a_start_that_is_under_way_and_leaves_nothing_of_it() {
     let julia_pid = common::julia_pids(&dir)[0];
     first.send(ToHelper::Detach);
     first.exits();
-    // Another client waits for the start the first began.
     let waiter = held_start(&dir, &julia, &[]);
     assert_eq!(cores.pids(), [core]);
 
-    // The helper's check, which a client asks after a reconnect, sees the start.
     let mut asker = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
     asker.hello();
     assert_eq!(check(&asker, 70), RuntimeState::Starting);
@@ -1036,7 +965,6 @@ fn a_forced_stop_cancels_a_start_that_is_under_way_and_leaves_nothing_of_it() {
     asker.stdin.0.lock().unwrap().take();
     asker.exits();
 
-    // Nothing is in the way of the next start.
     std::fs::remove_file(dir.join("hold")).unwrap();
     let mut next = Helper::start_with(&dir, &["--julia", julia.to_str().unwrap()], &[]);
     next.hello();
@@ -1059,7 +987,6 @@ fn a_forced_stop_from_a_helper_cancels_a_start_another_connection_began() {
     first.send(ToHelper::Detach);
     first.exits();
 
-    // A connection that waits for that start: an unforced stop ends its wait, leaves the start alone and says so.
     let waiter = held_start(&dir, &julia, &[]);
     let stop = waiter.request_stop();
     assert_eq!(waiter.after_progress(), ToApp::StartCancelled { id: 1 });
@@ -1067,7 +994,6 @@ fn a_forced_stop_from_a_helper_cancels_a_start_another_connection_began() {
     assert!(id == stop && message.contains("still starting"), "{message}");
     assert!(common::pid_alive(core), "the start goes on");
 
-    // A forced one cancels it, and is answered once it is gone.
     waiter.request_start(None, true);
     let stop = waiter.request_stop_as(true);
     let ToApp::StartCancelled { .. } = waiter.after_progress() else { panic!("expected StartCancelled") };
@@ -1078,7 +1004,6 @@ fn a_forced_stop_from_a_helper_cancels_a_start_another_connection_began() {
     assert_eq!(std::fs::read_to_string(dir.join("stopped")).unwrap(), format!("{core} connection"), "the clients are told why");
     drop(waiter);
 
-    // A connection that isn't waiting: unforced, nothing is stopped; forced, the start is cancelled.
     let mut first = held_start(&dir, &julia, &[]);
     let core = cores.pids()[0];
     first.send(ToHelper::Detach);
@@ -1111,12 +1036,10 @@ fn an_attach_that_waits_for_a_start_never_starts_a_runtime_when_that_start_dies(
         let id = helper.request_attach();
         (helper, id)
     };
-    // Nothing runs and nothing starts: it says so, and starts nothing.
     let (none, id) = attaching();
     assert_eq!(none.after_progress(), ToApp::NotRunning { id });
     assert!(cores.pids().is_empty() && common::julia_pids(&dir).is_empty(), "nothing was started");
 
-    // A start is under way: the attach waits for it, and when it dies says nothing runs.
     let mut first = held_start(&dir, &julia, &[]);
     let core = cores.pids()[0];
     first.send(ToHelper::Detach);
@@ -1130,7 +1053,6 @@ fn an_attach_that_waits_for_a_start_never_starts_a_runtime_when_that_start_dies(
     assert!(cores.pids().is_empty(), "no core was started in its place: {:?}", cores.pids());
     assert_eq!(common::julia_pids(&dir).len(), 1, "exactly one Julia ran, the one that was waited for");
 
-    // One that comes up is attached to.
     let mut second = held_start(&dir, &julia, &[]);
     let (attached, id) = attaching();
     std::thread::sleep(Duration::from_millis(300));
@@ -1145,7 +1067,6 @@ fn an_attach_that_waits_for_a_start_never_starts_a_runtime_when_that_start_dies(
 fn the_helpers_check_says_a_start_is_under_way_beside_a_hung_runtime_and_not_after_it() {
     let dir = state_dir("check-silent");
     let runtime = FakeRuntime::start(&dir, &this_host());
-    // Its port stops answering: a runtime that hangs.
     let port = silent();
     let mut state = common::read_json(&dir.join("runtime.json"));
     state["port"] = port.into();
@@ -1156,9 +1077,6 @@ fn the_helpers_check_says_a_start_is_under_way_beside_a_hung_runtime_and_not_aft
     let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("starting.lock")).unwrap();
     lock.lock().unwrap();
     assert_eq!(check(&helper, 2), RuntimeState::Starting, "its replacement is on the way");
-    // Unlocked, not only closed: a child another test spawns at this moment holds a copy of the
-    // descriptor until it execs, and a flock lasts until every copy is closed, but an unlock ends it for
-    // all of them (#212).
     lock.unlock().unwrap();
     drop(lock);
     assert_eq!(check(&helper, 3), RuntimeState::NotRunning);
@@ -1166,8 +1084,6 @@ fn the_helpers_check_says_a_start_is_under_way_beside_a_hung_runtime_and_not_aft
     helper.stdin.0.lock().unwrap().take();
 }
 
-/// A runtime's port that takes connections and says nothing for `quiet`, as a computer waking from sleep
-/// or a runtime under heavy load does, and then answers every call.
 fn quiet_for(quiet: Duration) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1177,7 +1093,6 @@ fn quiet_for(quiet: Duration) -> u16 {
             if std::time::Instant::now() < until {
                 continue;
             }
-            // The whole request first: answering and closing with part of it unread resets the connection.
             let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
             while socket.read(&mut [0; 1024]).is_ok_and(|n| n > 0) {}
             let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
@@ -1186,13 +1101,10 @@ fn quiet_for(quiet: Duration) -> u16 {
     port
 }
 
-/// A runtime's port that never answers. It stays bound for the whole test run: a port bound and let
-/// go at once could be taken by a test running beside it, and then the silent runtime answers (#253).
 fn silent() -> u16 {
     quiet_for(Duration::from_secs(24 * 3600))
 }
 
-/// The runtime recorded in `dir` now listens on `port`.
 fn record_port(dir: &Path, port: u16) {
     let mut state = common::read_json(&dir.join("runtime.json"));
     state["port"] = port.into();
@@ -1227,7 +1139,6 @@ fn a_stop_while_a_silent_runtime_is_asked_again_stops_it_as_a_stop_with_nothing_
     helper.hello();
     let start = helper.request_start(None, true);
     assert!(matches!(helper.next(), ToApp::Progress { line } if line.contains("isn't answering")));
-    // The start doesn't stop what it didn't begin; the stop that ends its wait does, as the user asked.
     let stop = helper.request_stop();
     assert_eq!(helper.after_progress(), ToApp::StartCancelled { id: start });
     assert_eq!(helper.after_progress(), ToApp::Stopped { id: stop });
@@ -1269,7 +1180,6 @@ fn a_forced_stop_does_not_end_a_core_the_file_does_not_name() {
     let core = cores.pids()[0];
     first.send(ToHelper::Detach);
     first.exits();
-    // The file names the core by its pid, start time and computer; a signal goes on all three, never on a guess.
     let named = common::read_json(&dir.join("starting.lock"));
     assert_eq!((named["pid"].as_i64(), named["node"].as_str()), (Some(core as i64), Some(this_host().as_str())), "the core names itself: {named}");
     for (what, change) in [("a start time that is not its own", ("started", serde_json::json!(1))), ("no start time", ("started", serde_json::Value::Null)), ("another computer", ("node", serde_json::json!("another-node")))] {
@@ -1291,7 +1201,6 @@ fn a_recorded_pid_that_started_at_another_time_is_stale_and_a_stop_leaves_the_pr
         state["started"] = started;
         std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
     };
-    // The pid belongs to a process that did not start then: a record from before a reboot.
     record(serde_json::json!(1));
     let status: serde_json::Value = serde_json::from_slice(&endeavor(&dir, &["status", "--json"]).output().unwrap().stdout).unwrap();
     assert_eq!((status["runtime"]["state"].clone(), status["runtime"]["answers"].clone()), (serde_json::json!("stale"), serde_json::Value::Null), "{status}");
@@ -1338,8 +1247,6 @@ fn the_julia_a_killed_core_leaves_behind_is_stopped_before_the_next_start() {
     // SAFETY: plain syscall, on the core alone, as an OOM kill or `kill -9` would end it.
     unsafe { libc::kill(core as i32, libc::SIGKILL) };
     common::wait_for("the core to end", || !common::pid_alive(core as i32));
-    // Julia ends with its core: on Linux by PR_SET_PDEATHSIG, on macOS by the watcher the core started with it.
-    // Which comes first, that or the next start, is a race, so either may stop it.
     assert!(dir.join("runtime.json").exists(), "the killed core left its record");
 
     std::fs::write(dir.join("hold"), "").unwrap();
@@ -1372,13 +1279,11 @@ fn a_helper_whose_binary_was_replaced_never_starts_a_core_of_the_new_build() {
     command.args(["connect", "--state-dir"]).arg(&dir).args(["--runtime", "/nonexistent", "--depot", "/nonexistent", "--julia", julia.to_str().unwrap()]);
     let mut helper = Helper::spawn(command);
     helper.hello();
-    // As `endeavor update` puts a new build in place: renamed over the running one.
     let part = bin.join("endeavor.part");
     common::write_executable(&part, "#!/bin/sh\necho 'endeavor 9.9.9 (build 9.9.9-0123456789abcdef)'\n");
     std::fs::rename(&part, &exe).unwrap();
     helper.request_start(None, true);
     if cfg!(target_os = "linux") {
-        // The core starts from the file the helper runs from, which the rename did not remove.
         let ToApp::Ready { pid, .. } = after_start(&helper) else { panic!("expected Ready") };
         let program = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
         assert!(program.to_string_lossy().ends_with("(deleted)"), "{}", program.display());
@@ -1401,11 +1306,9 @@ fn clients_that_come_during_a_start_whose_client_has_gone_wait_for_the_one_core_
     first.send(ToHelper::Detach);
     first.exits();
 
-    // A waiter that is stopped, one whose input ends under `--quit-with-client`, and `serve` interrupted: none of them started it.
     let stopped = held_start(&dir, &julia, &[]);
     let stop = stopped.request_stop();
     assert_eq!(stopped.after_progress(), ToApp::StartCancelled { id: 1 });
-    // Its wait is over, and it says the start goes on rather than that it stopped.
     let ToApp::NotStopped { id, message } = stopped.after_progress() else { panic!("expected NotStopped") };
     assert!(id == stop && message.contains("still starting"), "{message}");
     let mut quitting = held_start(&dir, &julia, &["--quit-with-client"]);
@@ -1419,7 +1322,6 @@ fn clients_that_come_during_a_start_whose_client_has_gone_wait_for_the_one_core_
     assert!(code == Some(1) && said.trim_end().ends_with("endeavor: Stopped before Endeavor was ready."), "{code:?} {said}");
     assert!(common::pid_alive(core) && cores.pids() == [core], "the start went on");
 
-    // Two more wait, and both get that core.
     let (mut second, mut third) = (held_start(&dir, &julia, &[]), held_start(&dir, &julia, &[]));
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(cores.pids(), [core], "no other core is started beside it");
@@ -1438,7 +1340,6 @@ fn clients_that_come_during_a_start_whose_client_has_gone_wait_for_the_one_core_
     }
 }
 
-/// `endeavor serve` in `dir`, once it has found the runtime there.
 fn serve_in(dir: &Path) -> Child {
     let mut serve = Command::new(env!("CARGO_BIN_EXE_endeavor"))
         .arg("serve")
@@ -1459,12 +1360,10 @@ fn serve_in(dir: &Path) -> Child {
             panic!("serve ended before it found the runtime");
         }
     }
-    // Kept open: `serve` would end on a broken pipe if it printed again.
     std::mem::forget(out);
     serve
 }
 
-/// How `serve` ended: its exit code and what it said on stderr.
 fn ended(serve: Child) -> (Option<i32>, String) {
     let output = serve.wait_with_output().unwrap();
     (output.status.code(), String::from_utf8(output.stderr).unwrap())
@@ -1515,7 +1414,6 @@ fn saves_a_sent_file_into_the_session_folder_and_drops_an_unfinished_one() {
         }
     };
     let folder = "~/decay-fits".to_string();
-    // SHA-256 of "t,y\n0,1\n".
     let sha256 = "b659e80980e7375313bf70ebf6e577f4abae7d5657bf7b563fa64c2f48a33eee".to_string();
     let placed = ask(1, Request::Place { folder: folder.clone(), name: "decay.csv".into(), size: 8, sha256: sha256.clone() });
     assert_eq!(placed, Reply::Place { path: "data/decay.csv".into(), have: false });
@@ -1529,7 +1427,6 @@ fn saves_a_sent_file_into_the_session_folder_and_drops_an_unfinished_one() {
     assert!(matches!(escape, Reply::Error { message } if message.contains("isn't inside")));
     assert!(!home.join("x.csv").exists());
 
-    // The app goes mid-send: the helper deletes the part on its way out.
     assert_eq!(ask(6, piece(0, b"t,y\n", false)), Reply::Written);
     let part = home.join("decay-fits/data/.decay.csv.part");
     assert!(part.exists());
@@ -1539,7 +1436,6 @@ fn saves_a_sent_file_into_the_session_folder_and_drops_an_unfinished_one() {
     assert_eq!(std::fs::read_to_string(home.join("decay-fits/data/decay.csv")).unwrap(), "t,y\n0,1\n", "the finished file stays");
 }
 
-/// Ask the helper what runs from its state folder.
 fn check(helper: &Helper, id: u32) -> RuntimeState {
     helper.send(ToHelper::Files { id, request: Request::Runtime });
     match helper.next() {
@@ -1567,7 +1463,6 @@ fn checks_and_stops_a_runtime_without_attaching() {
 fn detaching_leaves_the_runtime_and_quit_with_client_stops_it_on_eof() {
     let dir = state_dir("detach");
     let runtime = FakeRuntime::start(&dir, "labbox3");
-    // The app's own word at quit wins over the flag.
     let mut helper = Helper::start(&dir, &["--any-node", "--quit-with-client"]);
     assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
     helper.send(ToHelper::Detach);
@@ -1587,8 +1482,6 @@ fn detaching_leaves_the_runtime_and_quit_with_client_stops_it_on_eof() {
     assert!(!runtime.alive(), "the app going away stops it with --quit-with-client");
     assert!(!dir.join("runtime.json").exists());
 
-    // A runtime of a build before `endeavor/end_when_idle` (this fake says no interface) couldn't end once
-    // idle, so with --exit-idle-after-client the app going stops it, as a quit used to (app #274).
     let runtime = FakeRuntime::start(&dir, "labbox3");
     let mut helper = Helper::start(&dir, &["--any-node", "--exit-idle-after-client"]);
     assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
@@ -1615,7 +1508,6 @@ fn a_runtime_that_dies_is_reported_with_its_log() {
     assert_eq!(status, "exited");
     assert_eq!(log_tail, ["booting", "Go to http://localhost:1234/?secret=… now", "ERROR: boom"]);
     assert!(!dir.join("runtime.json").exists());
-    // Still connected: asking again tries to start a new one (no Julia here).
     helper.request_start(None, true);
     assert!(matches!(helper.next(), ToApp::StartFailed { .. }));
     helper.stdin.0.lock().unwrap().take();
@@ -1671,7 +1563,6 @@ fn a_runtime_that_cant_start_is_an_error() {
     helper.exits();
 }
 
-/// A julia that says it's 1.12 and then fails to boot.
 fn fake_julia(dir: &Path) -> PathBuf {
     let bin = dir.join("fakebin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -1694,7 +1585,6 @@ fn julia_from_a_shell_line_is_found_and_its_failure_reported() {
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
 
-    // A login shell's profile can put a julia back on PATH (GitHub's Ubuntu image has one), so the line empties it.
     let empty = dir.join("empty");
     std::fs::create_dir_all(&empty).unwrap();
     let line = format!("PATH={}", empty.display());
@@ -1728,7 +1618,6 @@ fn starts_the_core_which_starts_julia_and_stop_ends_both() {
     assert_eq!(ps("ppid", julia), core.to_string(), "Julia is the core's child");
     assert_eq!((ps("pgid", julia), ps("pgid", core)), (core.to_string(), core.to_string()), "one process group, the core's");
 
-    // Both go to the core: the folder on to Julia's bridge, the WebSocket to Pluto.
     let mut call = helper.connect();
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_folder","params":{"path":"/n"}}"#;
     write!(call, "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
@@ -1743,7 +1632,6 @@ fn starts_the_core_which_starts_julia_and_stop_ends_both() {
     pluto.read_exact(&mut back).unwrap();
     assert_eq!(&back, b"to Pluto");
 
-    // Stop reaches Julia through the core, and neither is left.
     let stop = helper.request_stop();
     assert_eq!(helper.next(), ToApp::Stopped { id: stop });
     assert!(!common::pid_alive(core) && !common::pid_alive(julia));
@@ -1756,7 +1644,6 @@ fn starts_the_core_which_starts_julia_and_stop_ends_both() {
 fn a_runtime_started_with_exit_idle_ends_once_no_notebook_is_open() {
     let idle = [("ENDEAVOR_IDLE_CHECK_SECS", "0.2"), ("ENDEAVOR_IDLE_HOURS", "0.0003")];
 
-    // Without the flag the runtime stays up well past the idle limit.
     let dir = state_dir("exit-idle-off");
     let bridge = common::FakeBridge::start(&dir);
     let julia = common::serving_julia(&dir, &bridge);
@@ -1771,7 +1658,6 @@ fn a_runtime_started_with_exit_idle_ends_once_no_notebook_is_open() {
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
 
-    // With it, the runtime the helper starts ends by itself.
     let dir = state_dir("exit-idle-on");
     let bridge = common::FakeBridge::start(&dir);
     let julia = common::serving_julia(&dir, &bridge);
@@ -1787,7 +1673,6 @@ fn a_runtime_started_with_exit_idle_ends_once_no_notebook_is_open() {
 
 #[test]
 fn a_runtime_that_ends_when_idle_kills_a_julia_that_wont_shut_down() {
-    // A Julia that goes on through the shutdown still ends: the core kills it (#458).
     let idle = [("ENDEAVOR_IDLE_CHECK_SECS", "0.2"), ("ENDEAVOR_IDLE_HOURS", "0.0003"), ("ENDEAVOR_TEST_STOP_GRACE_SECS", "0.5")];
     let dir = state_dir("exit-idle-deaf");
     std::fs::write(dir.join("deaf"), "").unwrap();
@@ -1820,7 +1705,6 @@ fn a_cluster_job_is_submitted_with_exit_idle_and_its_node_start_passes_it_on() {
     let script = slurm.read("job.sh");
     assert!(script.trim_end().ends_with("--build '1.0.0-abc' --exit-idle"), "{script}");
 
-    // What the job runs: the core it becomes ends when idle.
     let node = state_dir("slurm-exit-idle-node");
     let bridge = common::FakeBridge::start(&node);
     let serving = common::serving_julia(&node, &bridge);
@@ -1838,8 +1722,6 @@ fn a_cluster_job_is_submitted_with_exit_idle_and_its_node_start_passes_it_on() {
     common::wait_for("the job's runtime to end itself", || core.try_wait().unwrap().is_some());
 }
 
-/// Slurm's commands as scripts over files in `dir/slurm`: the test moves a job
-/// through the queue by writing its state (and node, time left, `sacct`'s answer).
 struct FakeSlurm {
     dir: PathBuf,
     bin: PathBuf,
@@ -1861,7 +1743,6 @@ impl FakeSlurm {
             ("sacct", "cat \"$FAKE_SLURM/sacct\" 2>/dev/null\nexit 0\n"),
             (
                 "srun",
-                // Like srun, it holds the step's output until the step ends unless --unbuffered.
                 "echo \"$@\" >> \"$FAKE_SLURM/srun.args\"\ncase \" $* \" in *\" --unbuffered \"*) u=1;; esac\nwhile [ $# -gt 0 ]; do case \"$1\" in -*) shift;; *) break;; esac; done\n[ -n \"$u\" ] && exec \"$@\"\n\"$@\" > \"$FAKE_SLURM/srun.out\"\ncat \"$FAKE_SLURM/srun.out\"\n",
             ),
             ("sinfo", "echo 'shared*|8:00:00|10|7492'\n"),
@@ -1874,7 +1755,6 @@ impl FakeSlurm {
     }
 
     fn set(&self, file: &str, value: &str) {
-        // Whole, or not at all: the fake squeue reads these while helpers poll (#186).
         let path = self.dir.join(file);
         let part = self.dir.join(format!(".{file}.part"));
         std::fs::write(&part, format!("{value}\n")).unwrap();
@@ -1885,19 +1765,16 @@ impl FakeSlurm {
         std::fs::read_to_string(self.dir.join(file)).unwrap_or_default()
     }
 
-    /// A helper on this "login node", submitting with `julia`.
     fn helper(&self, state_dir: &Path, julia: &Path) -> Helper {
         self.helper_polling(state_dir, julia, 100)
     }
 
-    /// `helper`, asking `squeue` about a waiting job every `poll_ms`.
     fn helper_polling(&self, state_dir: &Path, julia: &Path, poll_ms: u32) -> Helper {
         let mut command = self.command(julia, poll_ms);
         command.arg("--state-dir").arg(state_dir);
         Helper::spawn(command)
     }
 
-    /// `endeavor connect` for this "login node", without a state folder.
     fn command(&self, julia: &Path, poll_ms: u32) -> Command {
         let path = format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap());
         let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
@@ -1927,7 +1804,6 @@ fn an_r_shell_line_reaches_the_job_script_word_for_word() {
     assert!(matches!(helper.next(), ToApp::Submitted { .. }));
     let script = slurm.read("job.sh");
     assert!(Command::new("sh").arg("-n").arg(dir.join("job.sh")).status().unwrap().success(), "{script}");
-    // The script's words, as sh reads them, with printf in the helper's place.
     let exec = script.lines().find_map(|l| l.strip_prefix("exec ")).unwrap();
     let words = Command::new("sh").arg("-c").arg(format!("set -- {exec}; shift; printf '%s\\n' \"$@\"")).output().unwrap();
     let words: Vec<String> = String::from_utf8(words.stdout).unwrap().lines().map(str::to_owned).collect();
@@ -2014,7 +1890,6 @@ fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
     assert!(script.contains(" --r 'auto' --runtime "), "R is the node's login shell's: {script}");
     assert!(dir.join("job.json").exists());
 
-    // Still queued, for another reason; then it runs and its runtime comes up.
     slurm.set("reason", "Resources");
     assert_eq!(helper.next(), ToApp::Queued { job: "42".into(), state: "PENDING".into(), reason: "Resources".into() });
     slurm.set("node", &this_host());
@@ -2029,14 +1904,12 @@ fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
     assert!(slurm.read("srun.args").contains("--jobid=42 --overlap"));
     assert!(!dir.join("job.json").exists(), "a running job's record is runtime.json");
 
-    // Streams go through both helpers.
     let mut pluto = websocket(&helper, "p");
     pluto.write_all(b"via the node").unwrap();
     let mut back = [0; 12];
     pluto.read_exact(&mut back).unwrap();
     assert_eq!(&back, b"via the node");
 
-    // A new connect (from any login node) finds the running job.
     helper.send(ToHelper::Detach);
     helper.exits();
     let mut rest = Vec::new();
@@ -2052,7 +1925,6 @@ fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
     let mut back = [0; 5];
     pluto.read_exact(&mut back).unwrap();
 
-    // The job hits its time limit: Slurm kills Julia, and the app hears why.
     slurm.set("state", "TIMEOUT");
     slurm.set("sacct", "TIMEOUT");
     runtime.kill();
@@ -2078,7 +1950,6 @@ fn a_queued_job_survives_a_disconnect_and_stop_cancels_it() {
     helper.exits();
     assert_eq!(slurm.read("scancel.log"), "", "leaving doesn't cancel");
 
-    // The next connect waits on the same job instead of submitting another.
     let helper = slurm.helper(&dir, &julia);
     helper.hello();
     let start = helper.request_start(None, true);
@@ -2176,7 +2047,6 @@ fn two_helpers_on_a_cluster_share_one_job_and_a_stop_from_one_ends_it_for_both()
     let mut second = slurm.helper(&dir, &julia);
     first.hello();
     second.hello();
-    // Both ask at once: one submits, the other waits for that job.
     first.request_start(small_job(), true);
     second.request_start(small_job(), true);
     for helper in [&first, &second] {
@@ -2190,7 +2060,6 @@ fn two_helpers_on_a_cluster_share_one_job_and_a_stop_from_one_ends_it_for_both()
     }
     assert_eq!(slurm.read("sbatch.args").lines().count(), 1, "one job for two helpers");
 
-    // A third arrives while the job is still queued, and waits on it as well.
     let third = slurm.helper(&dir, &julia);
     assert_eq!(third.start_runtime(), ToApp::Submitted { job: "42".into(), summary: "2 CPUs · 8 GB · 30 min".into() });
     assert_eq!(slurm.read("sbatch.args").lines().count(), 1);
@@ -2218,7 +2087,6 @@ fn two_helpers_on_a_cluster_share_one_job_and_a_stop_from_one_ends_it_for_both()
     }
 }
 
-/// Wait until the helper says its job is queued: the job's id.
 fn queued(helper: &Helper) -> String {
     loop {
         match helper.next() {
@@ -2269,7 +2137,6 @@ fn a_stop_while_the_job_is_queued_is_told_to_the_others_and_a_late_cleanup_spare
     b.request_start(small_job(), true);
     assert_eq!(queued(&b), "42");
 
-    // A stops the job and asks again, which submits the next one, before B looks again.
     let stop = a.request_stop();
     assert_eq!(a.next(), ToApp::StartCancelled { id: a_start });
     assert_eq!(a.next(), ToApp::Stopped { id: stop });
@@ -2280,7 +2147,6 @@ fn a_stop_while_the_job_is_queued_is_told_to_the_others_and_a_late_cleanup_spare
     assert_eq!(message, "The start was stopped. It was stopped from another connection.");
     assert_eq!(common::read_json(&dir.join("job.json"))["job"], "43", "B's cleanup of job 42 left job 43's record");
 
-    // A third helper waits for job 43 and doesn't submit another.
     let c = slurm.helper(&dir, &julia);
     assert_eq!(c.start_runtime(), ToApp::Submitted { job: "43".into(), summary: "2 CPUs · 8 GB · 30 min".into() });
     assert_eq!(slurm.read("sbatch.args").lines().count(), 2, "one job for 42, one for 43");
@@ -2356,7 +2222,6 @@ fn launcher_auto_is_slurm_where_sinfo_is_and_says_so() {
     assert_eq!(queued(&helper), "42");
     assert!(xdg.join("endeavor/cluster/job.json").exists(), "the cluster's state folder");
 
-    // With no sinfo to be found it runs the runtime as a process (unless this computer has Slurm in a folder `has` always looks in).
     let fixed = wire::slurm::FOLDERS.iter().any(|d| Path::new(d).join("sinfo").is_file());
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
     command.args(["connect", "--launcher", "auto", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent", "--depot", "/nonexistent"]).env("PATH", "/nonexistent").env("HOME", &home).env("XDG_STATE_HOME", &xdg);
@@ -2365,7 +2230,6 @@ fn launcher_auto_is_slurm_where_sinfo_is_and_says_so() {
     assert_eq!(launcher, if fixed { "slurm" } else { "process" });
 }
 
-/// Hold `dir/start.lock`, as a helper in the middle of a start does.
 fn hold_start_lock(dir: &Path) -> std::fs::File {
     let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("start.lock")).unwrap();
     // SAFETY: plain syscall on a file we hold open.
@@ -2379,7 +2243,6 @@ fn a_helper_waiting_for_another_start_says_so_once_and_still_hears_the_client() 
     let _held = hold_start_lock(&dir);
     let line = "Another connection is starting Julia here; waiting for it.";
 
-    // Detach is honoured while it waits.
     let mut helper = Helper::start(&dir, &[]);
     helper.hello();
     helper.request_start(None, true);
@@ -2389,14 +2252,11 @@ fn a_helper_waiting_for_another_start_says_so_once_and_still_hears_the_client() 
     helper.send(ToHelper::Detach);
     helper.exits();
 
-    // So is the end of the client's input.
     let mut helper = Helper::start(&dir, &[]);
     assert_eq!(helper.start_runtime(), ToApp::Progress { line: line.into() });
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
 
-    // And Stop, which starts nothing: the start ends with an answer of its own, and the Stop with its, which
-    // is a stop's as from a helper with nothing attached: it waits for the lock, and says when it gives up.
     let helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia"], &[("ENDEAVOR_STOP_LOCK_SECS", "1")]);
     helper.hello();
     let start = helper.request_start(None, true);
@@ -2407,7 +2267,6 @@ fn a_helper_waiting_for_another_start_says_so_once_and_still_hears_the_client() 
     assert!(id == stop && message.contains("start lock"), "{message}");
     assert!(!dir.join("runtime.json").exists());
 
-    // A holder that never lets go is given up on.
     let helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia"], &[("ENDEAVOR_START_LOCK_SECS", "1")]);
     assert_eq!(helper.start_runtime(), ToApp::Progress { line: line.into() });
     let ToApp::StartFailed { message, .. } = helper.next() else { panic!("expected StartFailed") };
@@ -2422,7 +2281,6 @@ fn a_stop_waits_for_the_start_lock_and_then_stops() {
     assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
     let held = hold_start_lock(&dir);
     let first = helper.request_stop();
-    // A second Stop doesn't cancel the first, and nothing says a start is under way.
     let second = helper.request_stop();
     std::thread::sleep(Duration::from_millis(700));
     assert!(helper.control.try_recv().is_err() && runtime.alive(), "it waits for the lock");
@@ -2434,7 +2292,6 @@ fn a_stop_waits_for_the_start_lock_and_then_stops() {
     std::thread::sleep(Duration::from_millis(300));
     assert!(helper.control.try_recv().is_err(), "once each");
 
-    // A Detach while it waits is done after the stop.
     let runtime = FakeRuntime::start(&dir, "labbox3");
     helper.request_start(None, true);
     assert!(matches!(helper.next(), ToApp::Ready { .. }));
@@ -2645,7 +2502,6 @@ fn the_end_of_input_during_a_stop_that_fails_still_stops_the_runtime_with_quit_w
 #[test]
 fn a_runtime_that_is_still_alive_after_the_stop_is_not_stopped_and_stays_attached() {
     let dir = state_dir("wont-die");
-    // It ignores the shutdown call, and the helper sends it no signals, as if it were stuck in the kernel.
     let runtime = FakeRuntime::slow_to_exit(&dir, "labbox3", Duration::from_secs(3600));
     let mut helper = Helper::start_with(&dir, &["--julia", "/nonexistent/julia", "--any-node"], &[("ENDEAVOR_TEST_UNKILLABLE", "1")]);
     assert!(matches!(helper.start_runtime(), ToApp::Ready { .. }));
@@ -2691,14 +2547,11 @@ fn a_runtime_that_dies_while_a_stop_waits_is_reported_and_is_not_attached_again(
     drop(held);
     let died = helper.next();
     assert!(matches!(died, ToApp::Died { .. }), "the end of the runtime was heard, not lost with the wait: {died:?}");
-    // The start asked for meanwhile finds nothing attached: it starts, and there is no Julia here.
     assert!(matches!(helper.after_progress(), ToApp::StartFailed { id, .. } if id == start));
     helper.stdin.0.lock().unwrap().take();
     helper.exits();
 }
 
-/// A helper on a "cluster" whose runtime runs in job 42 and takes a moment to
-/// shut down, with a folder to upload into.
 fn stopping_job(name: &str) -> (PathBuf, FakeSlurm, Helper, FakeRuntime) {
     let dir = state_dir(name);
     let julia = fake_julia(&dir);
@@ -2719,7 +2572,6 @@ fn stopping_job(name: &str) -> (PathBuf, FakeSlurm, Helper, FakeRuntime) {
     (dir, slurm, helper, runtime)
 }
 
-/// An unfinished upload into `dir/home/fits`: its part.
 fn unfinished_upload(helper: &Helper, dir: &Path) -> PathBuf {
     let ask = |id: u32, request: Request| {
         helper.send(ToHelper::Files { id, request });
@@ -2761,7 +2613,6 @@ fn a_stop_then_the_end_of_input_on_a_cluster_does_not_leave_the_helper_behind() 
     assert!(!runtime.alive());
 }
 
-/// A client `Channel` on a helper started with `flags` over `dir`.
 fn channel_on(dir: &Path, flags: &[&str]) -> endeavor_mcp::client::Channel {
     let mut helper = Command::new(env!("CARGO_BIN_EXE_endeavor"))
         .args(["connect", "--state-dir"])

@@ -1,7 +1,7 @@
 # What the core keeps about each notebook
 
 `notebooks.rs`: the state the core holds beside each open notebook, which
-the notebook tools ([endeavor-mcp.md](endeavor-mcp.md)) and the app's
+the notebook tools ([notebook-tools.md](notebook-tools.md)) and the app's
 `/endeavor/events` stream read. The engine's adapter answers calls and sends
 notifications ([runtime-core.md](runtime-core.md), "The engine interface");
 the core reads a fresh snapshot each time it tells the app anything. A
