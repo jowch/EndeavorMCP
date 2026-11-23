@@ -26,8 +26,8 @@ Every call into marimo's internals is in this one file. marimo is pinned in
 `uv pip compile requirements.in -o requirements.txt --python-version 3.12
 --no-header`), with what the adapter itself uses, and tested against the pin
 (`tests/e2e_marimo.rs`). The pin moves together with `scripts/cloud-setup.sh`'s
-`MARIMO_VERSION` (`tests/marimo_pin.rs` checks both) and the version in
-e2e_marimo's notebook headers.
+`MARIMO_VERSION` and the notebook headers in e2e_marimo and in the smoke
+tasks P2, P3 and P4; `tests/marimo_pin.rs` checks them all.
 
 ## marimo's server
 
