@@ -25,6 +25,25 @@ use crate::notebooks::{screenshot_result, short_cell_id, snapshot_may_help, uuid
 /// give the agent a blank picture. In safe preview it is asked for any output, text too.
 pub type Snapshot = dyn Fn(&str, &str, &str) -> Option<String> + Send + Sync;
 
+/// A `Snapshot` that also says when the picture stops short of the output (`Picture::cut`).
+pub type Pictures = dyn Fn(&str, &str, &str) -> Option<Picture> + Send + Sync;
+
+/// A picture of a cell's output (`Pictures`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Picture {
+    /// The PNG, in base64.
+    pub png: String,
+    /// When the output is taller than the client could show at once: (the height the picture
+    /// shows, the output's whole height), in CSS pixels. The agent is told the rest is missing.
+    pub cut: Option<(u32, u32)>,
+}
+
+impl From<String> for Picture {
+    fn from(png: String) -> Picture {
+        Picture { png, cut: None }
+    }
+}
+
 /// The agent's tool that asks the user to restart the runtime, which the client answers (`AskRestart`).
 pub const REQUEST_RESTART: &str = "request_restart";
 
@@ -134,7 +153,7 @@ pub fn serve_guarded(
     client: TcpStream,
     upstream: TcpStream,
     refuse: &dyn Fn(&str, &str, &Value) -> Option<String>,
-    snapshot: Option<&Snapshot>,
+    snapshot: Option<&Pictures>,
     no_r: Option<&dyn Fn() -> String>,
     restart: Option<(&AskRestart, &str)>,
 ) -> io::Result<()> {
@@ -472,7 +491,7 @@ mod tests {
         std::thread::spawn(move || {
             let snapshot = move |session: &str, notebook: &str, cell: &str| {
                 asked_tx.send(format!("{session} {notebook} {cell}")).unwrap();
-                (cell != UNDRAWN).then(|| "c25hcHNob3Q=".to_owned())
+                (cell != UNDRAWN).then(|| Picture::from("c25hcHNob3Q=".to_owned()))
             };
             let _ = serve_guarded(accepted, upstream, &|_, _, _| None, Some(&snapshot), None, None);
         });

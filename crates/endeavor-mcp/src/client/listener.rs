@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::Value;
 use wire::relay::Mux;
 
-use crate::guard::{AskRestart, Snapshot};
+use crate::guard::{AskRestart, Picture, Pictures, Snapshot};
 
 /// How long a connection that arrives while the runtime is away waits for it
 /// to come back, so a short drop goes unnoticed.
@@ -60,7 +60,7 @@ pub struct Listener {
     /// Without one (nor `snapshot`), connections are relayed without reading the HTTP in them.
     refuse: Option<Refuse>,
     /// How the client draws a cell's output when the runtime has no picture of it (`set_snapshot`).
-    snapshot: OnceLock<Box<Snapshot>>,
+    snapshot: OnceLock<Box<Pictures>>,
     /// How the client asks the user to restart the runtime when the agent calls `request_restart` (`set_restart`).
     restart: OnceLock<Box<AskRestart>>,
     messages: Messages,
@@ -201,7 +201,12 @@ impl Listener {
     /// pictures: every connection then goes through the guard, which on Windows doesn't notice an
     /// agent hanging up during a stream (`wait_readable` isn't ported) until the wait times out.
     pub fn set_snapshot(&self, snapshot: Box<Snapshot>) {
-        let _ = self.snapshot.set(snapshot);
+        self.set_pictures(Box::new(move |session, notebook, cell| snapshot(session, notebook, cell).map(Picture::from)));
+    }
+
+    /// `set_snapshot`, with pictures that say when they stop short of the output (`Picture::cut`).
+    pub fn set_pictures(&self, pictures: Box<Pictures>) {
+        let _ = self.snapshot.set(pictures);
     }
 
     /// From now on, the agent has `request_restart`, and `ask` shows the user its request
