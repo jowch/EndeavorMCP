@@ -647,6 +647,27 @@ Next:
   SIGTERM, as did everything they started, and the curl, wget or juliaup the core starts to
   download Julia, Endeavor's own R or a helper (#181), which before went on after
   a Ctrl-C had stopped the core.
+- A stop signal to the core (SIGTERM, SIGINT, SIGHUP) asks a ready Julia to shut
+  down through its bridge, and passes the signal on only if that fails or Julia
+  still runs 10 s later; 10 s after that it kills Julia. A second signal is passed
+  straight on. A SIGTERM that reaches Julia while it compiles can hang its exit for
+  good (#509). A Julia still starting has no bridge yet and gets the signal. The
+  core still ends as the signal would end it.
+- The shutdown stops every notebook's process itself, all at once, each within
+  about 2 s (an exit, then SIGTERM, then SIGKILL), before Julia exits. Malt's own
+  stop at exit gives a process busy in a cell 15 s to take its exit, one process at
+  a time, so a stop during a long cell took 12 to 15 s in two tries of three. Now
+  they take 1.3 to 4.2 s. It then closes Pluto's server and the bridge, so `exit`
+  doesn't tear down a connection mid-write (each stop logged HTTP.jl's "stream not
+  initialized" error), and a notebook's process it stopped isn't logged as one
+  that ended by itself.
+- When the core dies abruptly (an OOM kill, `kill -9`), a small shell the core
+  started with Julia stops it. It waits on a pipe only the core holds, so it costs
+  nothing while the core lives and ends with Julia. On Linux, Julia has had SIGTERM
+  already (`PR_SET_PDEATHSIG`); on macOS the shell sends it. 10 s later the shell
+  kills Julia if it still runs. A notebook's process busy in a cell goes on until
+  the cell ends. On Windows the core's job ends Julia and its notebook processes
+  with the core, at once.
 - Stop on a Julia cell that waits (`sleep`, a download, a lock) stops the cell and keeps the
   notebook's process and its values (#139). On Julia 1.12 a Ctrl+C sent to the process
   never reaches a waiting cell, so Pluto pressed it until Julia ended, which lost every value

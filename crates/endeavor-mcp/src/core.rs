@@ -286,7 +286,11 @@ pub fn main(argv: &[String]) -> ! {
     r.stop();
     marimo.stop();
     remove_state(&args.state_dir, std::process::id() as i32, None);
+    #[cfg(unix)]
+    let signalled = served.julia.signalled.load(std::sync::atomic::Ordering::SeqCst);
     match stop {
+        #[cfg(unix)]
+        Stop::Julia(status) if signalled > 0 && status.success() => exit_like(ExitStatus::from_raw(signalled)),
         Stop::Julia(status) => exit_like(status),
         #[cfg(unix)]
         Stop::Signal(signal) => exit_like(ExitStatus::from_raw(signal)),
@@ -470,6 +474,9 @@ struct JuliaStarter {
     started: std::sync::atomic::AtomicU64,
     /// The core is stopping: Julia ending now ends it, even mid-start.
     stopping: std::sync::atomic::AtomicBool,
+    /// The stop signal the core was sent, else 0: a Julia that shut down cleanly on it ends the core
+    /// the way the signal would have (`pass_on_stop_signals`).
+    signalled: std::sync::atomic::AtomicI32,
     stops: std::sync::mpsc::Sender<Stop>,
 }
 
@@ -494,6 +501,7 @@ impl JuliaStarter {
             #[cfg(windows)]
             started: 0.into(),
             stopping: false.into(),
+            signalled: 0.into(),
             stops,
         }
     }
@@ -672,6 +680,8 @@ impl JuliaStarter {
         }
         let mut child = self.spawn.spawn(command).map_err(|e| format!("julia_failed::Couldn't start {julia}: {e}"))?;
         let pid = child.id() as i32;
+        #[cfg(unix)]
+        let watch = watch_for_core_death(pid, self.mask);
         // To end it if it stalls, once the watcher below has it.
         #[cfg(windows)]
         let started = crate::winproc::start_time(std::os::windows::io::AsRawHandle::as_raw_handle(&child));
@@ -685,6 +695,12 @@ impl JuliaStarter {
         let watching = served.clone();
         std::thread::spawn(move || {
             let Ok(status) = child.wait() else { return };
+            #[cfg(unix)]
+            if let Some((mut watch, mut ended)) = watch {
+                let _ = ended.write_all(b"\n");
+                drop(ended);
+                let _ = watch.wait();
+            }
             let julia = &watching.julia;
             julia.pid.store(0, std::sync::atomic::Ordering::SeqCst);
             let mut now = julia.now.lock().unwrap();
@@ -1951,8 +1967,11 @@ fn watch_lifeline(fd: i32) {
     });
 }
 
-/// A stop signal sent to the core goes to Julia, and the core exits when Julia does; with no Julia
-/// running, it ends the core.
+/// A stop signal sent to the core stops Julia, and the core exits when Julia does, as the signal would
+/// end it; with no Julia running, it ends the core. A Julia that is ready is asked to shut down through
+/// its bridge first, and is signalled only if that fails or it still runs `stop_grace` later: a SIGTERM
+/// while Julia compiles can hang its exit for good (#509), which cost 10 s before the shutdown that
+/// followed. A Julia still starting has no bridge yet and gets the signal.
 #[cfg(unix)]
 fn pass_on_stop_signals(set: libc::sigset_t, served: Arc<Served>) {
     std::thread::spawn(move || {
@@ -1962,7 +1981,16 @@ fn pass_on_stop_signals(set: libc::sigset_t, served: Arc<Served>) {
             if unsafe { libc::sigwait(&set, &mut signal) } == 0 {
                 let julia = &served.julia;
                 julia.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+                let first = julia.signalled.compare_exchange(0, signal, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok();
                 match julia.pid.load(std::sync::atomic::Ordering::SeqCst) {
+                    // A second one (a second Ctrl-C) is passed straight on; the first's steps still follow.
+                    pid if pid > 0 && !first => {
+                        // SAFETY: plain syscall.
+                        unsafe { libc::kill(pid, signal) };
+                    }
+                    pid if pid > 0 && served.bridge.julia.port.get().is_some_and(|&port| bridge_call(port, "/call", &julia.token, "endeavor/shutdown").is_ok()) => {
+                        signal_unless_julia_ends(served.clone(), pid, signal);
+                    }
                     pid if pid > 0 => {
                         // SAFETY: plain syscall.
                         unsafe { libc::kill(pid, signal) };
@@ -1974,6 +2002,60 @@ fn pass_on_stop_signals(set: libc::sigset_t, served: Arc<Served>) {
                 }
             }
         }
+    });
+}
+
+/// When the core dies abruptly (an OOM kill, `kill -9`), nothing is left to stop Julia. On Linux it gets
+/// SIGTERM (`PR_SET_PDEATHSIG`), and a SIGTERM that reaches it while it compiles can leave it hung in its
+/// exit (#509); macOS has no such signal. So a shell waits on a pipe whose other end only the core holds: a
+/// line on it means Julia ended; its end without one, that the core died. Then it signals the Julia it was
+/// started for (macOS), and `stop_grace` later kills it if it still runs: the same pid with the same start
+/// time. On Windows the core's job ends Julia with it (`winproc::job_ending_with_this_process`).
+#[cfg(unix)]
+fn watch_for_core_death(pid: i32, mask: Option<libc::sigset_t>) -> Option<(std::process::Child, std::process::ChildStdin)> {
+    const WATCH: &str = r#"julia=$1 grace=$2 term=$3
+started() {
+  if [ -r "/proc/$julia/stat" ]; then s=$(cat "/proc/$julia/stat" 2>/dev/null) || return 1; s=${s##*) }; set -- $s; echo "${20}"
+  else ps -o lstart= -p "$julia" 2>/dev/null; fi
+}
+was=$(started)
+[ -n "$was" ] || exit 0
+read -r _ && exit 0
+[ "$term" = 1 ] && [ "$(started)" = "$was" ] && kill -TERM "$julia" 2>/dev/null
+sleep "$grace"
+[ "$(started)" = "$was" ] && kill -KILL "$julia" 2>/dev/null
+exit 0"#;
+    // Linux's PR_SET_PDEATHSIG has sent it SIGTERM already.
+    let term = if cfg!(target_os = "linux") { "0" } else { "1" };
+    let mut command = Command::new("sh");
+    command.args(["-c", WATCH, "sh", &pid.to_string(), &format!("{:.1}", stop_grace().as_secs_f64()), term]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    if let Some(mask) = mask {
+        // SAFETY: only an async-signal-safe call between fork and exec.
+        unsafe {
+            command.pre_exec(move || {
+                libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+    }
+    let mut watch = command.spawn().map_err(|e| eprintln!("[ Warning: Couldn't watch for the core's end, to stop Julia with it: {e}")).ok()?;
+    let ended = watch.stdin.take()?;
+    Some((watch, ended))
+}
+
+/// After a shutdown asked of Julia (`pid`) for a stop signal: if it still runs `stop_grace` later, pass the
+/// signal on, then kill it as for any shutdown (`kill_unless_shut_down`).
+#[cfg(unix)]
+fn signal_unless_julia_ends(served: Arc<Served>, pid: i32, signal: i32) {
+    std::thread::spawn(move || {
+        std::thread::sleep(stop_grace());
+        if served.julia.pid.load(std::sync::atomic::Ordering::SeqCst) != pid {
+            return;
+        }
+        eprintln!("[ Warning: Julia didn't shut down; passing the signal on");
+        // SAFETY: plain syscall; the pid is Julia's until the wait thread stores 0 (`kill_unless_shut_down`).
+        unsafe { libc::kill(pid, signal) };
+        kill_unless_shut_down(&served, pid);
     });
 }
 

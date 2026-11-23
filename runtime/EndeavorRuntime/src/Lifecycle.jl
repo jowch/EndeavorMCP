@@ -280,6 +280,8 @@ function worker_exited!(session, nb, workspace)::Nothing
     # Ended by an interrupt: as after Pluto's Stop, the next run starts a new process.
     lock(() -> pop!(_INTERRUPTED, nb.notebook_id, nothing), _NOTIFY_LOCK) === workspace.worker && return
     get(session.notebooks, nb.notebook_id, nothing) === nb || return
+    # The shutdown ended it (`_stop_workers!`).
+    _SHUTTING_DOWN[] && return
     running = [string(id) for id in nb.cell_order if nb.cells_dict[id].running]
     lock(() -> _EXITED[nb.notebook_id] = running, _NOTIFY_LOCK)
     nb.process_status = Pluto.ProcessStatus.no_process
@@ -448,8 +450,56 @@ function page_bundle()
     return Dict{String,Any}("pluto_version" => string(pkgversion(Pluto)), "html" => html)
 end
 
-# How `endeavor/shutdown` ends the process; tests replace it.
-const _SHUTDOWN = Ref{Function}(() -> exit(0))
+# Set once `endeavor/shutdown` starts ending the process.
+const _SHUTTING_DOWN = Ref(false)
+
+# How long `endeavor/shutdown` gives each notebook's process to take its exit, and then
+# its SIGTERM, before Malt kills it. A process busy in a cell can't take the exit until
+# the cell yields, and Malt's own stop at exit waits 15 s for that, one process at a
+# time: longer than the core waits before it signals Julia (#509).
+const _WORKER_STOP_GRACE = Ref(1.0)
+
+"Stop these notebook processes at once, together, each within about `2 * _WORKER_STOP_GRACE[]` s."
+function _stop_workers!(workers)
+    @sync for worker in workers
+        @async try
+            Pluto.Malt.stop(worker; exit_timeout=_WORKER_STOP_GRACE[], term_timeout=_WORKER_STOP_GRACE[])
+        catch e
+            @warn "Couldn't stop a notebook's process" exception = e
+        end
+    end
+end
+
+# The notebook processes that have started. One still starting is left to Malt's stop at exit.
+function _notebook_workers()
+    workers = Pluto.Malt.Worker[]
+    for task in collect(values(Pluto.WorkspaceManager.active_workspaces))
+        (istaskdone(task) && !istaskfailed(task)) || continue
+        worker = fetch(task).worker
+        worker isa Pluto.Malt.Worker && push!(workers, worker)
+    end
+    return workers
+end
+
+# Pluto's server and the bridge, closed while their connections can still end cleanly:
+# under `exit`, a connection being written to (the core's event stream, a call it made)
+# finds its socket torn down and HTTP.jl logs "stream not initialized" as an error.
+# Forced: their connections are closed at once, not waited for (a handler writing to one
+# then fails quietly, as HTTP.jl logs that only at debug level), and Pluto's own close
+# would also wait for its registry update.
+function _close_servers!(timeout::Real=2.0)
+    close_notification_streams!()
+    pluto = _STANDALONE_PLUTO_SERVER[]
+    closing = @async for server in (_STANDALONE_HTTP_SERVER[], pluto === nothing ? nothing : pluto.http_server)
+        server isa HTTP.Server && try HTTP.forceclose(server) catch end
+    end
+    timedwait(() -> istaskdone(closing), timeout)
+    return nothing
+end
+
+# How `endeavor/shutdown` ends the process; tests replace it. Pluto has saved every
+# notebook file, so a notebook's process has nothing left to lose.
+const _SHUTDOWN = Ref{Function}(() -> (_SHUTTING_DOWN[] = true; _stop_workers!(_notebook_workers()); _close_servers!(); exit(0)))
 
 """Test helper: bind an in-memory session as the standalone Pluto session."""
 function bind_standalone_session!(sess)
