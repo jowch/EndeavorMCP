@@ -822,8 +822,13 @@ impl Call<'_> {
         // A session that may work on several notebooks can't say which is the conversation's (`allow_several`).
         let several = self.nbs.several(self.owner);
         let own = |at: usize| !several && bound.as_ref().is_some_and(|bound| paths[at] == *bound);
-        if let Some(bound) = bound.as_ref().filter(|bound| !paths.contains(bound)) {
-            self.nbs.unbind(self.owner, bound);
+        match bound.as_ref() {
+            Some(bound) if !paths.contains(bound) => {
+                self.nbs.unbind(self.owner, bound);
+            }
+            // Its own notebook, open again: it closes as any notebook does (#520).
+            Some(_) => self.nbs.seen_open(self.owner),
+            None => {}
         }
         let mut state = self.nbs.state.lock().unwrap();
         Ok(Value::Array(snapshots.iter().enumerate().map(|(at, nb)| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(at))).collect()))
@@ -1779,11 +1784,14 @@ impl Call<'_> {
         let nb = self.notebook()?;
         let stopped = self.nbs.stop_notebook(&nb.path)?;
         let path = canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone());
-        self.nbs.unbind(self.owner, &path);
         // Not stopped: it was no longer open (its engine ended meanwhile).
         if stopped["stopped"] != true {
+            self.nbs.unbind(self.owner, &path);
             return Err(argument_error(&format!("notebook_not_found::{} is no longer open.", nb.path)));
         }
+        // Closing its own notebook doesn't free the session for another (#520).
+        self.nbs.closed_by(self.owner, &path);
+        self.nbs.unbind(self.owner, &path);
         Ok(json!({ "notebook_id": nb.id, "path": nb.path, "closed": true }))
     }
 

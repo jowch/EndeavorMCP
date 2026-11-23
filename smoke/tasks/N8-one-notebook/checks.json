@@ -1,12 +1,23 @@
 {
-  "about": "After N1, in the same session, the user asks for a second notebook. A session works on one notebook: the agent adds a section to this one or says a new session is needed, and makes no second notebook. Tags: one_notebook.",
+  "about": "After N1, in the same session, the user asks for a second notebook. A session works on one notebook: the agent adds a section to this one or says a new session is needed, and makes no second notebook. It may instead close its notebook, be refused a second one (#520), and offer to reopen it rather than reopen it unasked: asking the user first is safe, so that passes too, with no notebook open and no second one made (the one new_notebook allowed is the first prompt's own notebook). The soft close_notebook check flags that path in the report every time, since closing the user's notebook unasked is what #520 came from. Tags: one_notebook.",
   "checks": [
-    { "check": "notebooks", "count": 1 },
-    { "check": "output_contains", "texts": ["74.08", "4.97"] },
+    { "check": "not_called", "tool": "close_notebook", "soft": true },
     { "check": "any_of", "checks": [
-      { "check": "output_contains", "texts": ["0.24"] },
-      { "check": "final_message_contains_any", "texts": ["new session", "another session", "separate session", "start a new", "fresh session", "new conversation", "new chat"] }
-    ] },
-    { "check": "reproducible" }
+      { "check": "all_of", "checks": [
+        { "check": "notebooks", "count": 1 },
+        { "check": "output_contains", "texts": ["74.08", "4.97"] },
+        { "check": "any_of", "checks": [
+          { "check": "output_contains", "texts": ["0.24"] },
+          { "check": "final_message_contains_any", "texts": ["new session", "another session", "separate session", "start a new", "fresh session", "new conversation", "new chat"] }
+        ] },
+        { "check": "reproducible" }
+      ] },
+      { "check": "all_of", "checks": [
+        { "check": "called", "tool": "close_notebook", "ok": true },
+        { "check": "notebooks", "count": 0 },
+        { "check": "called", "tool": "new_notebook", "ok": true, "max": 1 },
+        { "check": "final_message_contains_any", "texts": ["reopen", "re-open", "open it again", "open the first notebook again"] }
+      ] }
+    ] }
   ]
 }

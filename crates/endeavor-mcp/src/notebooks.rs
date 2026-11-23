@@ -245,6 +245,10 @@ struct State {
     /// The sessions that may work on several notebooks (`allow_several`), and the notebooks each
     /// opened or created: their ids, so that one closed and opened again elsewhere isn't one of them.
     several: HashMap<String, HashSet<String>>,
+    /// The sessions that closed their own notebook with `close_notebook`: each stays bound to it
+    /// though it is no longer open, so closing it isn't a way round `one_notebook` (#520). Cleared
+    /// when the session opens it again or the app binds the session anew.
+    closed_own: HashSet<String>,
     /// When each agent session last made a tool call, for `recent_sessions` and
     /// to forget sessions that went quiet. Made when a session is bound or
     /// makes a call; dropped with its binding, or `SESSION_KEPT` after its
@@ -291,11 +295,13 @@ impl State {
     fn forget_old(&mut self, now: f64) {
         let bindings = &mut self.bindings;
         let several = &mut self.several;
+        let closed_own = &mut self.closed_own;
         self.seen.retain(|session, seen| {
             let kept = now - seen.last_call.unwrap_or(f64::MIN).max(seen.since) < SESSION_KEPT;
             if !kept {
                 bindings.remove(session);
                 several.remove(session);
+                closed_own.remove(session);
             }
             kept
         });
@@ -654,7 +660,7 @@ impl Notebooks {
             starting: Mutex::default(),
             notices: Mutex::default(),
             clock,
-            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), several: HashMap::new(), seen: HashMap::new(), calls: HashMap::new() }),
+            state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), several: HashMap::new(), closed_own: HashSet::new(), seen: HashMap::new(), calls: HashMap::new() }),
             publishing: Mutex::default(),
             events: Mutex::default(),
             build: OnceLock::new(),
@@ -1171,6 +1177,7 @@ impl Notebooks {
     pub fn bind(&self, owner: &str, path: &str) {
         let now = self.now();
         let mut state = self.state.lock().unwrap();
+        state.closed_own.remove(owner);
         if path.is_empty() {
             state.bindings.remove(owner);
         } else {
@@ -1281,7 +1288,9 @@ impl Notebooks {
             let path = canonical_path(path).unwrap_or_else(|_| path.to_owned());
             let now = self.now();
             let mut state = self.state.lock().unwrap();
-            state.bindings.entry(owner.to_owned()).or_insert(path);
+            if state.bindings.entry(owner.to_owned()).or_insert(path.clone()) == &path {
+                state.closed_own.remove(owner);
+            }
             if let Some(opened) = state.several.get_mut(owner) {
                 opened.insert(id.to_owned());
             }
@@ -1313,11 +1322,29 @@ impl Notebooks {
         }
     }
 
-    /// Drop the session's binding to `path`, a notebook that is no longer open.
-    fn unbind(&self, owner: &str, path: &str) {
+    /// Drop the session's binding to `path`, a notebook that is no longer open: unless the
+    /// session closed it itself (`closed_own`). Whether it was dropped.
+    fn unbind(&self, owner: &str, path: &str) -> bool {
         let mut state = self.state.lock().unwrap();
-        if state.bindings.get(owner).is_some_and(|bound| bound == path) {
+        if !state.closed_own.contains(owner) && state.bindings.get(owner).is_some_and(|bound| bound == path) {
             state.bindings.remove(owner);
+            return true;
+        }
+        false
+    }
+
+    /// The notebook session `owner` closed is open again (the user opened it): from now on it
+    /// closes as any notebook does, and a close by the user frees the session.
+    fn seen_open(&self, owner: &str) {
+        self.state.lock().unwrap().closed_own.remove(owner);
+    }
+
+    /// Session `owner` closed `path` with `close_notebook`. Bound to it, it stays bound (#520);
+    /// one that may work on several notebooks, or isn't bound to it, is left as it is.
+    fn closed_by(&self, owner: &str, path: &str) {
+        let mut state = self.state.lock().unwrap();
+        if !owner.is_empty() && !state.several.contains_key(owner) && state.bindings.get(owner).is_some_and(|bound| bound == path) {
+            state.closed_own.insert(owner.to_owned());
         }
     }
 
@@ -1371,13 +1398,21 @@ impl Notebooks {
         }
         let bound = self.bound(owner)?;
         let refuse = |what: &str| {
-            // An engine that can't say leaves the binding.
-            if self.snapshots().is_ok_and(|open| !open.iter().any(|nb| canonical_path(&nb.path).is_ok_and(|p| p == bound))) {
-                self.unbind(owner, &bound);
+            // An engine that can't say leaves the binding, and the mark (#520).
+            let open = self.snapshots().ok().map(|open| open.iter().any(|nb| canonical_path(&nb.path).is_ok_and(|p| p == bound)));
+            if open == Some(false) && self.unbind(owner, &bound) {
                 return None;
             }
+            if open == Some(true) {
+                self.seen_open(owner);
+            }
+            let closed = if open == Some(false) && self.state.lock().unwrap().closed_own.contains(owner) {
+                " You closed it, and closing it doesn't free the session for another. If the user didn't ask you to close it, open it again now with open_notebook and its path, so their notebook isn't left closed, and go on there."
+            } else {
+                ""
+            };
             Some(format!(
-                "ArgumentError: one_notebook::This session works on one notebook, {bound}, so it can't {what}. \
+                "ArgumentError: one_notebook::This session works on one notebook, {bound}, so it can't {what}.{closed} \
                  You can still read other notebooks as plain files. \
                  To work on another notebook, suggest the user start a new session with it."
             ))
@@ -1403,7 +1438,13 @@ impl Notebooks {
         let known = self.state.lock().unwrap().notebooks.get(&id).map(|nb| nb.path.clone()).filter(|p| !p.is_empty());
         let path = known.or_else(|| self.snapshot(&id).ok().map(|nb| nb.path))?;
         match canonical_path(&path) {
-            Ok(canonical) if canonical == bound => None,
+            Ok(canonical) if canonical == bound => {
+                // Its own notebook, open again (the user opened it): it closes as any notebook does.
+                if self.state.lock().unwrap().closed_own.contains(owner) && self.snapshot(&id).is_ok() {
+                    self.seen_open(owner);
+                }
+                None
+            }
             Err(error) => Some(error),
             Ok(_) => refuse(&format!("change or run {path}")),
         }

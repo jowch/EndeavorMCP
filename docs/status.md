@@ -177,7 +177,8 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   last 30 minutes".
   `close_notebook` ends a session's own notebook's process when the user asks,
   as the app's Stop notebook does, so a sitting no longer needs `endeavor stop`
-  (interface 37). Not yet: a notebook on a machine, which still opens in a browser
+  (interface 37). Closing it doesn't free the session for another notebook:
+  the session stays bound to it and may only open it again (#520). Not yet: a notebook on a machine, which still opens in a browser
   tab (the chat's view reaches another `endeavor mcp` process, which works on
   this computer). A client that draws views but can't move one beside the chat
   gets only the card. Claude ignores the documented automatic side panel for a
