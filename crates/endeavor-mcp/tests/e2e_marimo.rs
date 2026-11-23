@@ -1067,3 +1067,86 @@ fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
         }
     });
 }
+
+fn allow_uv_install(port: u16, token: &str) {
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/allow_uv_install", "params": {} }).to_string();
+    write!(socket, "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    let mut reply = String::new();
+    socket.read_to_string(&mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 200") || reply.starts_with("HTTP/1.0 200"), "{reply}");
+}
+
+#[test]
+#[ignore = "downloads uv and starts real marimo: cargo test -p endeavor-mcp --test e2e_marimo -- --ignored"]
+fn a_computer_without_uv_gets_endeavors_own_after_the_users_yes() {
+    let bare_path = "/usr/bin:/bin";
+    if std::env::split_paths(bare_path).any(|dir| dir.join("uv").exists()) || Path::new("/usr/local/bin/uv").exists() || Path::new("/opt/homebrew/bin/uv").exists() {
+        eprintln!("SKIPPED: uv is installed system-wide, so the runtime would find it.");
+        return;
+    }
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-marimo-own-uv");
+    if let Some(pid) = recorded_pid(&work.join("state")) {
+        // SAFETY: plain syscall.
+        unsafe { libc::kill(-pid, libc::SIGTERM) };
+    }
+    let state = fresh(work.join("state"));
+    let folder = fresh(work.join("project"));
+    let home = fresh(work.join("home"));
+    let mut cleanup = Cleanup { state: state.clone(), children: Vec::new() };
+    let mut serve = Command::new(env!("CARGO_BIN_EXE_endeavor"))
+        .args(["serve", "--folder", folder.to_str().unwrap(), "--state-dir"])
+        .arg(&state)
+        .args(["--julia", work.join("no julia here").to_str().unwrap(), "--depot", &format!("{}:", work.join("depot").display())])
+        .env("HOME", &home)
+        .env("PATH", bare_path)
+        .env("XDG_CACHE_HOME", work.join("cache"))
+        .env("XDG_STATE_HOME", work.join("state-home"))
+        .env("XDG_CONFIG_HOME", work.join("config"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = lines(serve.stdout.take().unwrap());
+    let err = lines(serve.stderr.take().unwrap());
+    let mut printed = Vec::new();
+    loop {
+        match out.recv_timeout(Duration::from_secs(120)) {
+            Ok(line) if line == "Press Ctrl-C to stop Endeavor." => break,
+            Ok(line) => printed.push(line),
+            Err(_) => panic!("serve printed {printed:?}; its log:\n{}", err.try_iter().collect::<Vec<_>>().join("\n")),
+        }
+    }
+    cleanup.children.push(serve);
+    let link = printed.iter().find_map(|l| l.trim().strip_prefix("http://localhost:")).filter(|l| l.contains("/?token=")).unwrap();
+    let port: u16 = link.split_once("/?token=").unwrap().0.parse().unwrap();
+    let token = printed.iter().find_map(|l| l.trim().strip_prefix("Header: Authorization: Bearer ")).unwrap().to_owned();
+    let mut agent = Agent { port, token: token.clone(), id: 0, session: None };
+    agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+
+    let own = home.join(".cache/endeavor/uv-0.11.32/uv");
+    step("with no uv, the agent is told Endeavor may download its own, and nothing is downloaded", || {
+        let (failed, offer) = agent.call("new_notebook", json!({ "path": "decay.py" }));
+        assert!(failed && offer["error"] == "python_not_found", "{offer}");
+        let message = offer["message"].as_str().unwrap_or_default();
+        assert!(message.contains("may download its own only if the user agrees: uv 0.11.32") && message.contains("`install: true`"), "{offer}");
+        assert!(!own.exists() && !home.join(".cache/endeavor").read_dir().is_ok_and(|mut d| d.any(|e| e.is_ok_and(|e| e.file_name().to_string_lossy().starts_with("uv-")))), "nothing downloaded before the yes");
+    });
+
+    step("after the user's yes, the same call downloads uv and makes the notebook", || {
+        allow_uv_install(port, &token);
+        let began = Instant::now();
+        let made = loop {
+            let (failed, made) = agent.call("new_notebook", json!({ "path": "decay.py" }));
+            assert!(!failed, "{made}");
+            if made["error"] != "python_installing" {
+                break made;
+            }
+            assert!(began.elapsed() < Duration::from_secs(600), "uv and marimo didn't come: {made}");
+            std::thread::sleep(Duration::from_millis(500));
+        };
+        assert!(made["notebook_id"].is_string(), "{made}");
+        assert!(own.is_file(), "Endeavor's own uv is at {}", own.display());
+    });
+}

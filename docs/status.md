@@ -496,8 +496,11 @@ Next:
   each time the file is read again (a change from another editor, going live, a restart) the
   cells are paired with the ones the agent knows by code, and keep their ids (#353). Not on
   Windows. Known gaps: `set_input` and
-  `view_cell_output` of HTML aren't there, and uv isn't installed for the user
-  (#354).
+  `view_cell_output` of HTML aren't there (#354). Where no uv is found, the agent
+  is told Endeavor can download its own uv 0.11.32 (from uv's GitHub release,
+  checked against its SHA-256, into `~/.cache/endeavor/uv-0.11.32`) if the user
+  agrees; their yes comes as `use_machine` with `install: true` on this computer,
+  which asks them first and passes `endeavor/allow_uv_install` (interface 48).
 - In R and Python notebooks, as in Julia ones (#393), `view_cell_output` tells the
   agent when an output is interactive, so it doesn't describe controls it hasn't
   seen work. In R that is HTML with a script, canvas or control, or with a

@@ -37,6 +37,7 @@ mod slurm;
 mod standalone;
 mod stopped;
 mod update;
+mod uv;
 mod views;
 #[cfg(unix)]
 mod unixproc;
