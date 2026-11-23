@@ -1,0 +1,11 @@
+{
+  "about": "An interactive plot in R (#398): a plotly htmlwidget, which view_cell_output marks as interactive. The agent looks at it, keeps plotly, and asks the user to check the hover rather than saying it works. plotly is a large download, so the harness says yes to R's question. Tags: r, plots, view_cell_output, interactive.",
+  "checks": [
+    { "check": "notebooks", "count": 1, "ending": ".R" },
+    { "check": "no_errored_cells" },
+    { "check": "code_contains", "texts": ["plot_ly"] },
+    { "check": "called", "tool": "view_cell_output" },
+    { "check": "final_message_contains_any", "texts": ["check that", "check the hover", "check the tooltip", "please check", "confirm that", "couldn't see", "could not see", "can't see", "haven't seen"], "soft": true },
+    { "check": "agent_tools_not_used", "tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"] }
+  ]
+}

@@ -454,6 +454,12 @@ Next:
   the package date (#352), ids shift after a reload (#353), `set_input` and
   `view_cell_output` of HTML aren't there, and uv isn't installed for the user
   (#354).
+- In R and Python notebooks, as in Julia ones (#393), `view_cell_output` tells the
+  agent when an output is interactive, so it doesn't describe controls it hasn't
+  seen work. In R that is HTML with a script, canvas or control, or with a
+  dependency that brings a script (an htmlwidget). In Python it is the same, plus
+  marimo's own controls and Vega-Lite charts (altair); a table, math, or a layout
+  such as an accordion or tabs, counts only by what it holds (#398).
 - Ember (R notebooks) is in development in its own repository. It joins as
   another adapter behind the core, with its own path prefix on the one port
   ([runtime-core.md](runtime-core.md), [one-port.md](one-port.md)). So far

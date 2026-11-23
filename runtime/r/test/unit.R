@@ -12,7 +12,7 @@ adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
 # Only these definitions are evaluated; the rest of the file (libraries, the
 # server) never runs.
-wanted <- c("%||%", "package_step", "download_step", "structure_error", "EXTRA_FIX", "snapshot_cell", "output_text", "text_output", "INLINE_SPAN", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal", "input_line", "input_value", "moved_input_notes", "note_value", "json_value", "json_choice", "run_user_profile")
+wanted <- c("%||%", "package_step", "download_step", "structure_error", "EXTRA_FIX", "snapshot_cell", "output_text", "text_output", "INLINE_SPAN", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal", "input_line", "input_value", "moved_input_notes", "note_value", "json_value", "json_choice", "run_user_profile", "INTERACTIVE_HTML", "interactive_output")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
   if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% wanted) eval(e, A)
@@ -259,6 +259,20 @@ local({
   options(endeavor_test_repos = NULL); rm(list = intersect("first_ran", ls(globalenv())), envir = globalenv())
   unlink(dir, recursive = TRUE)
 })
+
+
+# ---- interactive outputs (#398) ----
+
+html <- function(data, deps = list()) list(mime = "text/html", data = data, text = "", deps = deps)
+check("an htmlwidget's HTML (its data in a script) is interactive",
+      isTRUE(A$interactive_output(html('<div id="htmlwidget-1" class="plotly html-widget"></div>\n<script type="application/json" data-for="htmlwidget-1">{}</script>'))))
+check("a control is interactive, in any case", isTRUE(A$interactive_output(html("<INPUT type='range'>"))))
+check("HTML whose dependency brings a script is interactive",
+      isTRUE(A$interactive_output(html("<div></div>", list(list(name = "leaflet", version = "1", script = "leaflet.js"))))))
+check("a plain table, a dependency with only a stylesheet, a plot and no output aren't interactive",
+      !A$interactive_output(html("<table><tr><td>1</td></tr></table>", list(list(name = "css", version = "1", script = character(), stylesheet = "a.css")))) &&
+      !A$interactive_output(list(mime = "image/png", data = as.raw(1:3))) && !A$interactive_output(NULL))
+check("a word that only starts like a tag isn't a control", !A$interactive_output(html("<inputs>, <scripted>")))
 
 cat(sprintf("\n%d passed, %d failed\n", passed, failed))
 if (failed > 0) quit(status = 1)

@@ -291,13 +291,15 @@ something subtle, make it soft.
 | `R1-new-r` | N1, in a new R notebook | the same for R (Ember): a `.R` path, R's rules for cells. It mirrors N1, so a failure points at R, not at the task |
 | `R2-first-package` | a dplyr table and its mean in a new R notebook | R's first package install: the agent waits through it and doesn't run the cells again; when the install outlasts a waited run, the tools say R is getting dplyr ready (#78) |
 | `R3-moved-input` | the mean above a cutoff, with the user's slider moved first | N12 in R: before the agent looks, the user moves an emberui slider off its default. The readers get the `uses_moved_input` note, and the agent must say that the answer used 4 and that the file's default is 2.5 |
+| `R4-interactive-plot`, `P5-interactive-plot` | an interactive plot with a hover: plotly in R, altair in Python | `view_cell_output` marks the output as interactive (#398). The agent looks at it, keeps the package it was asked for, and (a soft check) asks the user to check the hover rather than saying it works. R4's hook says yes to R's download question; P5's only to altair and the packages it needs |
 | `M1-machine` | add my server and compute something in a notebook in a folder there; the dialog's hook says yes | Endeavor's helper is missing there: Endeavor asks the user in its own dialog, which names it, during the agent's call, and installs only on the yes; the agent then works on the server (#378) |
 | `M3-install-declined` | M1, with the hook saying no | nothing is installed; the agent tells the user and makes no notebook on this computer instead |
 | `M2-no-reach` | a notebook on a server that refuses connections | the agent reports the failure, doesn't ask for a password, and makes no notebook here instead |
 
 Every task that leaves a notebook also checks it is `reproducible`, except
-N3, whose notebook isn't meant to run, N9, N14, whose cells wait for an OK, and the server tasks, whose
-notebooks the re-run can't reach.
+N3, whose notebook isn't meant to run, N9, N14, whose cells wait for an OK, R4 and P5, whose
+outputs are widgets with ids of their own each run, and the server tasks, whose notebooks the re-run
+can't reach.
 
 Each `result.json` and the summary record the model or models that answered
 (from Claude's own events), so runs can be compared across models later.
