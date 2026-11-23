@@ -20,13 +20,17 @@ pub fn run(prompt: &str) -> ! {
     }
     let ask = Ask::from_ssh(prompt, hint.as_deref());
     match ask_app(&ask) {
-        Ok(Some(text)) => {
+        Ok(Answer { text: Some(text), .. }) => {
             if ask.kind != Kind::Confirm {
                 println!("{text}");
             }
             std::process::exit(0);
         }
-        Ok(None) => std::process::exit(1),
+        Ok(Answer { gave_up: true, .. }) => {
+            eprintln!("{}", crate::client::SIGN_IN_GAVE_UP);
+            std::process::exit(1);
+        }
+        Ok(Answer { text: None, .. }) => std::process::exit(1),
         Err(e) => {
             eprintln!("endeavor askpass: {e}");
             std::process::exit(1);
@@ -34,7 +38,7 @@ pub fn run(prompt: &str) -> ! {
     }
 }
 
-fn ask_app(ask: &Ask) -> Result<Option<String>, String> {
+fn ask_app(ask: &Ask) -> Result<Answer, String> {
     let mut line = serde_json::to_string(ask).expect("serializable");
     line.push('\n');
     match std::env::var(ADDRESS_ENV) {
@@ -50,19 +54,18 @@ fn ask_app(ask: &Ask) -> Result<Option<String>, String> {
 }
 
 /// Send `lines` and read the app's one-line `Answer`.
-fn exchange(mut socket: impl Read + Write, lines: &str) -> Result<Option<String>, String> {
+fn exchange(mut socket: impl Read + Write, lines: &str) -> Result<Answer, String> {
     socket.write_all(lines.as_bytes()).map_err(|e| e.to_string())?;
     let mut reply = String::new();
     BufReader::new(socket).read_line(&mut reply).map_err(|e| e.to_string())?;
     if reply.is_empty() {
         return Err("the app closed the connection without answering (over TCP: is the token right?)".into());
     }
-    let answer: Answer = serde_json::from_str(&reply).map_err(|e| format!("unreadable answer: {e}"))?;
-    Ok(answer.text)
+    serde_json::from_str(&reply).map_err(|e| format!("unreadable answer: {e}"))
 }
 
 #[cfg(unix)]
-fn unix_socket(line: &str) -> Result<Option<String>, String> {
+fn unix_socket(line: &str) -> Result<Answer, String> {
     let path = std::env::var(SOCKET_ENV).map_err(|_| format!("neither {ADDRESS_ENV} nor {SOCKET_ENV} is set"))?;
     let socket = UnixStream::connect(&path).map_err(|e| format!("{path}: {e}"))?;
     exchange(socket, line)
@@ -70,6 +73,6 @@ fn unix_socket(line: &str) -> Result<Option<String>, String> {
 
 /// Windows has no Unix sockets in Rust's std: the app listens on loopback TCP instead.
 #[cfg(windows)]
-fn unix_socket(_line: &str) -> Result<Option<String>, String> {
+fn unix_socket(_line: &str) -> Result<Answer, String> {
     Err(format!("{ADDRESS_ENV} isn't set"))
 }

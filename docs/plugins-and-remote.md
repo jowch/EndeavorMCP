@@ -140,8 +140,8 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
   the page between sessions.
 - Several sessions on one server mean several `ssh` connections, and each
   subagent's server its own.
-- A later interactive sign-in (password or code) would be asked once for
-  each session, not once for each server.
+- A sign-in that asks for a password or a code is asked once for each
+  session, not once for each server.
 
 **Order of work.** Each step can be stopped after.
 
@@ -239,8 +239,9 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
   object that its children cannot leave (read from its source, not run), so
   a runtime started from it would end with the session. In
   [#17](https://github.com/jowch/EndeavorMCP/issues/17).
-- Sign-in stays with keys only. A page for servers that ask for a password
-  or a code is not planned; it stays under "Not in the first version".
+- A server that asks for a password or a code is asked on a page in the
+  user's browser ([#106](https://github.com/jowch/EndeavorMCP/issues/106)),
+  under "Sign-in" below.
 - A start, once begun, finishes without the client that asked for it, so
   the next session finds the runtime. Built and tested in step 1, for this
   computer and for a server that runs it as a process: the core is its own
@@ -261,7 +262,7 @@ call that needs it, `keep_notebook_alive`, the launcher and the plugins.
 |---|---|
 | Transport to a server | The wire protocol over one `ssh`, as in the app. Not `ssh -L` |
 | Who sets a server up | The agent, through tools. No file the user edits |
-| Sign-in | Your ssh configuration, keys and agent. No password prompt in the first version |
+| Sign-in | Your ssh configuration, keys and agent. A password, code or passphrase is asked on a page in your browser (#106) |
 | Installing on a server | Only after the user agreed. Installing the plugin is the agreement to the binary on your own computer; the helper on a server, an update of it, and Endeavor's own Julia there each need a question first, the helper's first and Julia's only if none is found (built). Looking at what is there needs none beyond the harness's prompt for the tool call. The tools take `install: true` only after the user said yes |
 | Installing the binary | The plugin does it: its launcher is the MCP command, and on first start it downloads the build the plugin pins from the GitHub release. Installing the plugin is the user's agreement to that. `scripts/install.sh` or `scripts/install.ps1`, run from the web, is the fallback (built). npm later, once there are version tags |
 | Where the plugin's binary lives | `${XDG_DATA_HOME:-~/.local/share}/endeavor/bin/<key>/endeavor`, the same for every agent and every platform (`endeavor.exe` under Git Bash on Windows), so Claude Code, Codex and Antigravity share one download. Not the helpers cache, which prunes other keys. A build there that no running `endeavor` holds and nobody has used for a week is removed when `mcp` or `serve` starts, except the newest one fetched ([#97](https://github.com/jowch/EndeavorMCP/issues/97)) |
@@ -821,19 +822,30 @@ The front runs the system `ssh` with the alias, keepalives and batch mode.
 `Host` names from `~/.ssh/config`, never a key, and stores no password or
 key path. It leaves host-key checking as you have it.
 
-In batch mode `ssh` fails instead of asking. Three cases fail, each with a
-message that says what to do:
+When `ssh` asks something (a password, a code, a key's passphrase, or
+whether to trust a server it hasn't seen), Endeavor asks it on a page in the
+user's browser, the same on macOS, Linux and Windows (#106,
+`standalone/signin_page.rs`). The `endeavor mcp` process that is connecting
+serves the page on 127.0.0.1, opened with a one-time secret in its address,
+like the install page. It takes an answer only from its own form, and the
+answer goes from the page to `ssh` and never through the agent. Cancel on the
+page refuses the sign-in. The page waits 100 seconds, less than the 2 minutes
+a server gives a sign-in by default; a question nobody answered ends with
+"stopped waiting for the sign-in", which the next call tries again. A question
+that comes more than 2 minutes after a tool last used the connection (a
+reconnect in the background) isn't put on a page, so no page opens by
+surprise; it ends the same way.
+
+Where no browser can be opened, `ssh` runs in batch mode and fails instead of
+asking. Three cases fail, each with a message that says what to do:
 
 | Case | What the user does |
 |---|---|
 | A key with a passphrase that isn't in the ssh agent | `ssh-add`, once, in a terminal |
 | A host never connected to before | `ssh <host>` once in a terminal, to accept its key |
-| A server that asks for a password or a code on every login | Unsupported in the first version |
+| A server that asks for a password or a code on every login | Use it from a computer where a browser can open |
 
-Later, for the third case: a sign-in page, the same on macOS, Linux and
-Windows. Where it lives is open, since no background process serves it. The answer goes from the page to `ssh` and
-never through the agent. Behind the page, askpass, which the binary already
-is. On Windows it works when `SSH_ASKPASS_REQUIRE=force` is set, and it reaches
+Behind the page, askpass, which the binary already is. On Windows it works when `SSH_ASKPASS_REQUIRE=force` is set, and it reaches
 the asker over loopback TCP with a token, since Rust has no Unix sockets there
 (`wire::askpass`, `client::Asker`; tested with Windows' OpenSSH on
 2026-10-09).
@@ -1207,7 +1219,6 @@ agents).
 
 ## Not in the first version
 
-- Password, passphrase or two-factor prompts.
 - npm packages.
 - Signed or notarized binaries.
 - A session on two machines at once.

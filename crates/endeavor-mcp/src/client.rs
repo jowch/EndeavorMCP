@@ -12,7 +12,7 @@ mod machines;
 mod session;
 mod ssh;
 
-pub use askpass::{AnswerFn, Asker};
+pub use askpass::{AnswerFn, Asker, Reply};
 pub use channel::{CLOSED, Channel, Hello, Notice, Runtime, StartError, StartOptions, died_reason};
 pub use listener::{Listener, Messages, Refuse};
 pub use session::{Config, FoundInfo, Gone, HelloInfo, HelperFor, InstallInfo, JobInfo, OnEvent, Outcome, QueueInfo, RuntimeInfo, Session, SessionEvent, State, Status, Want};

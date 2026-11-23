@@ -2711,7 +2711,7 @@ fn marimo_target(target: &str, allowed: impl Fn(&str) -> bool) -> MarimoTarget {
 
 /// `text` with its `%XX` escapes decoded (and `+` as a space, in a query): None when an escape is
 /// broken or the result isn't UTF-8.
-fn percent_decoded(text: &str, query: bool) -> Option<String> {
+pub(crate) fn percent_decoded(text: &str, query: bool) -> Option<String> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

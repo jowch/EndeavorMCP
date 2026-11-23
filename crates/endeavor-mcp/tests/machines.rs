@@ -457,6 +457,45 @@ fn a_failing_add_machine_leaves_no_record_and_no_connection() {
 }
 
 #[test]
+fn a_server_that_asks_for_a_password_gets_it_from_a_page_in_the_browser() {
+    // The stand-in ssh asks its askpass as ssh does, and connects only with the right answer: the
+    // test's user types "install" on whatever page opens (`Front::click_pages`).
+    let ask = r#"test -n "$SSH_ASKPASS" && test "$("$SSH_ASKPASS" "jc@lab's password: ")" = install"#;
+    let place = Place::with("signin-page", &[("ENDEAVOR_TEST_ASK", ask)]);
+    let opened = place.dir.join("opened.txt");
+    let mut front = start_front(&place, &[("ENDEAVOR_TEST_BROWSER", opened.to_str().unwrap())]);
+    front.initialize();
+    let added = front.ok("add_machine", json!({ "host": "lab", "julia": place.julia.display().to_string() }));
+    assert_eq!(added["state"], "connected", "{added}");
+    let pages = front.pages.lock().unwrap().clone();
+    assert!(pages.len() == 1 && pages[0].contains("/sign-in/"), "one sign-in page: {pages:?}");
+    assert!(!added.to_string().contains(&pages[0]), "the agent never sees the page's link: {added}");
+    front.finish();
+
+    // A page nobody answers in time ends as a sign-in nobody answered, which a reconnect tries again,
+    // not as a refused one; Cancel on the page is a refusal.
+    let place = Place::with("signin-unanswered", &[("ENDEAVOR_TEST_ASK", ask), ("ENDEAVOR_TEST_SIGN_IN_WAIT_MS", "300")]);
+    let mut front = start_front(&place, &[("ENDEAVOR_TEST_BROWSER", opened.to_str().unwrap())]);
+    front.click_pages(None);
+    front.initialize();
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": place.julia.display().to_string() }));
+    assert!(failed && text(&said).contains("stopped waiting for the sign-in"), "{said}");
+    front.click_pages(Some("x&cancel=1"));
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": place.julia.display().to_string() }));
+    assert!(failed && !text(&said).contains("stopped waiting for the sign-in"), "{said}");
+    front.finish();
+
+    // Without a browser to open, ssh runs in batch mode and has no askpass to ask.
+    let place = Place::with("signin-no-browser", &[("ENDEAVOR_TEST_ASK", ask)]);
+    let mut front = place.front();
+    front.initialize();
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": place.julia.display().to_string() }));
+    assert!(failed && text(&said).contains("Couldn't connect to lab"), "{said}");
+    assert!(front.pages.lock().unwrap().is_empty());
+    front.finish();
+}
+
+#[test]
 fn fields_the_front_does_not_know_survive_adding_and_updating_machines() {
     let place = Place::new("unknown-fields");
     let julia = place.julia.display().to_string();

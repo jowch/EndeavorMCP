@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use endeavor_mcp::client::Asker;
+use endeavor_mcp::client::{Asker, Reply, SIGN_IN_GAVE_UP};
 use wire::askpass::{ADDRESS_ENV, SOCKET_ENV, TOKEN_ENV};
 
 /// The binary as ssh runs it, with `env` and nothing else of askpass's.
@@ -38,6 +38,18 @@ fn a_cancel_exits_1_with_nothing_printed() {
     let out = askpass("jc@lab's password: ", &asker.env(Path::new("endeavor")));
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn a_question_nobody_answered_says_so_for_ssh_and_a_cancel_doesnt() {
+    let asker = Asker::replying(|_| Reply::GaveUp).unwrap();
+    let out = askpass("jc@lab's password: ", &asker.env(Path::new("endeavor")));
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert_eq!(text(&out.stderr).trim_end(), SIGN_IN_GAVE_UP, "the line `explain_retry` looks for");
+    let asker = Asker::replying(|_| Reply::Refused).unwrap();
+    let out = askpass("jc@lab's password: ", &asker.env(Path::new("endeavor")));
+    assert!(out.status.code() == Some(1) && out.stderr.is_empty(), "{}", text(&out.stderr));
 }
 
 #[test]

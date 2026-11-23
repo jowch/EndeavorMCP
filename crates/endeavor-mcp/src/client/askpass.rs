@@ -26,8 +26,19 @@ const MOST_BYTES: u64 = 16 * 1024;
 /// Connections served at once; more are closed at once.
 const MOST_AT_ONCE: usize = 8;
 
-/// What answers a question: the text, or None when the user cancelled.
-pub type AnswerFn = dyn Fn(Ask) -> Option<String> + Send + Sync;
+/// What answers a question.
+pub type AnswerFn = dyn Fn(Ask) -> Reply + Send + Sync;
+
+/// The answer to one of ssh's questions.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Reply {
+    Answered(String),
+    /// The user said no (Cancel): ssh takes it as a refused sign-in.
+    Refused,
+    /// Nobody answered: no one was there to ask, or not in time. ssh's error then says the sign-in
+    /// wasn't answered (`SIGN_IN_GAVE_UP`), which a reconnect tries again, not that it was refused.
+    GaveUp,
+}
 
 /// Listens until dropped.
 pub struct Asker {
@@ -37,7 +48,12 @@ pub struct Asker {
 }
 
 impl Asker {
+    /// An asker whose `answer` gives the text, or None when the user cancelled.
     pub fn start(answer: impl Fn(Ask) -> Option<String> + Send + Sync + 'static) -> Result<Asker, String> {
+        Asker::replying(move |ask| answer(ask).map_or(Reply::Refused, Reply::Answered))
+    }
+
+    pub fn replying(answer: impl Fn(Ask) -> Reply + Send + Sync + 'static) -> Result<Asker, String> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| format!("Couldn't listen for ssh's questions: {e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let token = crate::random_hex::<16>()?;
@@ -113,7 +129,12 @@ fn answer_one(socket: wire::Shared, token: &str, answer: &AnswerFn) {
     }
     line.clear();
     let Ok(ask) = reader.read_line(&mut line).map_err(|_| ()).and_then(|_| serde_json::from_str::<Ask>(&line).map_err(|_| ())) else { return };
-    let mut reply = serde_json::to_string(&Answer { text: answer(ask) }).expect("serializable");
+    let answer = match answer(ask) {
+        Reply::Answered(text) => Answer { text: Some(text), gave_up: false },
+        Reply::Refused => Answer { text: None, gave_up: false },
+        Reply::GaveUp => Answer { text: None, gave_up: true },
+    };
+    let mut reply = serde_json::to_string(&answer).expect("serializable");
     reply.push('\n');
     let _ = writer.write_all(reply.as_bytes());
 }

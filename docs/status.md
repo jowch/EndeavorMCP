@@ -58,6 +58,17 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   the dialog stays up until then, for the dialog's full 30 minutes. An
   answer on the page that still holds is given without a new dialog. Which clients really show the
   dialog is still to be checked by hand (#26).
+  A server's sign-in that asks something (a password, a code, a key's
+  passphrase, or whether to trust a new server) is asked on a page in the
+  user's browser the same way (`standalone/signin_page.rs`, #106): the answer
+  goes from the page to `ssh`, never through the agent. Cancel refuses the
+  sign-in; a page nobody answers in 100 s, or a question more than 2 minutes
+  after a tool last used that connection (which gets no page), ends as a
+  sign-in nobody answered, which the next call tries again. Without a browser,
+  `ssh` stays in batch mode and such a server fails with a message saying so.
+  Checked with a stand-in `ssh` in the tests, and by hand with real OpenSSH
+  on Linux (a key with a passphrase, and a new host key); not yet against a
+  server that asks for a password or a code, nor on macOS or Windows.
   A Julia notebook's run whose cells use a package the notebook doesn't
   have yet (not in its Project.toml, not a standard library) stops before
   Pluto adds it (#397): its cells stay queued (though nothing runs, so

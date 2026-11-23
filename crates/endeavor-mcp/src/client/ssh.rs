@@ -855,7 +855,7 @@ fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: 
         // connection after a password), so this is said first, and a reconnect tries again either way (#64).
         Some((format!("{host} stopped waiting for the sign-in."), true))
     } else if said("Permission denied") && batch {
-        Some((format!("{host} refused the sign-in. Either your key isn't accepted there, or it has a passphrase and isn't in your ssh agent ({}). Or the server asks for a password or a code, which Endeavor can't ask for yet.", ADD_KEY), false))
+        Some((format!("{host} refused the sign-in. Either your key isn't accepted there, or it has a passphrase and isn't in your ssh agent ({}). Or the server asks for a password or a code, and Endeavor couldn't open a page in a browser here to ask for it.", ADD_KEY), false))
     } else if said("Permission denied") {
         Some((format!("{host} refused the sign-in. Check the user name, and your key or password."), false))
     } else if said("Connection refused") {
