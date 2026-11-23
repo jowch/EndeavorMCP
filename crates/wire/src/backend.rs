@@ -69,6 +69,42 @@ impl Backend {
         }
         query.split('&').find_map(|kv| kv.strip_prefix("id="))
     }
+
+    pub fn notebook_path(self, url: &str) -> Option<String> {
+        let (address, query) = url.split_once('?')?;
+        let path = address.split_once("://").map_or(address, |(_, rest)| rest.find('/').map_or("", |slash| &rest[slash..]));
+        if self != Backend::Marimo || path != format!("{}/", self.prefix()) {
+            return None;
+        }
+        let mut files = query.split('&').filter_map(|kv| kv.strip_prefix("file="));
+        match (files.next(), files.next()) {
+            (Some(file), None) => query_decoded(file),
+            _ => None,
+        }
+    }
+}
+
+fn query_decoded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                out.push(u8::from_str_radix(text.get(i + 1..i + 3)?, 16).ok()?);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 pub fn query_value(text: &str) -> String {
@@ -140,6 +176,12 @@ mod tests {
         let url = Backend::Marimo.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc", "/w/a b&c.py");
         assert_eq!(url, "http://127.0.0.1:1234/marimo/?file=/w/a%20b%26c.py&token=t0k3n", "marimo's page names its notebook by path");
         assert_eq!(Backend::Marimo.notebook_id(&url), None);
+        assert_eq!(Backend::Marimo.notebook_path(&url).as_deref(), Some("/w/a b&c.py"), "the path its URL was made from");
+        assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=/w/a+b.py").as_deref(), Some("/w/a b.py"));
+        assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=/a.py&file=/b.py"), None, "one file or none");
+        assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=%zz"), None);
+        assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/api/x?file=/w/a.py"), None, "only the page");
+        assert_eq!(Backend::Pluto.notebook_path(&url), None);
         assert_eq!(Backend::Marimo.notebook_id("http://127.0.0.1:1234/marimo/edit?id=abc"), None);
     }
 
