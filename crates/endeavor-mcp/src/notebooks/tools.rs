@@ -1855,10 +1855,12 @@ impl Call<'_> {
     }
 
     /// The session's notebook, if it is an R notebook: only Ember's packages have a snapshot date.
-    fn r_notebook(&self) -> Result<Snapshot, String> {
+    /// The notebook, if it has a package date: an R notebook's snapshot date, or a Python notebook's
+    /// `exclude-newer` (#352).
+    fn dated_notebook(&self) -> Result<Snapshot, String> {
         let nb = self.notebook()?;
-        if self.nbs.backend_of(&nb.id) != Backend::Ember {
-            return Err(argument_error("not_r_notebook::Only an R notebook has a package date. A Julia notebook's package versions are in its Pkg environment"));
+        if !matches!(self.nbs.backend_of(&nb.id), Backend::Ember | Backend::Marimo) {
+            return Err(argument_error("not_r_notebook::Only R and Python notebooks have a package date. A Julia notebook's package versions are in its Pkg environment"));
         }
         Ok(nb)
     }
@@ -1918,7 +1920,7 @@ impl Call<'_> {
     /// version was current, or the last day an older one was, so the others move as little as
     /// they can. Every package moves with the date.
     fn preview_package_update(&self) -> Result<Value, String> {
-        let nb = self.r_notebook()?;
+        let nb = self.dated_notebook()?;
         let arg = |name: &str| self.args.get(name).cloned().unwrap_or(Value::Null);
         let (date, package, version) = (arg("date"), arg("package"), arg("version"));
         if !date.is_null() && !date.is_string() {
@@ -1968,7 +1970,7 @@ impl Call<'_> {
     /// and current. The header's date and the lock change and the file is saved; the library
     /// installs, and if R had a changed package loaded it restarts once the library is ready.
     fn apply_package_update(&self) -> Result<Value, String> {
-        let nb = self.r_notebook()?;
+        let nb = self.dated_notebook()?;
         let date = self.arg("date")?.clone();
         if !date.is_string() {
             return Err(argument_error("invalid_argument::date must be a day as YYYY-MM-DD"));
@@ -1976,9 +1978,11 @@ impl Call<'_> {
         let mut result = self.nbs.call("set_package_date", json!({ "notebook_id": nb.id, "date": date }))?;
         self.nbs.publish();
         result["notebook_id"] = json!(nb.id);
-        // In safe preview Ember installs nothing until the user lets the notebook run.
+        // In safe preview Ember installs nothing until the user lets the notebook run, nor does marimo.
         result["message"] = json!(if result["process_status"] == "waiting_for_permission" {
             "The notebook's package date has moved. Its library installs once the user allows the notebook to run (the notebook's page, or allow_execution): nothing installs or runs until then."
+        } else if self.nbs.backend_of(&nb.id) == Backend::Marimo {
+            "The notebook's package date has moved and its header pins the new versions. It restarted, so its environment is built again with them: every cell is left `not_run`, and its first run waits for the build."
         } else {
             "The notebook's package date has moved. Its library installs now: cells that need it wait, queued, and a read of one waits for the install. If R had a changed package loaded, R restarts once the library is ready and every cell is left `not_run`."
         });

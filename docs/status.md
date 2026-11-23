@@ -429,6 +429,15 @@ Next:
   An opened notebook whose header doesn't name marimo (or that has no header)
   gets marimo pinned at the server's version when it goes live, not the
   `marimo>=<newest>` marimo's sandbox would write (#352).
+  `preview_package_update` and `apply_package_update` move a Python notebook's
+  date as they do an R notebook's (#352): uv resolves the header at the new date,
+  with each exactly pinned package let go to that date's newest and nothing built,
+  and the apply pins those versions, moves `exclude-newer`, and restarts a live
+  notebook so its sandbox is built again. Packages move only with the date (no
+  `package`), and a notebook with no date gets one this way. The date can't be
+  earlier than the marimo the server runs. A day is held as its end in UTC; with
+  no day (today), it is the moment of the preview, which the apply writes, so it
+  matches what the preview showed.
   A package new to the notebook (not in its header) waits for the user's OK
   first, as in Julia (#355): the cells stay queued, `packages.step` is
   `asking`, and `approve_install` installs it; the app's Auto mode doesn't ask,
@@ -459,8 +468,7 @@ Next:
   and the cells that read it turn stale (#410). marimo doesn't keep cell ids in the file, so
   each time the file is read again (a change from another editor, going live, a restart) the
   cells are paired with the ones the agent knows by code, and keep their ids (#353). Not on
-  Windows. Known gaps: no tool moves
-  the package date (#352), `set_input` and
+  Windows. Known gaps: `set_input` and
   `view_cell_output` of HTML aren't there, and uv isn't installed for the user
   (#354).
 - In R and Python notebooks, as in Julia ones (#393), `view_cell_output` tells the

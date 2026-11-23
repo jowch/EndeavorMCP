@@ -506,6 +506,67 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("close_notebook", json!({ "notebook_id": id }));
     });
 
+    step("a Python notebook's package date moves, and its exact versions with it", || {
+        // The header holds six at an old version and the notebook at a date; moving the date lets each exact
+        // version go to that date's newest, and pins it there (#352).
+        let file = folder.join("dated.py");
+        let header = "# /// script\n# requires-python = \">=3.10\"\n# dependencies = [\n#     \"marimo==0.25.1\",\n#     # old on purpose\n#     \"six==1.16.0\",\n# ]\n#\n# [tool.uv]\n# exclude-newer = \"2026-10-05T00:00:00Z\"\n# ///\n";
+        let body = GROWTH.split_once("# ///\n\n").unwrap().1.replacen("    y = x + 1\n    y\n", "    import six\n    y = six.__version__\n    y\n", 1);
+        std::fs::write(&file, format!("{header}\n{body}")).unwrap();
+        let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        let opened = agent.ok("open_notebook", json!({ "path": "dated.py" }));
+        let id = opened["notebook_id"].clone();
+        // In safe preview: the preview builds nothing and changes nothing.
+        let preview = agent.ok("preview_package_update", json!({ "notebook_id": id, "date": "2026-11-01" }));
+        assert_eq!(preview["status"], "ready", "{preview}");
+        let six = preview["changes"].as_array().unwrap().iter().find(|c| c["name"] == "six").cloned().unwrap_or_else(|| panic!("{preview}"));
+        assert!(six["from"] == "1.16.0" && six["change"] == "upgraded", "{preview}");
+        let newer = six["to"].as_str().unwrap().to_owned();
+        assert!(std::fs::read_to_string(&file).unwrap().contains("\"six==1.16.0\""), "the preview changed nothing");
+        let (failed, refused) = agent.call("apply_package_update", json!({ "notebook_id": id, "date": "2026-11-02" }));
+        assert!(failed && refused.to_string().contains("no_preview"), "{refused}");
+        let applied = agent.ok("apply_package_update", json!({ "notebook_id": id, "date": "2026-11-01" }));
+        assert_eq!(applied["process_status"], "waiting_for_permission", "{applied}");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(&format!("\"six=={newer}\"")) && text.contains("exclude-newer = \"2026-11-01T23:59:59Z\"") && text.contains("\"marimo==0.25.1\""), "{text}");
+        assert!(text.ends_with(&body), "the cells are as they were: {text}");
+        assert!(text.contains("#     # old on purpose\n"), "the header's comment stays: {text}");
+        assert!(text.contains("# ]\n#\n# [tool.uv]\n") && !text.contains("# \n"), "a blank line in the header stays `#`: {text}");
+        // A day before marimo 0.25.1 was published can't hold it.
+        let early = agent.ok("preview_package_update", json!({ "notebook_id": id, "date": "2026-01-01" }));
+        assert!(early["status"] == "failed" && early.to_string().contains("marimo 0.25.1"), "{early}");
+        let (failed, refused) = agent.call("preview_package_update", json!({ "notebook_id": id, "package": "six" }));
+        assert!(failed && refused.to_string().contains("not_supported"), "{refused}");
+        // A header that doesn't resolve as it is has nothing to compare with: no preview is ready, and none applies.
+        let good = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, good.replacen(&format!("\"six=={newer}\""), "\"six==0.0.1\"", 1)).unwrap();
+        let broken = agent.ok("preview_package_update", json!({ "notebook_id": id, "date": "2026-11-01" }));
+        assert!(broken["status"] == "failed" && broken.to_string().contains("doesn't resolve as it is") && broken["changes"] == json!([]), "{broken}");
+        let (failed, refused) = agent.call("apply_package_update", json!({ "notebook_id": id, "date": "2026-11-01" }));
+        assert!(failed && refused.to_string().contains("no_preview"), "{refused}");
+        std::fs::write(&file, good).unwrap();
+        // Live, the sandbox has the version the header pins.
+        agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": true }));
+        let cells = agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"].clone();
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cells[1] }));
+        assert!(read["output"].as_str().unwrap_or_default().contains(&newer), "{read}");
+        // Live again, to today's: the notebook restarts on the new header, every cell not run.
+        let today = agent.ok("preview_package_update", json!({ "notebook_id": id }));
+        assert_eq!(today["status"], "ready", "{today}");
+        let day = today["date"].as_str().unwrap().to_owned();
+        let applied = agent.ok("apply_package_update", json!({ "notebook_id": id, "date": day }));
+        assert!(applied["message"].as_str().unwrap_or_default().contains("restarted"), "{applied}");
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cells[1] }));
+        assert_eq!(read["not_run"], true, "{read}");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(&format!("exclude-newer = \"{day}T")), "{text}");
+        agent.ok("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }));
+        let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cells[1] }));
+        assert!(read["errored"] == false && read["not_run"] != true, "{read}");
+        agent.ok("close_notebook", json!({ "notebook_id": id }));
+    });
+
     step("a new notebook pins marimo and a package date", || {
         // A session works on one notebook: another agent makes it.
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };

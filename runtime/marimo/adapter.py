@@ -373,6 +373,8 @@ class Notebook:
         # notebook's does (#397): the modules to install, their PyPI names, and the cells that wait.
         # `approve_install` is the OK; a yes holds for those modules while the notebook is open.
         self.asking, self.approved = None, set()
+        # The last ready preview of moving the package date (`preview_packages`), which an apply must match.
+        self.previewed = None
         self.ws = None
         # The watch's own consumer id, which edits are sent as (`go_live`).
         self.watcher = None
@@ -821,7 +823,7 @@ class Notebook:
         return {"notebook_id": self.id, "path": self.path, "cell_order": list(self.order),
                 "process_status": self.process_status(), "execution_allowed": self.allowed,
                 "safe_preview": not self.allowed, "lazy": True,
-                "packages": self.install_state(),
+                "packages": self.install_state(), "package_date": day_of(package_date(self.path)),
                 "cells": [self.snapshot_cell(cid) for cid in self.order]}
 
     def install_state(self):
@@ -963,6 +965,177 @@ def pin_marimo(path):
                                env=script_metadata.script_command_env(), timeout=30, cwd=target.directory)
     except Exception as e:  # noqa: BLE001 - marimo's sandbox then adds its own, as before
         print(f"endeavor marimo: couldn't pin marimo in {path}'s header: {e}", file=sys.stderr)
+
+
+def date_stamp(date):
+    """The `exclude-newer` for a day as YYYY-MM-DD: the end of that day in UTC, or now for none or a day not
+    over yet, so what is published later never counts."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if date is None:
+        return now
+    if not isinstance(date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise argument_error("invalid_argument", "date must be a day as YYYY-MM-DD")
+    try:
+        time.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise argument_error("invalid_argument", f"{date} isn't a day") from None
+    return min(f"{date}T23:59:59Z", now)
+
+
+def day_of(stamp):
+    """The day of an `exclude-newer` value, as YYYY-MM-DD, or None."""
+    found = re.match(r"\d{4}-\d{2}-\d{2}", stamp or "")
+    return found.group(0) if found else None
+
+
+def read_header(path):
+    """The TOML of a notebook's PEP 723 header, as written, or "" when it has none."""
+    from marimo._environments import script_metadata
+    return script_metadata.read_manifest(path)
+
+
+def header_deps(header):
+    import tomlkit
+    return [str(d) for d in (tomlkit.parse(header).get("dependencies") or [])]
+
+
+def is_marimo(dep):
+    from packaging.requirements import Requirement
+    try:
+        return canonical(Requirement(dep).name) == "marimo"
+    except Exception:  # noqa: BLE001 - a line that isn't a requirement is left as it is
+        return False
+
+
+def exact_pin(dep):
+    """A requirement pinned to one version (`polars==1.34.0`) as (Requirement, version), else None."""
+    from packaging.requirements import Requirement
+    try:
+        req = Requirement(dep)
+    except Exception:  # noqa: BLE001
+        return None
+    specs = list(req.specifier)
+    if len(specs) == 1 and specs[0].operator == "==" and "*" not in specs[0].version:
+        return req, specs[0].version
+    return None
+
+
+def with_version(req, version):
+    """`req` pinned to `version`, or with no version for None, keeping its extras and marker."""
+    extras = f"[{','.join(sorted(req.extras))}]" if req.extras else ""
+    marker = f"; {req.marker}" if req.marker else ""
+    return f"{req.name}{extras}{'==' + version if version else ''}{marker}"
+
+
+def with_deps_and_date(header, deps, stamp):
+    """`header` with `dependencies` (one for one, as `header_deps` lists them) and `[tool.uv] exclude-newer`
+    replaced, the rest as written: each entry changes in place, so comments around it stay."""
+    import tomlkit
+    doc = tomlkit.parse(header)
+    if "dependencies" in doc:
+        array = doc["dependencies"]
+        for i, d in enumerate(deps):
+            if str(array[i]) != d:
+                array[i] = d
+    else:
+        array = tomlkit.array()
+        array.multiline(True)
+        for d in deps:
+            array.append(d)
+        doc["dependencies"] = array
+    tool = doc.setdefault("tool", tomlkit.table())
+    uv = tool.setdefault("uv", tomlkit.table())
+    uv["exclude-newer"] = stamp
+    return tomlkit.dumps(doc)
+
+
+def let_go(header, stamp):
+    """The header at `stamp`, with each exactly pinned package but marimo let go, for uv to pick that date's
+    newest."""
+    deps = [d if is_marimo(d) or not exact_pin(d) else with_version(exact_pin(d)[0], None) for d in header_deps(header)]
+    return with_deps_and_date(header, deps, stamp)
+
+
+def pin_at(header, stamp, versions):
+    """The header at `stamp`, with each exactly pinned package but marimo pinned at its version in `versions`."""
+    def pinned(d):
+        found = None if is_marimo(d) else exact_pin(d)
+        if not found:
+            return d
+        req, was = found
+        return with_version(req, versions.get(canonical(req.name), was))
+    return with_deps_and_date(header, [pinned(d) for d in header_deps(header)], stamp)
+
+
+def write_header(path, header, previous):
+    """Write `header` as the notebook's PEP 723 header, under marimo's lock for the file, unless the header
+    is no longer `previous`: then nothing is written, and False. As marimo's own `write_manifest`, but a
+    blank line stays `#`, not `# `, so the rest of the user's header doesn't change."""
+    from marimo._environments import script_metadata
+    with script_metadata.notebook_file_lock(path):
+        if script_metadata.read_manifest(path) != previous:
+            return False
+        with open(path, encoding="utf-8", newline="") as f:
+            text = f.read()
+        newline = "\r\n" if "\r\n" in text else "\n"
+        lines = ["# /// script", *("#" if not line.strip() else f"# {line}" for line in header.rstrip().split("\n")), "# ///"]
+        block = newline.join(lines)
+        if script_metadata.loads(text) is not None:
+            text = script_metadata.replace_block(text, block)
+        elif text.startswith("#!"):
+            shebang, _, rest = text.partition("\n")
+            text = f"{shebang}\n{block}{newline}{rest}"
+        else:
+            text = f"{block}{newline}{text}"
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+    return True
+
+
+def resolve(path, header):
+    """The versions uv picks for the notebook at `path` with the header `header`, {canonical name: version},
+    and None with uv's reason when it can't. Resolved in a copy, so the notebook and its lock are untouched,
+    and nothing is built."""
+    from marimo._environments import script_metadata
+    text = Path(path).read_text(encoding="utf-8")
+    block = script_metadata.wrap_block(header) if header.strip() else script_metadata.wrap_block("dependencies = []")
+    script = script_metadata.replace_block(text, block) if script_metadata.loads(text) is not None else block + "\n" + text
+    with tempfile.TemporaryDirectory(prefix="endeavor-packages-") as folder:
+        copy = Path(folder) / Path(path).name
+        copy.write_text(script, encoding="utf-8")
+        try:
+            out = script_metadata.uv(["export", "--script", str(copy), "--no-hashes", "--no-header", "--no-annotate", "--no-build", "--quiet"],
+                                     env=script_metadata.script_command_env(), timeout=120, cwd=folder).stdout
+        except Exception as e:  # noqa: BLE001 - uv says why it can't
+            why = (getattr(e, "stderr", None) or str(e)).strip()
+            return None, "\n".join(line for line in why.splitlines() if line.strip())[-1500:]
+    versions = {}
+    for line in out.splitlines():
+        found = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?==([^\s;]+)", line)
+        if found:
+            versions[canonical(found.group(1))] = found.group(2)
+    return versions, None
+
+
+def version_changes(old, new):
+    """The packages whose versions differ between two resolutions: `from`, `to`, and `change`."""
+    from packaging.version import Version
+    rows = []
+    for name in sorted(set(old) | set(new)):
+        was, now = old.get(name), new.get(name)
+        if was == now:
+            continue
+        if was is None:
+            change = "added"
+        elif now is None:
+            change = "removed"
+        else:
+            try:
+                change = "upgraded" if Version(now) > Version(was) else "downgraded"
+            except Exception:  # noqa: BLE001
+                change = "changed"
+        rows.append({"name": name, "from": was, "to": now, "change": change})
+    return rows
 
 
 def package_date(path):
@@ -1506,6 +1679,7 @@ class Adapter:
         return {"interrupted": busy}
 
     async def restart(self, nb):
+        """A new session for the notebook, every cell not run."""
         if not nb.allowed:
             raise argument_error("execution_blocked", "The notebook is in safe preview; Run notebook starts it")
         # marimo's restart closes the session (its page then reloads, which starts a new one); we start it.
@@ -1520,6 +1694,61 @@ class Adapter:
             c.update(status="idle", ran_code=None, stale=False, output=None, console=[], errored=False, last_run=0.0, runtime=0.0, awaiting_install=False)
         await self.start(nb)
         return {"restarted": True}
+
+    async def preview_packages(self, nb, date, package=None, version=None):
+        """What moving the notebook's package date (the header's `exclude-newer`) to `date`, or to now, would
+        change; nothing changes yet. uv resolves the header at its date, and again at the new one with each
+        exactly pinned package let go to that date's newest; `changes` are the versions that differ, the
+        packages they bring included. marimo stays at the server's version. Nothing is built (`--no-build`),
+        so a preview runs no package's code, in safe preview too. `apply_packages` writes it."""
+        if package is not None or version is not None:
+            raise argument_error("not_supported", "A Python notebook's packages move together with its date: give `date`, or leave it out for today's newest. Exact versions are in the header")
+        stamp = date_stamp(date)
+        before = read_header(nb.path)
+        after = let_go(before, stamp)
+        old, problem = await asyncio.to_thread(resolve, nb.path, before)
+        new = None
+        if old is None:
+            # With no versions to start from, every package would read as added.
+            problem = f"The notebook's header doesn't resolve as it is, so there is nothing to compare with: fix the header first (a version that doesn't exist, or one only buildable from source). uv said: {problem}"
+        else:
+            new, problem = await asyncio.to_thread(resolve, nb.path, after)
+        if problem and f"no version of marimo=={marimo.__version__}" in " ".join(problem.split()):
+            problem = f"marimo {marimo.__version__}, which runs the notebook, was published after this date, so it can't be the package date: pick a later day. uv said: {problem}"
+        changes = [] if new is None else version_changes(old, new)
+        nb.previewed = None if new is None else {"day": day_of(stamp), "stamp": stamp, "header": before, "changes": changes}
+        return {"date": day_of(stamp), "asked": day_of(stamp), "current_date": day_of(package_date(nb.path)),
+                "status": "failed" if new is None else "ready", "changes": changes,
+                "problems": [] if problem is None else [{"message": problem}], "message": None,
+                "packages": len([d for d in header_deps(before) if not is_marimo(d)])}
+
+    async def apply_packages(self, nb, date):
+        """Move the package date to the one `preview_packages` showed for `date`, and pin each exactly pinned
+        package at that date's version: refused unless the preview is ready and still what it would do. A live
+        notebook then gets a new session, whose sandbox is built from the new header, and every cell is left not run.
+        In safe preview only the file changes."""
+        shown = nb.previewed
+        day = day_of(date_stamp(date))
+        if not shown or shown["day"] != day:
+            raise argument_error("no_preview", "there is no ready preview for that date. Call preview_package_update first and tell the user what it shows")
+        again = "the notebook's packages changed since the preview, so the update would change more or less than it showed. Call preview_package_update again and tell the user what it shows"
+        before = read_header(nb.path)
+        old = new = None
+        if before == shown["header"]:
+            old, _ = await asyncio.to_thread(resolve, nb.path, before)
+        if old is not None:
+            new, _ = await asyncio.to_thread(resolve, nb.path, let_go(before, shown["stamp"]))
+        nb.previewed = None
+        if new is None or version_changes(old, new) != shown["changes"]:
+            raise argument_error("no_preview", again)
+        # Before the restart: marimo's save keeps the header the file has, so the session can't write the
+        # old one back, and a header that changed under us (a start adding marimo) stops it with nothing done.
+        if not write_header(nb.path, pin_at(before, shown["stamp"], new), before):
+            raise argument_error("no_preview", again)
+        nb.mtime = os.stat(nb.path).st_mtime
+        if nb.live:
+            await self.restart(nb)
+        return {"date": day, "changes": shown["changes"], "process_status": nb.process_status()}
 
     async def approve(self, nb, packages=None):
         """The user's yes to the packages a notebook asks about (#355): they install, and the cells that
@@ -1638,7 +1867,11 @@ class Adapter:
         if method == "approve_install":
             packages = p.get("packages")
             return await self.approve(nb, packages if isinstance(packages, list) else None)
-        if method in ("answer", "preview_packages", "set_package_date", "set_input"):
+        if method == "preview_packages":
+            return await self.preview_packages(nb, p.get("date"), p.get("package"), p.get("version"))
+        if method == "set_package_date":
+            return await self.apply_packages(nb, p.get("date"))
+        if method in ("answer", "set_input"):
             raise argument_error("not_supported", "Python notebooks can't do this yet: it works in Julia and R notebooks")
         raise argument_error("unknown_method", f"Unknown adapter method: '{method}'")
 
