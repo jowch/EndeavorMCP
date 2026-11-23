@@ -1,10 +1,3 @@
-//! Paths on a server. Servers are Linux or macOS, so a path there follows `/`
-//! rules whatever this computer's are; on Windows a `PathBuf` would put `\`
-//! into it on `join` and read `C:` as a drive. So the app and this library
-//! carry a server's paths as plain strings, and take them apart with these.
-
-/// `name` (a name or a relative path) inside `dir`. An absolute `name`
-/// stands alone, as with `Path::join`.
 pub fn join(dir: &str, name: &str) -> String {
     if name.starts_with('/') || dir.is_empty() {
         name.to_owned()
@@ -15,14 +8,11 @@ pub fn join(dir: &str, name: &str) -> String {
     }
 }
 
-/// `path` without trailing `/`s, but `/` itself kept.
 fn trimmed(path: &str) -> &str {
     let t = path.trim_end_matches('/');
     if t.is_empty() && path.starts_with('/') { "/" } else { t }
 }
 
-/// The folder `path` is in: None for `/` and for an empty path; `""` for a
-/// bare name, as with `Path::parent`.
 pub fn parent(path: &str) -> Option<&str> {
     let path = trimmed(path);
     if path == "/" || path.is_empty() {
@@ -37,20 +27,16 @@ pub fn parent(path: &str) -> Option<&str> {
     })
 }
 
-/// `path`, then each folder it is in up to `/`, as with `Path::ancestors`.
 pub fn ancestors(path: &str) -> impl Iterator<Item = &str> {
     std::iter::successors(Some(path), |p| parent(p)).filter(|p| !p.is_empty())
 }
 
-/// The last part of `path`: None for `/`, an empty path or one ending in `..`.
 pub fn file_name(path: &str) -> Option<&str> {
     let path = trimmed(path);
     let name = path.rsplit('/').next().unwrap_or(path);
     (!name.is_empty() && name != "..").then_some(name)
 }
 
-/// `path` relative to `base`, part by part: `Some("")` for `base` itself,
-/// None when `path` isn't inside it (`/data2` isn't inside `/data`).
 pub fn strip_prefix<'a>(path: &'a str, base: &str) -> Option<&'a str> {
     let (path, base) = (trimmed(path), trimmed(base));
     if base == "/" {
@@ -73,7 +59,6 @@ mod tests {
         assert_eq!(join("/", "srv"), "/srv");
         assert_eq!(join("/home/ana", "/srv/data"), "/srv/data");
         assert_eq!(join("", "a.jl"), "a.jl");
-        // A name Windows would read as a drive is only a name here.
         assert_eq!(join("/home/ana", "C:x"), "/home/ana/C:x");
     }
 
