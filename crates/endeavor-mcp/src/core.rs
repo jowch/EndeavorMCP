@@ -446,7 +446,9 @@ struct JuliaNow {
 
 /// Finds and starts Julia (`julia boot.jl`, with Pluto) when it's first needed, once at a time.
 struct JuliaStarter {
-    source: crate::julia::Source,
+    /// Which Julia starts. A cluster job submitted before any notebook needed Julia is handed the one
+    /// found or downloaded on the login node (`endeavor/use_julia`, #80).
+    source: std::sync::Mutex<crate::julia::Source>,
     /// Whether Endeavor's own Julia may be downloaded; `endeavor/allow_julia_install` allows it later.
     install: std::sync::atomic::AtomicBool,
     /// Started when first needed: the client didn't find Julia, so the log says which one starts and why
@@ -483,7 +485,7 @@ struct JuliaStarter {
 impl JuliaStarter {
     fn new(args: &Args, token: &str, launcher: &str, stops: std::sync::mpsc::Sender<Stop>) -> JuliaStarter {
         JuliaStarter {
-            source: args.julia.clone(),
+            source: std::sync::Mutex::new(args.julia.clone()),
             install: args.install_julia.into(),
             when_needed: args.julia_when_needed,
             runtime: args.runtime.clone(),
@@ -649,7 +651,8 @@ impl JuliaStarter {
     fn start(&self, served: &Arc<Served>, warm: bool) -> Result<JuliaReady, String> {
         let install = !warm && self.install.load(std::sync::atomic::Ordering::SeqCst);
         self.now.lock().unwrap().started = None;
-        let found = crate::julia::find_whose(&self.source, install, &mut |line| {
+        let source = self.source.lock().unwrap().clone();
+        let found = crate::julia::find_whose(&source, install, &mut |line| {
             eprintln!("{line}");
             self.step(line);
         });
@@ -2219,6 +2222,12 @@ impl Served {
                 });
             }
             "endeavor/allow_julia_install" => self.julia.install.store(true, std::sync::atomic::Ordering::SeqCst),
+            // The Julia at `path`, for a start from now on: a start that failed for want of one is tried
+            // again when a notebook next needs it. Not a running Julia's.
+            "endeavor/use_julia" => match message["params"]["path"].as_str().filter(|path| !path.is_empty()) {
+                Some(path) => *self.julia.source.lock().unwrap() = crate::julia::Source::Path(path.to_owned()),
+                None => result = json!({ "error": "use_julia needs a path" }),
+            },
             "endeavor/allow_r_install" => self.allow_r_install.store(true, std::sync::atomic::Ordering::SeqCst),
             "endeavor/leave_to_plugin" => result = json!({ "left": leave_to_plugin(self, Arc::new(|front: &crate::mcp::Front| front.alive())) }),
             "endeavor/keep_for_app" => keep_for_app(self),

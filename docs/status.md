@@ -672,8 +672,16 @@ Next:
   one notebook at once count as one reader and get no `stale_read` or
   `run_conflict` from each other. The skill tells agents not to do that (#252).
   The plugin's `serve`, `mcp` and machines
-  pass the flag; on Slurm the login node still finds or downloads Julia, as
-  before, and only starting it waits. Test connection (`client::test`) that
+  pass the flag. On Slurm the login node looks for Julia before it submits the
+  job and passes it on when it finds one; when it doesn't, the job is submitted
+  without asking about Julia, which an R notebook never needs (#80). The job's
+  core then looks for Julia on the node when a Julia notebook first needs it,
+  and never downloads it there (compute nodes often have no internet): the
+  user's yes (`use_machine` with `install: true`) has the login node find or
+  download Endeavor's own (`files::Request::Julia`), and the core is told its
+  path (`endeavor/use_julia`). A download that takes longer than the call
+  says so, and the next `use_machine` with `install: true` finishes it.
+  Checked with the stand-in Slurm in the tests; not yet on a real cluster. Test connection (`client::test`) that
   finds a runtime already running has it start Julia and waits for it, so it
   fails when that server's Julia can't start, rather than pass on a ping
   (Endeavor #169). It downloads Endeavor's Julia only when the test may install

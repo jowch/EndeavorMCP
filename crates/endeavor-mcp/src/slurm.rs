@@ -261,7 +261,16 @@ pub fn cancel_recorded(dir: &Path) {
 /// submit it. The job's id.
 fn submit(args: &Args, client: &mut Client, request: &JobRequest, engine: &str, install: bool) -> Result<String, Unstarted> {
     let flags = request.checked_sbatch_args().map_err(|why| Unstarted::Failed(format!("The job wasn't submitted: {why}")))?;
-    let julia = runtime::find_julia(&args.julia, engine, install, client).map_err(|outcome| client.unstarted(outcome))?;
+    let julia = match runtime::find_julia(&args.julia, engine, install, client) {
+        Ok(path) => path,
+        // A job that starts Julia only when a notebook needs it may never need one (R notebooks
+        // don't), so the user isn't asked about Julia now (#80). The job's core looks for it on the
+        // node then, and never downloads it there, where there is often no internet: when it isn't
+        // found, the user's yes has it downloaded here, on the login node (`login_julia`), and the
+        // path handed to the core (`endeavor/use_julia`).
+        Err(Outcome::NeedsInstall(_)) if args.julia_when_needed && let Some(value) = args.julia.value() => value,
+        Err(outcome) => return Err(client.unstarted(outcome)),
+    };
     submit_job(args, client.mux, request, flags, &julia).map_err(Unstarted::Failed)
 }
 
@@ -723,6 +732,47 @@ pub fn relay_main(argv: &[String]) -> ! {
     }
 }
 
+/// What `files::Request::Julia` answers: the Julia a job of this helper's starts, as found here on the
+/// login node with `source`. With `download`, Endeavor's own is downloaded when none is found; the
+/// download runs on in a thread, one at a time, and each question meanwhile answers how far it is.
+pub fn login_julia(source: &crate::julia::Source, download: bool) -> Result<wire::files::JuliaState, String> {
+    use wire::files::JuliaState;
+    enum Fetch {
+        Running(Arc<Mutex<String>>),
+        Failed(String),
+    }
+    static FETCH: Mutex<Option<Fetch>> = Mutex::new(None);
+    let mut fetch = FETCH.lock().unwrap();
+    match fetch.take() {
+        Some(Fetch::Running(step)) => {
+            let step_now = step.lock().unwrap().clone();
+            *fetch = Some(Fetch::Running(step));
+            return Ok(JuliaState::Downloading { step: step_now });
+        }
+        // Said once; the next question tries again.
+        Some(Fetch::Failed(message)) => return Err(message),
+        None => {}
+    }
+    match crate::julia::find(source, false, &mut |_| {}) {
+        Ok((path, version)) => return Ok(JuliaState::Ready { path, version }),
+        Err(crate::julia::Failure::Failed(message)) => return Err(message),
+        Err(crate::julia::Failure::Missing(item)) if !download => return Ok(JuliaState::Missing { item }),
+        Err(crate::julia::Failure::Missing(_)) => {}
+    }
+    let step = Arc::new(Mutex::new("Downloading Julia".to_owned()));
+    *fetch = Some(Fetch::Running(step.clone()));
+    let source = source.clone();
+    std::thread::spawn(move || {
+        let found = crate::julia::find(&source, true, &mut |line| *step.lock().unwrap() = line);
+        *FETCH.lock().unwrap() = match found {
+            Ok(_) => None,
+            Err(crate::julia::Failure::Missing(_)) => Some(Fetch::Failed("Julia still wasn't found after the download.".into())),
+            Err(crate::julia::Failure::Failed(message)) => Some(Fetch::Failed(message)),
+        };
+    });
+    Ok(JuliaState::Downloading { step: "Downloading Julia".into() })
+}
+
 /// `endeavor node-start …`, the job's script: become the core on this
 /// node, which starts Julia, logging to the job's output.
 pub fn node_start_main(argv: &[String]) -> ! {
@@ -771,6 +821,19 @@ fn exec(_command: Command) -> std::io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn the_login_nodes_julia_is_found_for_a_job_and_a_missing_one_is_reported_not_downloaded() {
+        use wire::files::JuliaState;
+        let dir = crate::client::scratch("login-julia");
+        let julia = dir.join("julia");
+        std::fs::write(&julia, "#!/bin/sh\necho 'julia version 1.12.6'\n").unwrap();
+        std::fs::set_permissions(&julia, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path = julia.display().to_string();
+        assert_eq!(login_julia(&crate::julia::Source::Path(path.clone()), true), Ok(JuliaState::Ready { path, version: "1.12.6".into() }));
+        assert!(login_julia(&crate::julia::Source::Path(dir.join("none").display().to_string()), false).is_err(), "a path that isn't there is a failure, not a download");
+    }
 
     #[test]
     fn a_job_that_ended_is_never_reported_with_nothing_to_say() {

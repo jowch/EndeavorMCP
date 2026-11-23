@@ -29,6 +29,12 @@ pub enum Request {
     Preview { path: String },
     /// Slurm's partitions here, and `$SCRATCH`.
     Slurm,
+    /// The Julia that a cluster job of this helper's starts, found here on the login node, where there
+    /// is internet to download it. With `download`, Endeavor's own is downloaded when none is found
+    /// (the user agreed); the download runs on after the answer, which says how far it is, so the
+    /// client asks again. Only the helper knows its Julia, so it answers this one itself. A job
+    /// submitted without one (no notebook needed Julia yet) is handed the path (`endeavor/use_julia`).
+    Julia { download: bool },
     /// Whether a runtime (or its job) is there, found without taking it over.
     /// Only the helper knows its state folder, so it answers this one itself.
     Runtime,
@@ -72,7 +78,18 @@ pub enum Reply {
     /// is already there, so there's nothing to send.
     Place { path: String, have: bool },
     Written,
+    /// What `Julia` found: `ready` with its `path` and `version`; `downloading` with the `step` it is at;
+    /// or `missing`, with what a download would get (`item`), when there was no leave to download.
+    Julia { julia: JuliaState },
     Error { message: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "is", rename_all = "snake_case")]
+pub enum JuliaState {
+    Ready { path: String, version: String },
+    Downloading { step: String },
+    Missing { item: crate::Item },
 }
 
 /// What runs from a host's state folder.
@@ -105,6 +122,7 @@ pub fn answer(request: &Request) -> Reply {
         Request::Preview { path } => notebooks::read_preview(&expand(path)).map(|preview| Reply::Preview { preview }),
         Request::Slurm => crate::slurm::probe().map(|scheduler| Reply::Slurm { scheduler }),
         Request::Runtime => Err("Only the helper knows about its runtime.".into()),
+        Request::Julia { .. } => Err("Only the helper knows its Julia.".into()),
         Request::Folder { path } if other_users_home(path) => Err(format!("{path} names another user's home folder, which isn't supported here. Give the full path.")),
         Request::Folder { path } => folder(&expand(path)),
         Request::Place { folder, name, size, sha256 } => place(&expand(folder), name, *size, sha256),

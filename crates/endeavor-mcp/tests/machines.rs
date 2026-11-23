@@ -678,6 +678,76 @@ fn fields_inside_a_cluster_survive_the_changes_the_front_makes() {
     front.finish();
 }
 
+#[test]
+fn a_cluster_job_is_submitted_without_asking_about_julia_that_no_notebook_needs_yet() {
+    // #80: an R-only user on a cluster isn't asked to download Julia on the login node. The job's
+    // core looks for Julia when a notebook needs one; the user's yes then gets it on the login node.
+    let slurm = FakeSlurm::new("no-julia-yet");
+    // A login shell with no julia on its PATH, and no Endeavor's own Julia in the place's home.
+    let shell = slurm.dir.join("no-julia-shell");
+    common::write_executable(&shell, "#!/bin/sh\n[ \"$1\" = -lc ] && shift && set -- -c \"$@\"\nPATH=/usr/bin:/bin exec /bin/sh \"$@\"\n");
+    let place = Place::with("no-julia-yet", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string()), ("SHELL", shell.to_str().unwrap())]);
+    place.add_hpc();
+    let mut record = place.machines().find_by_name("hpc").unwrap().unwrap();
+    record.julia = None;
+    place.machines().save(record).unwrap();
+    let mut front = lazy_front(&place, &[]);
+    front.initialize();
+    let queued = front.ok("use_machine", json!({ "machine": "hpc", "cpus": 1, "memory_gb": 2, "hours": 1 }));
+    assert_eq!(queued["state"], "queued", "no question about Julia first: {queued}");
+    let script = std::fs::read_to_string(slurm.dir.join("job.sh")).unwrap();
+    assert!(script.contains("--julia 'auto' --julia-when-needed"), "the job looks for Julia itself: {script}");
+    front.finish();
+}
+
+#[test]
+fn a_cluster_jobs_core_without_julia_gets_the_login_nodes_on_the_users_yes() {
+    // #80: the job's node has no Julia (and maybe no internet). The user's yes has the login node find
+    // (or download) one, and the job's core is told where it is, so the next notebook call starts it.
+    let slurm = FakeSlurm::new("julia-from-login");
+    let no_julia = slurm.dir.join("no-julia-shell");
+    common::write_executable(&no_julia, "#!/bin/sh\n[ \"$1\" = -lc ] && shift && set -- -c \"$@\"\nPATH=/usr/bin:/bin exec /bin/sh \"$@\"\n");
+    let place = Place::with("julia-from-login", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string())]);
+    place.add_hpc();
+    let mut front = lazy_front(&place, &[]);
+    front.initialize();
+    let queued = front.ok("use_machine", json!({ "machine": "hpc", "cpus": 1, "memory_gb": 2, "hours": 1 }));
+    assert_eq!(queued["state"], "queued", "{queued}");
+    slurm.set("node", &this_host());
+    slurm.set("state", "RUNNING");
+    let home = place.dir.join("node-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut node = Command::new(env!("CARGO_BIN_EXE_endeavor"))
+        .args(["node-start", "--state-dir"])
+        .arg(&place.state)
+        .args(["--julia", "auto", "--julia-when-needed", "--runtime", "/nonexistent", "--depot", "/nonexistent", "--exit-idle"])
+        .env("SLURM_JOB_ID", "42")
+        .env("SHELL", &no_julia)
+        .env("HOME", &home)
+        .env("XDG_CACHE_HOME", &home)
+        .current_dir(&place.dir)
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    slurm.set("node.pid", &node.id().to_string());
+    wait_for("the job's runtime", || front.ok("session_status", json!({})).get("browser_url").is_some());
+    let notebook = place.project.join("a.jl");
+    std::fs::write(&notebook, "### A Pluto.jl notebook ###\n").unwrap();
+    let (failed, said) = front.call("open_notebook", json!({ "path": notebook.display().to_string() }));
+    assert!(failed && said["error"] == "julia_not_found", "{said}");
+    assert!(common::julia_pids(&place.state).is_empty());
+
+    let used = front.ok("use_machine", json!({ "machine": "hpc", "install": true }));
+    assert_eq!(used["state"], "ready", "{used}");
+    assert!(!used.to_string().contains("Julia on"), "no note: the login node's Julia was handed over: {used}");
+    let _ = front.call("open_notebook", json!({ "path": notebook.display().to_string() }));
+    wait_for("the login node's Julia to start in the job", || common::julia_pids(&place.state).len() == 1);
+    assert!(std::fs::read_dir(&home).unwrap().next().is_none(), "nothing was downloaded on the node");
+    front.finish();
+    let _ = node.kill();
+    let _ = node.wait();
+}
+
 /// How many connections were tried (`slow_place`).
 fn attempts(place: &Place) -> usize {
     std::fs::read_to_string(place.dir.join("attempts")).map_or(0, |text| text.lines().count())
