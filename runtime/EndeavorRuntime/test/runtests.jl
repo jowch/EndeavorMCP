@@ -267,6 +267,65 @@ end
         Pluto.SessionActions.shutdown(session2, nb2; async=false, verbose=false)
     end
 
+    @testset "runs from the page and from a moved @bind take the agent's staged cells with them (#438)" begin
+        knob = """
+        begin
+            struct Knob; start::Int; end
+            Base.get(k::Knob) = k.start
+            Base.show(io::IO, ::MIME"text/html", ::Knob) = print(io, "<input type=range>")
+        end
+        """
+        session, nb, cells = make_session_with_notebook(knob, "@bind w Knob(4)", "y = w * 2", "z = y + 1", "more + 1")
+        Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
+        @test cells[5].errored
+        EndeavorRuntime._wrap_page_run!()
+        EndeavorRuntime._wrap_bond_runs!()
+        settle() = (t = time(); while any(c -> c.running || c.queued, nb.cells) && time() - t < 60; sleep(0.1) end)
+        staged() = EndeavorRuntime.current_topology(nb) !== nb.topology
+        id(c) = string(c.cell_id)
+        # As the page sends it. Its client isn't connected, so Pluto's reply to it is dropped.
+        page_run(c) = Pluto.responses[:run_multiple_cells](Pluto.ClientRequest(; session, notebook=nb,
+            body=Dict{String,Any}("cells" => [id(c)]), initiator=Pluto.Initiator(Pluto.ClientSession(:page, nothing), :run)))
+
+        # The agent adds a cell below and doesn't run it; the user runs `y` on the page. The new
+        # cell, downstream, runs with it.
+        inserted = only(EndeavorRuntime.apply!(session, nb, [Dict("op" => "insert", "code" => "z * 10", "folded" => false, "index" => 4)])["inserted"])
+        @test staged()
+        page_run(cells[3])
+        settle()
+        @test nb.cells_dict[UUID(inserted)].output.body == "90"
+        @test !staged()
+
+        # The agent's edit makes `z`'s cell define `more` too, unrun; the user moves the knob. The
+        # cell runs with its new names, so the one reading `more` runs as well.
+        EndeavorRuntime.apply!(session, nb, [Dict("op" => "set_code", "cell_id" => id(cells[4]), "code" => "begin z = y + 1; more = z end")])
+        @test staged()
+        nb.bonds[:w] = Pluto.BondValue(5)
+        Pluto.set_bond_values_reactive(; session, notebook=nb, bound_sym_names=[:w], run_async=false)
+        @test cells[4].output.body == "11"
+        @test !cells[5].errored && cells[5].output.body == "12"
+        @test nb.cells_dict[UUID(inserted)].output.body == "110"
+        @test !staged()
+
+        # The edit taken back, unrun, and the knob moved again: `more` is gone, as on a fresh run,
+        # rather than left over from before.
+        EndeavorRuntime.apply!(session, nb, [Dict("op" => "set_code", "cell_id" => id(cells[4]), "code" => "z = y + 1")])
+        nb.bonds[:w] = Pluto.BondValue(6)
+        Pluto.set_bond_values_reactive(; session, notebook=nb, bound_sym_names=[:w], run_async=false)
+        @test cells[4].output.body == "13"
+        @test cells[5].errored && occursin("more", string(cells[5].output.body))
+        @test !staged()
+
+        # With nothing staged, both run as Pluto's own do.
+        nb.bonds[:w] = Pluto.BondValue(7)
+        Pluto.set_bond_values_reactive(; session, notebook=nb, bound_sym_names=[:w], run_async=false)
+        @test cells[4].output.body == "15" && nb.cells_dict[UUID(inserted)].output.body == "150"
+        page_run(cells[3])
+        settle()
+        @test cells[3].output.body == "14" && !cells[3].errored
+        Pluto.SessionActions.shutdown(session, nb; async=false, verbose=false)
+    end
+
     @testset "render_png waits a while, not for the run, on a worker running cells (#62)" begin
         picture = """
         begin

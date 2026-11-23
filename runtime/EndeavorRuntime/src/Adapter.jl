@@ -661,6 +661,56 @@ function _wrap_page_restart!()
     return nothing
 end
 
+# Runs Pluto starts itself see the staged cells (`_stage!`) as the tools' runs do (#438). Without
+# this, a run from the page left a staged new cell downstream out, and ran a staged edited one
+# with its new code but its old names, so a name it newly defined reached no other cell.
+#
+# A run from the page (its `run_multiple_cells` handler) takes the staged cells it reaches with
+# it, as `run_cells!` does, and Pluto analyses them with the rest. Once per Julia.
+const _PLUTO_RUN = Ref{Any}(nothing)
+function _wrap_page_run!()
+    _PLUTO_RUN[] === nothing || return nothing
+    original = _PLUTO_RUN[] = Pluto.responses[:run_multiple_cells]
+    Pluto.responses[:run_multiple_cells] = function (request; kwargs...)
+        nb = request.notebook
+        ids = nb === nothing ? nothing : get(request.body, "cells", nothing)
+        # Anything unexpected is left to Pluto's own handler, as it came.
+        if ids isa AbstractVector && all(id -> haskey(nb.cells_dict, UUID(string(id))), ids)
+            cells = [nb.cells_dict[UUID(string(id))] for id in ids]
+            roots = _with_staged_downstream(nb, cells)
+            length(roots) > length(cells) && (request.body["cells"] = [string(c.cell_id) for c in roots])
+        end
+        original(request; kwargs...)
+    end
+    return nothing
+end
+
+# A run for a changed `@bind` value analyses no cell: Pluto's `set_bond_values_reactive` runs the
+# readers with the notebook's topology as it is (`run_reactive_async!`'s three-argument form,
+# which only it calls). With staged cells among what it reaches, they are analysed into the run,
+# as `update_save_run!` analyses a run's cells: the old topology, from before their edits, says
+# which names to drop. Once per Julia, on the Pluto releases that have that method.
+const _BOND_RUNS_HOOKED = Ref(false)
+function _wrap_bond_runs!()
+    _BOND_RUNS_HOOKED[] && return nothing
+    hasmethod(Pluto.run_reactive_async!, Tuple{Pluto.ServerSession,Pluto.Notebook,Vector{Pluto.Cell}}) || return nothing
+    _BOND_RUNS_HOOKED[] = true
+    @eval Pluto function run_reactive_async!(session::ServerSession, notebook::Notebook, to_run::Vector{Cell}; kwargs...)
+        $(@__MODULE__)._run_reactive_with_staged!(session, notebook, to_run; kwargs...)
+    end
+    return nothing
+end
+
+function _run_reactive_with_staged!(session, nb, to_run; kwargs...)
+    roots = _with_staged_downstream(nb, to_run)
+    old = nb.topology
+    length(roots) == length(to_run) && return Pluto.run_reactive_async!(session, nb, old, old, to_run; kwargs...)
+    new = nb.topology = Pluto.updated_topology(old, nb, roots[length(to_run)+1:end])
+    Pluto.update_dependency_cache!(nb)
+    # Saved, unlike Pluto's bond runs: the file's cells go in the order of what they now define and use.
+    return Pluto.run_reactive_async!(session, nb, old, new, collect(roots); kwargs..., save=true)
+end
+
 # Pluto's own Stop, from the notebook's page, goes to its `interrupt_all` handler and not through
 # `interrupt!`, so it ended a waiting cell's process, and that read as a crash (#139). It is
 # `interrupt!` now, which does what that handler does, but stops the cell in its own task first.
