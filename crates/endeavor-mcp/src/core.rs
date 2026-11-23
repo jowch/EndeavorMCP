@@ -78,8 +78,8 @@ struct Args {
     install_r: bool,
     /// `--lifeline FD`: the read end of a pipe from the helper that started the core (`connect
     /// --own-with-client`), whose end before it says "k" means the start was abandoned (`watch_lifeline`).
-    #[cfg_attr(windows, allow(dead_code))]
-    lifeline: Option<i32>,
+    /// On Windows it is the value of an inherited handle.
+    lifeline: Option<usize>,
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -105,7 +105,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     "--r" | "--r-shell" if r.is_some() => return Err("give one of --r and --r-shell".into()),
                     "--r" | "--r-shell" => r = Some(crate::r::Source::from_flag(arg, value?)),
                     "--r-library" => r_library = Some(value?),
-                    "--lifeline" => lifeline = Some(value?.parse().map_err(|_| "--lifeline needs a file descriptor")?),
+                    "--lifeline" => lifeline = Some(value?.parse().map_err(|_| "--lifeline needs a file descriptor or handle")?),
                     _ => return Err(format!("unknown argument {arg}")),
                 }
             }
@@ -158,9 +158,8 @@ pub fn main(argv: &[String]) -> ! {
     let (stop_signals, inherited_mask) = block_stop_signals();
     #[cfg(unix)]
     crate::host_tools::set_command_mask(inherited_mask);
-    #[cfg(unix)]
-    if let Some(fd) = args.lifeline {
-        watch_lifeline(fd);
+    if let Some(lifeline) = args.lifeline {
+        watch_lifeline(lifeline, &args.state_dir);
     }
     // The runtime is the `runtime/` inside the folder `unpack` made.
     let _lease = args.runtime.parent().and_then(crate::lease);
@@ -1948,9 +1947,10 @@ fn block_stop_signals() -> (libc::sigset_t, libc::sigset_t) {
 /// gets SIGKILL; once the core has exited, nothing more is sent. Only the start is covered: after the helper says
 /// "k", a helper that is killed leaves the runtime running, as one that detaches does.
 #[cfg(unix)]
-fn watch_lifeline(fd: i32) {
+fn watch_lifeline(fd: usize, _: &Path) {
     use std::io::Read;
     use std::os::fd::FromRawFd;
+    let fd = fd as i32;
     // SAFETY: the helper passed this end to the core alone, and nothing else here owns it.
     let mut lifeline = unsafe { std::fs::File::from_raw_fd(fd) };
     // SAFETY: plain syscall. Julia and R don't take it along.
@@ -1965,6 +1965,33 @@ fn watch_lifeline(fd: i32) {
         unsafe { libc::kill(0, libc::SIGTERM) };
         std::thread::sleep(Duration::from_secs(10));
         unsafe { libc::kill(0, libc::SIGKILL) };
+    });
+}
+
+/// As on Unix: until the helper says it is wanted, end the core once that helper has gone (#144). Ending the
+/// core closes its Job Object, which takes Julia and its workers along, as the helper's own cancel does by
+/// ending the core (`Runtime::kill`).
+#[cfg(windows)]
+fn watch_lifeline(handle: usize, state_dir: &Path) {
+    use std::io::Read;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+    // SAFETY: the helper made this handle inheritable for the core alone, and nothing else here owns it.
+    // Julia and R don't take it along.
+    let mut lifeline = unsafe {
+        SetHandleInformation(handle as _, HANDLE_FLAG_INHERIT, 0);
+        std::fs::File::from_raw_handle(handle as _)
+    };
+    let state_dir = state_dir.to_owned();
+    std::thread::spawn(move || {
+        let mut said = [0u8; 1];
+        if matches!(lifeline.read(&mut said), Ok(1)) {
+            return;
+        }
+        eprintln!("endeavor core: the connection that started Endeavor ended while it started; stopping");
+        // A record written just before is this core's, and goes with it.
+        remove_state(&state_dir, std::process::id() as i32, None);
+        std::process::exit(1);
     });
 }
 

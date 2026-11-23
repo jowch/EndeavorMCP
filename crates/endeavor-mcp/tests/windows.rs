@@ -273,3 +273,36 @@ fn an_agents_notebook_call_through_the_front_reaches_julia() {
     front.finish();
     let _ = Command::new(env!("CARGO_BIN_EXE_endeavor")).arg("stop").arg("--state-dir").arg(&state).output();
 }
+
+/// A helper with `--own-with-client` that is killed while its start is under way, as some ssh servers kill it
+/// when the client goes, can't stop that start; the core stops it itself, Julia with it (#144, as #95 on Unix).
+#[test]
+fn a_start_of_its_own_ends_when_its_helper_is_killed_before_the_app_has_it() {
+    let dir = state_dir("windows-start-own-killed");
+    let mut cleanup = Cleanup::new(&dir);
+    let bridge = FakeBridge::start(&dir);
+    let julia = stand_in(&dir);
+    std::fs::write(dir.join("token"), TOKEN).unwrap();
+    std::fs::write(dir.join("hold"), "").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
+    command.arg("connect").arg("--state-dir").arg(&dir).arg("--julia").arg(&julia).arg("--runtime").arg(dir.join("runtime")).arg("--depot").arg(dir.join("depot")).arg("--own-with-client");
+    env_for(&mut command, &dir, &bridge);
+    let mut own = common::helper::Helper::spawn(command);
+    cleanup.pids.push(own.process.id());
+    own.hello();
+    own.request_start(None, true);
+    wait_for("Julia to be started", || !julia_pids(&dir).is_empty());
+    let started = julia_pids(&dir)[0] as u32;
+    let mut core = 0;
+    wait_for("starting.lock to name the core", || {
+        core = std::fs::read_to_string(dir.join("starting.lock")).ok().and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok()).and_then(|said| said["pid"].as_u64()).unwrap_or_default() as u32;
+        core != 0
+    });
+    cleanup.pids.push(core);
+    own.process.kill().unwrap();
+    own.process.wait().unwrap();
+    wait_for("the core to end", || !running(core));
+    wait_for("Julia to end with it", || !running(started));
+    assert!(!dir.join("runtime.json").exists());
+    assert!(std::fs::read_to_string(dir.join("runtime.log")).unwrap().contains("the connection that started Endeavor ended while it started"));
+}
