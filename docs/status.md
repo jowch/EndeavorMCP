@@ -60,7 +60,8 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   dialog is still to be checked by hand (#26).
   A Julia notebook's run whose cells use a package the notebook doesn't
   have yet (not in its Project.toml, not a standard library) stops before
-  Pluto adds it (#397): its cells stay queued, `packages.step` is `asking`
+  Pluto adds it (#397): its cells stay queued (though nothing runs, so
+  other cells still read and view as usual, #506), `packages.step` is `asking`
   with `new`, and `approve_install` is the user's yes, asked about in the
   same dialog or page; its yes holds for those packages while the notebook
   is open. The yes covers only the packages the user was shown: the dialog,
