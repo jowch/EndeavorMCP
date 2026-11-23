@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn a_click_on_a_page_that_is_gone_gets_the_page_that_says_so() {
-        // The page answers before it reads what a POST sent, so a body that arrives after the
+        // The page used to answer a POST before reading its body, so a body that arrived after the
         // head was left unread, and closing the socket sent a reset in place of the 404 (#538).
         let pages = Pages::default();
         let opened = Mutex::new(Vec::<String>::new());
