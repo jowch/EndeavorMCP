@@ -1286,6 +1286,18 @@ class Adapter:
             # session though a fresh run of the file fails on them (#410). In lazy mode they turn stale.
             deleted = [ch["cellId"] for ch in changes if ch["type"] == "delete-cell"]
             if deleted:
+                # Its readers are marked stale here, as marimo will mark them: the kernel takes the cell
+                # out only after a running cell, and a read before that would show them current.
+                if any(nb.cells[c]["ran_code"] is not None for c in deleted):
+                    down = {d["cell_id"]: d["downstream"] for d in graph(nb, edges=True)["cells"]}
+                    todo, seen = list(deleted), set(deleted)
+                    while todo:
+                        for r in down.get(todo.pop(), []):
+                            if r not in seen:
+                                seen.add(r)
+                                todo.append(r)
+                                if nb.cells[r]["ran_code"] is not None:
+                                    nb.cells[r]["stale"] = True
                 asyncio.create_task(self.unregister(nb, deleted))
             # Our copy follows at once, not when marimo's message comes back: the next read is ours.
             for ch in changes:
