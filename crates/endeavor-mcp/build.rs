@@ -1,13 +1,3 @@
-//! Embeds `runtime/` (the Julia side of the runtime) and `plugin/` (the Pluto
-//! skills as a Claude Code plugin) in the binary, so `endeavor serve`
-//! and `mcp` work from the one file (see `standalone`) and Endeavor takes both
-//! from this crate (`embedded`). Each one's version names the folder it's
-//! unpacked to: the package version and a hash of the files.
-//!
-//! BUILD_VERSION names the whole build the same way, hashing the Rust source
-//! (this crate's and `wire`'s) along with both folders, since the package
-//! version alone doesn't change between builds.
-
 #[path = "../wire/src/tree.rs"]
 mod tree;
 
@@ -44,10 +34,6 @@ fn main() {
         assert!(key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "ENDEAVOR_RELEASE_KEY is not a key: {key:?}");
     }
     out.push_str(&format!("pub const RELEASE_KEY: Option<&str> = {key:?};\n"));
-    // scripts/release-key, when it pins this build with checksums: the Helpers
-    // pin job writes them on main after the build, so a build of the pin commit
-    // (the one Endeavor's Cargo.lock usually pins) carries the sums of the
-    // release's binaries for its own key. `release` checks a server's helper against them.
     let pin = manifest.join("../../scripts/release-key");
     if pin.exists() {
         println!("cargo:rerun-if-changed={}", pin.display());

@@ -8,7 +8,6 @@ use super::*;
 const KEY: &str = "0123456789ab";
 const HELPER: &[u8] = b"the helper for another platform";
 
-/// A scratch folder under the workspace's `target/tmp`.
 fn scratch(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp").join(format!("release-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -16,8 +15,6 @@ fn scratch(name: &str) -> PathBuf {
     dir.canonicalize().unwrap()
 }
 
-/// The `file://` address of `path` as curl wants it: on Windows `file:///D:/a/x`,
-/// from `D:\a\x` or the canonical `\\?\D:\a\x`, and `file://server/share/x` from a UNC path.
 fn file_url(path: &str) -> String {
     let path = path.replace('\\', "/");
     let path = match path.strip_prefix("//?/UNC/") {
@@ -32,7 +29,6 @@ fn file_url(path: &str) -> String {
     }
 }
 
-/// The address of a folder on this computer.
 fn folder_url(folder: &Path) -> String {
     file_url(&folder.display().to_string())
 }
@@ -45,7 +41,6 @@ fn file_addresses_are_valid_on_every_platform() {
     assert_eq!(file_url(r"\\?\UNC\server\share\release"), "file://server/share/release");
 }
 
-/// A release as a folder, with `HELPER` for linux-aarch64 whose checksum file says `sum`; its `file://` address.
 fn release(dir: &Path, sum: &str) -> String {
     let folder = dir.join("release");
     std::fs::create_dir_all(&folder).unwrap();
@@ -55,7 +50,6 @@ fn release(dir: &Path, sum: &str) -> String {
     folder_url(&folder)
 }
 
-/// Everything under `dir`, as relative paths.
 fn files(dir: &Path) -> Vec<String> {
     let mut found = Vec::new();
     let mut todo = vec![dir.to_owned()];
@@ -95,7 +89,6 @@ fn a_kept_helper_is_used_again_without_downloading_unless_it_changed() {
     let dir = scratch("reuse");
     let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(HELPER)));
     let first = fetch_helper("linux", "aarch64", Some(KEY), &url, None, &cache, &removed_build).unwrap();
-    // The release is gone, so a second call that succeeds didn't download.
     std::fs::remove_dir_all(dir.join("release")).unwrap();
     assert_eq!(fetch_helper("linux", "aarch64", Some(KEY), &url, None, &cache, &removed_build).unwrap(), first);
 
@@ -120,16 +113,12 @@ fn a_download_that_fails_its_checksum_is_refused_and_nothing_is_kept() {
 fn a_release_without_the_helper_says_so() {
     let dir = scratch("missing");
     let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(HELPER)));
-    // Not in the checksum file.
     let error = fetch_helper("darwin", "aarch64", Some(KEY), &url, None, &cache, &removed_build).unwrap_err();
     assert_eq!(error, format!("The release has no helper for darwin aarch64 servers in build {KEY} (endeavor-{KEY}-darwin-aarch64 isn't in its checksum file)."));
-    // In the checksum file, but the file isn't there.
     let error = fetch_helper("linux", "x86_64", Some(KEY), &url, None, &cache, &removed_build).unwrap_err();
     assert!(error.starts_with("Couldn't get the helper for linux x86_64 servers from the release: Couldn't download file://"), "{error}");
-    // No checksum file for this key, and no LATEST.
     let error = fetch_helper("linux", "aarch64", Some("ffffffffffff"), &url, None, &cache, &removed_build).unwrap_err();
     assert!(error.starts_with("Couldn't get the helper for linux aarch64 servers from the release: Couldn't download file://"), "{error}");
-    // No checksum file for this key, and LATEST names another: it was removed.
     std::fs::write(dir.join("release").join("LATEST"), format!("{KEY}\n")).unwrap();
     let error = fetch_helper("linux", "aarch64", Some("ffffffffffff"), &url, None, &cache, &removed_build).unwrap_err();
     assert_eq!(error, "Build ffffffffffff of endeavor is old and was removed from the release, so it can't get the helper for linux aarch64 servers. Update endeavor: update the plugin, or run `endeavor update` if you installed it with the install script.");
@@ -137,7 +126,6 @@ fn a_release_without_the_helper_says_so() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Main's release-key in `dir`, pinning `key` with `sum` for linux-aarch64; its address.
 fn main_pin(dir: &Path, key: &str, sum: &str) -> String {
     let file = dir.join("main-release-key");
     std::fs::write(&file, format!("{key}\r\n{}  endeavor-{key}-linux-x86_64\r\n{sum}  endeavor-{key}-linux-aarch64\r\n", sha256_hex(b"other"))).unwrap();
@@ -146,7 +134,6 @@ fn main_pin(dir: &Path, key: &str, sum: &str) -> String {
 
 #[test]
 fn a_helper_main_pins_is_checked_against_mains_checksum_not_the_releases() {
-    // The release was tampered with: its helper and its checksum file agree, and main pins the real helper's checksum.
     let dir = scratch("pinned");
     let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(HELPER)));
     let pin = main_pin(&dir, KEY, &sha256_hex(b"the real helper"));
@@ -154,13 +141,11 @@ fn a_helper_main_pins_is_checked_against_mains_checksum_not_the_releases() {
     assert!(error.contains(&format!("doesn't match the checksum pinned for build {KEY}")) && error.ends_with("It was deleted."), "{error}");
     assert!(!cache.join(KEY).join("linux-aarch64/endeavor").exists());
 
-    // The real helper, and the release's checksum file gone: main's checksum is all it needs.
     std::fs::remove_file(dir.join(format!("release/endeavor-{KEY}.sha256"))).unwrap();
     let pin = main_pin(&dir, KEY, &sha256_hex(HELPER));
     let kept = fetch_helper("linux", "aarch64", Some(KEY), &url, Some(&pin), &cache, &removed_build).unwrap();
     assert_eq!(std::fs::read(&kept).unwrap(), HELPER);
 
-    // A pin that lists no helper for this platform says so.
     let error = fetch_helper("darwin", "aarch64", Some(KEY), &url, Some(&pin), &cache, &removed_build).unwrap_err();
     assert_eq!(error, format!("The checksums pinned for build {KEY} list no helper for darwin aarch64 servers (endeavor-{KEY}-darwin-aarch64)."));
     let _ = std::fs::remove_dir_all(&dir);
@@ -170,10 +155,8 @@ fn a_helper_main_pins_is_checked_against_mains_checksum_not_the_releases() {
 fn a_pin_of_another_build_or_none_leaves_the_releases_checksum() {
     let dir = scratch("pinned-other");
     let (cache, url) = (dir.join("cache"), release(&dir, &sha256_hex(HELPER)));
-    // Main pins a newer build: this build's helper is checked against the release's checksum file.
     let pin = main_pin(&dir, "eeeeeeeeeeee", &sha256_hex(b"not this build"));
     fetch_helper("linux", "aarch64", Some(KEY), &url, Some(&pin), &cache, &removed_build).unwrap();
-    // Main can't be read: the same.
     std::fs::remove_dir_all(&cache).unwrap();
     fetch_helper("linux", "aarch64", Some(KEY), &url, Some("file:///no/such/release-key"), &cache, &removed_build).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -227,7 +210,6 @@ fn a_checksum_file_is_read_as_sha256sum_writes_it() {
     assert_eq!(checksum_for(sums, "endeavor-k-linux-aarch64"), None);
 }
 
-/// A release served on 127.0.0.1 that counts the requests for each path.
 fn serve(files: HashMap<String, Vec<u8>>) -> (String, Arc<Mutex<HashMap<String, usize>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -302,7 +284,6 @@ fn the_folders_of_other_keys_are_removed_when_a_helper_is_fetched_or_reused() {
     let kept = fetch_helper("linux", "aarch64", Some(KEY), &url, None, &cache, &removed_build).unwrap();
     assert!(kept.exists() && !cache.join("ffffffffffff").exists());
 
-    // A failed fetch leaves the others alone.
     std::fs::create_dir_all(&older).unwrap();
     fetch_helper("linux", "aarch64", Some("eeeeeeeeeeee"), &url, None, &cache, &removed_build).unwrap_err();
     assert!(older.exists());
@@ -319,9 +300,7 @@ fn a_wget_redirect_away_from_https_is_found_in_its_headers() {
     assert_eq!(redirect_not_https(github, &headers(&["http://cdn.example/x"])).as_deref(), Some("http://cdn.example/x"));
     assert_eq!(redirect_not_https(github, &headers(&["HTTPS://a.example/1", "http://b.example/2", "https://c.example/3"])).as_deref(), Some("http://b.example/2"));
     assert_eq!(redirect_not_https(github, "  HTTP/1.1 301\n  location:   ftp://a.example/x  \n").as_deref(), Some("ftp://a.example/x"));
-    // From plain http, as curl's --proto-redir =https, a relative redirect stays http and is refused too.
     assert_eq!(redirect_not_https("http://127.0.0.1:9/x", &headers(&["/y"])).as_deref(), Some("/y"));
     assert_eq!(redirect_not_https("http://127.0.0.1:9/x", &headers(&["https://a.example/y", "/z"])), None);
-    // A header named like it, or a body line, isn't a redirect.
     assert_eq!(redirect_not_https(github, "  Content-Location: http://a.example/x\n  X-Location: http://b\n"), None);
 }

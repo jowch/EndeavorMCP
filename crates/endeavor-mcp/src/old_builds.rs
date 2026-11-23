@@ -1,52 +1,20 @@
-//! Removing other builds that nothing uses any more (#97), from the two folders that keep one per
-//! build: a server's `~/.cache/endeavor/<build>/` (or the app's install folder there), which the
-//! bootstrap script installs into, and the plugin's `bin/<key>/`, which its launcher downloads into.
-//!
-//! A process run from one of those folders holds a `standalone::Lease` on it for as long as it
-//! runs (`hold_own_folder`), which also marks the folder as used every hour. `connect`, `mcp` and
-//! `serve` then look at the other builds beside their own, in the background (`tidy`), and remove
-//! one only when all of these hold:
-//! - no one holds a lease on it, and it hasn't been used for `KEEP_UNUSED` (a build from before
-//!   leases counts from when it was installed);
-//! - no process here runs from it, or names a file in it (Julia's `--project`);
-//! - on a server, no runtime record names it (`runtime.json`, in the state folders `record_folders` lists): a
-//!   runtime on another login node, or in a job, runs from the build that started it. A record from
-//!   this computer whose process is gone doesn't count, and one from before builds were recorded keeps
-//!   them all;
-//! - on a server, no Slurm job of the user's that is waiting or running starts from it (the job
-//!   script names the build's binary). A server where `squeue` doesn't answer is left alone.
-//!
-//! The time covers what this computer can't see: a cluster's other login nodes, whose processes
-//! and locks don't show here, keep marking a folder they use. A mark is the marking node's time, so
-//! this relies on the nodes' clocks being within days of each other (a mark in the future counts as
-//! now). A folder is moved aside before it is removed, so a removal cut short leaves
-//! `<name>.removing.<pid>`, which the next look removes.
-
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use crate::{embedded, paths, standalone};
 
-/// How long a build nothing holds is kept after its last use.
 pub(crate) const KEEP_UNUSED: Duration = Duration::from_secs(7 * 24 * 3600);
 
-/// How long a folder an install left half-written (`<name>.part.<pid>`) is kept: its install may
-/// still be going on.
 pub(crate) const KEEP_PART: Duration = Duration::from_secs(24 * 3600);
 
-/// Which of the two folders a binary runs from.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Place {
-    /// `<root>/<build>/endeavor` beside `<root>/<build>/runtime`, as the bootstrap script installs it.
     Server { base: PathBuf, own: String },
-    /// `<plugin bin>/<key>/endeavor`, or the same under `bin-from/<release>/`.
     Plugin { base: PathBuf, own: String },
 }
 
 impl Place {
-    /// Where this binary runs from, if it is one of the two. A binary built into the app
-    /// (`helper_args`) is neither.
     pub(crate) fn here(helper_args: &[&str]) -> Option<Place> {
         if !helper_args.is_empty() {
             return None;
@@ -55,7 +23,6 @@ impl Place {
         Place::of(&exe, &paths::Env::here().plugin_bin(), embedded::BUILD_VERSION)
     }
 
-    /// `of` for a binary at `exe`, the plugin's folder being `plugin_bin` and this build `build`.
     pub(crate) fn of(exe: &Path, plugin_bin: &Path, build: &str) -> Option<Place> {
         let folder = exe.parent()?;
         let base = folder.parent()?.to_owned();
@@ -82,7 +49,6 @@ impl Place {
         }
     }
 
-    /// Whether `folder`, beside this binary's, holds a whole build of this kind.
     fn is_build(&self, folder: &Path) -> bool {
         let binary = ["endeavor", "endeavor.exe"].iter().any(|name| folder.join(name).is_file());
         match self {
@@ -91,8 +57,6 @@ impl Place {
         }
     }
 
-    /// The other builds that are kept whatever their use: for the plugin, the newest one the
-    /// launcher fetched (`.newest`), which an unpinned start runs.
     fn kept(&self) -> Vec<String> {
         match self {
             Place::Server { .. } => Vec::new(),
@@ -103,21 +67,14 @@ impl Place {
 
 static OWN: OnceLock<Option<standalone::Lease>> = OnceLock::new();
 
-/// How long a start waits for its folder's lock while another build's `remove_unused` holds it.
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 
-/// Hold a lease on the folder this binary runs from, for as long as it runs, if it is one of the
-/// two kinds (`Place`). If another build removed the folder as this one started (it held the lock
-/// while it moved the folder), say so and exit: the bootstrap or the launcher installs it again on
-/// the next start.
 pub(crate) fn hold_own_folder(place: Option<&Place>) {
     OWN.get_or_init(|| {
         let folder = place?.base().join(place?.own());
         let path = folder.join(standalone::IN_USE);
         let marker = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).ok()?;
         let started = std::time::Instant::now();
-        // Only a lock someone holds is waited for: a filesystem without locks (NFS mounted nolock,
-        // Lustre without flock) fails at once, and then no lease is held, and no build is removed there.
         loop {
             match marker.try_lock_shared() {
                 Ok(()) => break,
@@ -133,7 +90,6 @@ pub(crate) fn hold_own_folder(place: Option<&Place>) {
     });
 }
 
-/// Whether `path` is still the file `file` was opened as: the folder holding it wasn't moved away.
 #[cfg(unix)]
 fn same_file(file: &std::fs::File, path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -143,13 +99,11 @@ fn same_file(file: &std::fs::File, path: &Path) -> bool {
     }
 }
 
-/// On Windows a folder with a running binary in it can't be moved, so it is still there.
 #[cfg(windows)]
 fn same_file(_file: &std::fs::File, _path: &Path) -> bool {
     true
 }
 
-/// Look for other builds to remove, in a thread of its own, so that nothing waits for it.
 pub(crate) fn tidy(place: Option<Place>) {
     let Some(place) = place else { return };
     std::thread::spawn(move || {
@@ -158,10 +112,6 @@ pub(crate) fn tidy(place: Option<Place>) {
     });
 }
 
-/// Remove the builds beside `place`'s own that nothing uses (see the module's notes), as of `now`.
-/// `in_use` gives what processes and jobs name (their command lines, binaries and job scripts); a
-/// build is in use if any of them names a path in it. It is asked only when a build is old enough
-/// to go, and None (it can't tell) keeps them all. The names removed.
 pub(crate) fn remove_unused(place: &Place, now: SystemTime, in_use: &dyn Fn() -> Option<Vec<String>>) -> Vec<String> {
     let base = place.base();
     let Ok(entries) = std::fs::read_dir(base) else { return Vec::new() };
@@ -180,7 +130,6 @@ pub(crate) fn remove_unused(place: &Place, now: SystemTime, in_use: &dyn Fn() ->
             continue;
         }
         if let Some((build, _)) = name.split_once(".part.") {
-            // A half-written install of a build, left by one that was cut short.
             if age(&path).is_some_and(|age| age > KEEP_PART) && !build.is_empty() {
                 let _ = std::fs::remove_dir_all(&path);
             }
@@ -190,7 +139,6 @@ pub(crate) fn remove_unused(place: &Place, now: SystemTime, in_use: &dyn Fn() ->
             continue;
         }
         let mut marker = std::fs::OpenOptions::new().read(true).write(true).open(path.join(standalone::IN_USE)).ok();
-        // Without a marker the build is from before leases, and its folder's time is when it was installed.
         let used = match &marker {
             Some(marker) => marker.metadata().and_then(|m| m.modified()).ok().map(|t| now.duration_since(t).unwrap_or_default()),
             None => age(&path),
@@ -203,9 +151,6 @@ pub(crate) fn remove_unused(place: &Place, now: SystemTime, in_use: &dyn Fn() ->
             continue;
         }
         let trash = base.join(format!("{name}.removing.{}", std::process::id()));
-        // On Unix the lock, if taken, is held until the folder has moved, so a process starting from it meanwhile
-        // isn't told it may (`hold_own_folder`). Windows won't move a folder with a file open in it; there a
-        // binary running from the folder keeps it from moving instead.
         if cfg!(windows) {
             marker = None;
         }
@@ -218,7 +163,6 @@ pub(crate) fn remove_unused(place: &Place, now: SystemTime, in_use: &dyn Fn() ->
     removed
 }
 
-/// Whether any of `texts` names `folder` or a path in it.
 fn names(texts: &[String], folder: &Path) -> bool {
     let folder = folder.display().to_string();
     let real = Path::new(&folder).canonicalize().map(|p| p.display().to_string()).unwrap_or_else(|_| folder.clone());
@@ -229,9 +173,6 @@ fn names(texts: &[String], folder: &Path) -> bool {
     })
 }
 
-/// What the processes here name, and on a server the runtimes recorded in `folders` and the user's
-/// Slurm jobs; None if that can't be told. (The plugin's folders are named by release key, not by
-/// the build a record names, and its runtimes run on this computer, where their processes show.)
 fn in_use_texts(server: bool, base: &Path, folders: &[PathBuf]) -> Option<Vec<String>> {
     let mut texts = processes()?;
     if server {
@@ -241,9 +182,6 @@ fn in_use_texts(server: bool, base: &Path, folders: &[PathBuf]) -> Option<Vec<St
     Some(texts)
 }
 
-/// The state folders a runtime from a build in `base` may be recorded in: each folder in `base` (the
-/// app names a server's state folder there), each login node's `serve` folder, and the cluster's.
-/// A state folder given as a path outside these isn't looked at.
 pub(crate) fn record_folders(base: &Path, env: &paths::Env) -> Vec<PathBuf> {
     let mut folders: Vec<PathBuf> = std::fs::read_dir(base).into_iter().flatten().flatten().map(|e| e.path()).collect();
     if let Some(nodes) = env.state_dir().parent() {
@@ -253,9 +191,6 @@ pub(crate) fn record_folders(base: &Path, env: &paths::Env) -> Vec<PathBuf> {
     folders
 }
 
-/// The build folders in `base` that the runtimes recorded in `folders` run from; None if one of them
-/// may be running and its record doesn't say which build started it. A record from `host` whose
-/// process is gone is left out.
 pub(crate) fn recorded(folders: &[PathBuf], base: &Path, host: &str) -> Option<Vec<String>> {
     let mut texts = Vec::new();
     for folder in folders {
@@ -268,7 +203,6 @@ pub(crate) fn recorded(folders: &[PathBuf], base: &Path, host: &str) -> Option<V
     Some(texts)
 }
 
-/// The command line of each process here, with its binary on Linux.
 #[cfg(target_os = "linux")]
 pub(crate) fn processes() -> Option<Vec<String>> {
     let mut texts = Vec::new();
@@ -286,30 +220,21 @@ pub(crate) fn processes() -> Option<Vec<String>> {
     Some(texts)
 }
 
-/// The command line of each process here.
 #[cfg(all(unix, not(target_os = "linux")))]
 pub(crate) fn processes() -> Option<Vec<String>> {
     let output = std::process::Command::new("ps").args(["-A", "-ww", "-o", "args="]).stdin(std::process::Stdio::null()).output().ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).lines().map(str::to_owned).collect())
 }
 
-/// None here: on Windows a running binary can't be moved or removed, so `remove_unused` can't take
-/// it from a process that runs it, and the leases cover the rest.
 #[cfg(windows)]
 pub(crate) fn processes() -> Option<Vec<String>> {
     Some(Vec::new())
 }
 
-/// The scripts of the user's Slurm jobs named endeavor that wait or run: what they start. `%o` is the
-/// script's path, `job.sh` in a state folder, read as it is now; Slurm runs the copy it took when the
-/// job was submitted. The two agree because a state folder has one job at a time (`slurm::attach`
-/// reuses a waiting one), and a new submission writes `job.sh` again only once that job is gone. Empty
-/// where there's no Slurm; None if `squeue` doesn't answer or a script can't be read.
 fn job_scripts() -> Option<Vec<String>> {
     if !wire::slurm::has("squeue") {
         return Some(Vec::new());
     }
-    // Where `wire::slurm::has` found it: on the PATH, else in one of its folders.
     let off_path = wire::slurm::FOLDERS.iter().map(|d| Path::new(d).join("squeue")).find(|p| p.is_file());
     let on_path = std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|d| d.join("squeue").is_file()));
     let squeue = if on_path { PathBuf::from("squeue") } else { off_path? };

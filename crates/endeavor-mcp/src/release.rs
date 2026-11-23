@@ -1,15 +1,3 @@
-//! The Helpers release on GitHub: its address, downloading from it and
-//! checking SHA-256, the platform names its files use, and the helper for a
-//! server whose platform isn't this computer's. `update` and `endeavor mcp` use it.
-//!
-//! A download is checked against checksums pinned outside the release when
-//! there are some for its build: the ones this binary carries (build.rs), or
-//! the ones in main's `scripts/release-key`, which the Helpers pin job writes
-//! (`pinned_sums`, `read_pin`). Those catch a release changed after the pin.
-//! Otherwise the checksum file comes from the same release as the binary, so a
-//! check catches a corrupt or cut-short download and not a release that was
-//! tampered with.
-
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,22 +7,16 @@ use sha2::{Digest, Sha256};
 
 use crate::{client, embedded};
 
-/// The Helpers release; `ENDEAVOR_RELEASE_URL` replaces it (tests serve one locally; `file://` works too).
 const RELEASE: &str = "https://github.com/jowch/EndeavorMCP/releases/download/helpers";
 pub(crate) const RELEASE_ENV: &str = "ENDEAVOR_RELEASE_URL";
 
-/// The release's address without a trailing slash.
 pub(crate) fn base_url() -> String {
     std::env::var(RELEASE_ENV).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| RELEASE.into()).trim_end_matches('/').to_owned()
 }
 
-/// Main's release-key, where the Helpers pin job writes the build the plugins
-/// run and its checksums. `ENDEAVOR_PIN_URL` replaces it (`none` or empty: none); with
-/// only `ENDEAVOR_RELEASE_URL` set, none is read, since main doesn't pin that release's builds.
 const PIN: &str = "https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/release-key";
 pub(crate) const PIN_ENV: &str = "ENDEAVOR_PIN_URL";
 
-/// Where main's pin is read from, if anywhere.
 pub(crate) fn pin_url() -> Option<String> {
     match std::env::var(PIN_ENV) {
         Ok(url) => Some(url).filter(|url| !url.is_empty() && url != "none"),
@@ -43,8 +25,6 @@ pub(crate) fn pin_url() -> Option<String> {
     }
 }
 
-/// The build a release-key's `text` pins, when it holds checksums too: one
-/// from before the pin job wrote them holds the key alone, and isn't a pin of checksums.
 pub(crate) fn pinned_key(text: &str) -> Option<&str> {
     let mut lines = text.lines().map(str::trim);
     let key = lines.next().filter(|key| !key.is_empty() && key.chars().all(|c| c.is_ascii_hexdigit()))?;
@@ -52,14 +32,11 @@ pub(crate) fn pinned_key(text: &str) -> Option<&str> {
     lines.any(is_sum).then_some(key)
 }
 
-/// Main's release-key from `url`, when it pins a build with checksums: the build and the text.
 pub(crate) fn read_pin(url: &str) -> Result<Option<(String, String)>, String> {
     let text = String::from_utf8_lossy(&download(url, None)?).into_owned();
     Ok(pinned_key(&text).map(str::to_owned).map(|key| (key, text)))
 }
 
-/// The checksums pinned for build `key`: the ones this binary carries, else
-/// main's (from `pin`) when main pins `key`. None when neither pins it, or main can't be read.
 fn pinned_sums(key: &str, pin: Option<&str>) -> Option<String> {
     if let Some(text) = embedded::PINNED_SUMS
         && pinned_key(text) == Some(key)
@@ -69,9 +46,6 @@ fn pinned_sums(key: &str, pin: Option<&str>) -> Option<String> {
     read_pin(pin?).ok().flatten().filter(|(pinned, _)| pinned == key).map(|(_, text)| text)
 }
 
-/// The release's name for a platform given as `uname` words after `client`'s
-/// mapping (`linux`, `darwin` or `windows`, and `x86_64` or `aarch64`), if it
-/// has binaries for it.
 pub(crate) fn platform_name(os: &str, arch: &str) -> Option<&'static str> {
     match (os, arch) {
         ("linux", "x86_64") => Some("linux-x86_64"),
@@ -83,19 +57,16 @@ pub(crate) fn platform_name(os: &str, arch: &str) -> Option<&'static str> {
     }
 }
 
-/// The release's name for this computer's platform.
 pub(crate) fn this_platform_name() -> Option<&'static str> {
     let (os, arch) = client::this_platform();
     platform_name(&os, &arch)
 }
 
-/// The file the release holds for `platform` and `key`.
 pub(crate) fn asset_name(key: &str, platform: &str) -> String {
     let exe = if platform.starts_with("windows-") { ".exe" } else { "" };
     format!("endeavor-{key}-{platform}{exe}")
 }
 
-/// `bytes`' SHA-256 in lower-case hex.
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -105,22 +76,14 @@ pub(crate) fn sha256_of(path: &Path) -> Result<String, String> {
     Ok(sha256_hex(&bytes))
 }
 
-/// The checksum a release's `endeavor-<key>.sha256` (`sha256sum`'s output) gives for `name`.
 pub(crate) fn checksum_for(sums: &str, name: &str) -> Option<String> {
     sums.lines().filter_map(|line| line.split_once(char::is_whitespace)).find(|(_, file)| file.trim().trim_start_matches('*') == name).map(|(sum, _)| sum.to_lowercase())
 }
 
-/// How long a connection may take to open, and a whole download to finish: a
-/// release file is about 5 MB, which a slow line needs minutes for.
 const CONNECT_SECS: &str = "15";
 const FILE_SECS: &str = "900";
 const TEXT_SECS: &str = "60";
 
-/// `url`'s body, or with `to`, nothing, having written it there. With curl,
-/// or wget where there's no curl. From https, a redirect is followed only to
-/// https: curl refuses any other; GNU Wget has no such switch, so it prints the
-/// headers (`-S`) and a download that went through one is thrown away; Wget2
-/// prints none under `-q`, and is told to keep to https instead.
 pub(crate) fn download(url: &str, to: Option<&Path>) -> Result<Vec<u8>, String> {
     let mut curl = Command::new("curl");
     curl.args(["-fsSL", "--retry", "2", "--connect-timeout", CONNECT_SECS, "--max-time", if to.is_some() { FILE_SECS } else { TEXT_SECS }, "--proto-redir", "=https"]);
@@ -147,14 +110,12 @@ pub(crate) fn download(url: &str, to: Option<&Path>) -> Result<Vec<u8>, String> 
         return Err(format!("Couldn't download {url}: it was redirected to {to_where}, which isn't https, so the download was thrown away."));
     }
     if !output.status.success() {
-        // Under -q, wget's only word on why is the last status line of its headers.
         let reason = if by_wget { stderr.lines().map(str::trim).rfind(|l| l.starts_with("HTTP/")).unwrap_or("wget failed").to_owned() } else { stderr.into_owned() };
         return Err(format!("Couldn't download {url} ({}).", reason.trim()));
     }
     Ok(output.stdout)
 }
 
-/// The wget that fetches `url` to `to`, or to stdout.
 fn wget(url: &str, to: Option<&Path>) -> Command {
     let mut wget = Command::new("wget");
     client::no_window(&mut wget);
@@ -172,8 +133,6 @@ fn wget(url: &str, to: Option<&Path>) -> Command {
     wget
 }
 
-/// Whether `wget` is GNU Wget2, which accepts `--https-enforce` (Wget 1.x and
-/// BusyBox's refuse it) and prints no headers under `-q`.
 fn is_wget2() -> bool {
     let mut version = Command::new("wget");
     client::no_window(&mut version);
@@ -181,9 +140,6 @@ fn is_wget2() -> bool {
     version.output().is_ok_and(|out| String::from_utf8_lossy(&out.stdout).lines().next().is_some_and(|line| line.starts_with("GNU Wget2")))
 }
 
-/// The first redirect, in wget's `-S` headers for a fetch of `url`, that went
-/// somewhere other than https: what curl's `--proto-redir =https` refuses. A
-/// relative one keeps the scheme of the address it came from.
 pub(crate) fn redirect_not_https(url: &str, headers: &str) -> Option<String> {
     let is_https = |u: &str| u.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://"));
     let mut https = is_https(url);
@@ -201,38 +157,20 @@ pub(crate) fn redirect_not_https(url: &str, headers: &str) -> Option<String> {
     None
 }
 
-/// The helper to send to a server of platform `os` and `arch`, as `client`
-/// names them, fetched from the release this build belongs to.
 pub(crate) fn helper_for(os: &str, arch: &str, cache: &Path) -> Result<PathBuf, String> {
     fetch_helper(os, arch, embedded::RELEASE_KEY, &base_url(), pin_url().as_deref(), cache, &removed_build)
 }
 
-/// What a plugin or installed binary says when the release no longer has its build `key`.
 fn removed_build(key: &str, os: &str, arch: &str) -> String {
     format!("Build {key} of endeavor is old and was removed from the release, so it can't get the helper for {os} {arch} servers. Update endeavor: update the plugin, or run `endeavor update` if you installed it with the install script.")
 }
 
-/// The helper for a server of `os` and `arch` (`client`'s names) from the
-/// release's build `key`, for Endeavor's app, which doesn't ship every
-/// platform's: kept in `cache` as `fetch_helper` keeps it, so a kept one is
-/// used again without the network. `removed(key, os, arch)` is what to say
-/// when the release no longer has that build.
 pub fn release_helper(os: &str, arch: &str, key: &str, cache: &Path, removed: &dyn Fn(&str, &str, &str) -> String) -> Result<PathBuf, String> {
     fetch_helper(os, arch, Some(key), &base_url(), pin_url().as_deref(), cache, removed)
 }
 
-/// The longest another process's download is waited for.
 const LOCK_WAIT: Duration = Duration::from_secs(1200);
 
-/// `endeavor-<key>-<platform>` from `release`, checked against the checksums
-/// pinned for `key` (`pinned_sums`, main's read from `pin`) or, when there are
-/// none, against that key's checksum file on the release, and kept as `cache/<key>/<platform>/endeavor`. A kept file is
-/// used again once its checksum, recorded beside it, still matches. One
-/// process at a time checks or fetches (a lock file in that folder), a kept
-/// file is only ever replaced by renaming a checked download over it, and the
-/// folders of other keys in `cache` are removed afterwards. When the release
-/// no longer holds `key`, the error is `removed(key, os, arch)`: what to say
-/// to a user whose build is that old.
 pub(crate) fn fetch_helper(os: &str, arch: &str, key: Option<&str>, release: &str, pin: Option<&str>, cache: &Path, removed: &dyn Fn(&str, &str, &str) -> String) -> Result<PathBuf, String> {
     let platform = platform_name(os, arch).filter(|_| os != "windows").ok_or_else(|| client::no_helper(os, arch))?;
     let key = key.ok_or_else(|| format!("A helper for {os} {arch} servers needs a release build of Endeavor, installed with the install script, and this build has none."))?;
@@ -245,7 +183,6 @@ pub(crate) fn fetch_helper(os: &str, arch: &str, key: Option<&str>, release: &st
     Ok(helper)
 }
 
-/// Whether `dir` holds a kept helper whose checksum matches the one recorded.
 fn is_good(dir: &Path) -> bool {
     matches!((std::fs::read_to_string(dir.join("endeavor.sha256")), sha256_of(&dir.join("endeavor"))), (Ok(want), Ok(have)) if want.trim() == have)
 }
@@ -253,7 +190,6 @@ fn is_good(dir: &Path) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn fetch(os: &str, arch: &str, key: &str, platform: &str, release: &str, pin: Option<&str>, dir: &Path, removed: &dyn Fn(&str, &str, &str) -> String) -> Result<PathBuf, String> {
     let (kept, recorded) = (dir.join("endeavor"), dir.join("endeavor.sha256"));
-    // Left by a process that was killed; the lock says none is running.
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         if entry.file_name().to_string_lossy().contains(".part.") {
             let _ = std::fs::remove_file(entry.path());
@@ -272,7 +208,6 @@ fn fetch(os: &str, arch: &str, key: &str, platform: &str, release: &str, pin: Op
     let against = if pinned.is_some() { format!("the checksum pinned for build {key}") } else { "its checksum".to_owned() };
     let pid = std::process::id();
     let (part, part_sum) = (dir.join(format!("endeavor.part.{pid}")), dir.join(format!("endeavor.sha256.part.{pid}")));
-    // With pinned checksums, the release's checksum file wasn't read, so a build it no longer holds shows here.
     let fetched = download(&format!("{release}/{name}"), Some(&part)).map_err(|e| if pinned.is_some() { missing(e) } else { format!("Couldn't get the helper for {os} {arch} servers from the release: {e}") }).and_then(|_| {
         let got = sha256_of(&part)?;
         if got != want {
@@ -289,16 +224,12 @@ fn fetch(os: &str, arch: &str, key: &str, platform: &str, release: &str, pin: Op
     fetched.map(|()| kept)
 }
 
-/// Whether the release, which has no checksum file for `key`, names another
-/// build as its newest: this build was removed (prune-helpers.sh), since an
-/// installed binary's build was on the release once.
 fn was_removed(release: &str, key: &str) -> bool {
     let Ok(newest) = download(&format!("{release}/LATEST"), None) else { return false };
     let newest = String::from_utf8_lossy(&newest).trim().to_owned();
     !newest.is_empty() && newest != key && newest.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Hold `dir`'s lock until the file is dropped.
 fn lock(dir: &Path) -> Result<File, String> {
     let path = dir.join("endeavor.lock");
     let file = crate::owner_only(OpenOptions::new().read(true).write(true).create(true).truncate(false)).open(&path).map_err(|e| format!("Couldn't open {}: {e}", path.display()))?;
@@ -312,7 +243,6 @@ fn lock(dir: &Path) -> Result<File, String> {
     Ok(file)
 }
 
-/// Remove the folders of keys other than `key` from `cache`, if they can be.
 fn prune(cache: &Path, key: &str) {
     for entry in std::fs::read_dir(cache).into_iter().flatten().flatten() {
         if entry.file_name() != key && entry.file_type().is_ok_and(|t| t.is_dir()) {
@@ -321,7 +251,6 @@ fn prune(cache: &Path, key: &str) {
     }
 }
 
-/// `dir` and the folders above it that don't exist yet, readable only by the user.
 fn make_private_dir(dir: &Path) -> Result<(), String> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);

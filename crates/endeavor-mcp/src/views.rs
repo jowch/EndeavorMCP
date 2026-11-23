@@ -1,19 +1,3 @@
-//! The notebook view: Pluto's own editor in an MCP App view, for clients that draw them (Claude
-//! Desktop and claude.ai, which advertise the `io.modelcontextprotocol/ui` extension).
-//!
-//! The view runs in the client's sandbox, which can reach nothing on this computer, so it gets
-//! everything through tools only it can call (`visibility: ["app"]`): Pluto's page in parts
-//! (`notebook_page`), and a WebSocket to Pluto that the core holds for it (`notebook_socket_*`).
-//! The front (`endeavor mcp`) serves the view itself (`resources/read`) and forwards these calls to
-//! the core like any other. The sockets live in the core: a client may run one front per surface,
-//! and in Claude Desktop's chat the agent's calls and the view's reach different fronts.
-//!
-//! A socket goes only to this runtime's own Pluto, on loopback, with Pluto's secret, as the page
-//! proxy does (`core::Served`); the view names a notebook, never an address. Opening one checks
-//! that Pluto has that notebook open, but the socket is then a whole Pluto connection, as a browser
-//! tab's is: its messages can name any notebook this Pluto has open. That is what the browser link
-//! behind the same secret gives too, and no more.
-
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -26,9 +10,7 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 use wire::backend::Backend;
 
-/// The extension a client names in `initialize` when it draws MCP App views.
 pub const EXTENSION: &str = "io.modelcontextprotocol/ui";
-/// The one view, shown by `open_notebook` and `new_notebook`.
 pub const URI: &str = "ui://endeavor/notebook";
 const MIME: &str = "text/html;profile=mcp-app";
 
@@ -40,23 +22,16 @@ static TOOLS: LazyLock<Value> = LazyLock::new(|| {
     }
     tools
 });
-/// The view's tools: only the view calls them, and the agent doesn't see them.
 pub const NAMES: [&str; 7] = ["notebook_page", "notebook_socket_open", "notebook_socket_send", "notebook_socket_recv", "notebook_socket_close", "notebook_file", "notebook_crop"];
 
-/// The tools that show the view.
 const SHOWN_BY: [&str; 2] = ["open_notebook", "new_notebook"];
 
-/// The view's page: our loader with the MCP Apps SDK (`@modelcontextprotocol/ext-apps`'
-/// `app-with-deps.js`) and the Endeavor look and Point (`endeavor-view.js`, the app's
-/// `frontend/dist/view.js`) inside it. See `views/README.md`.
 static PAGE: LazyLock<String> = LazyLock::new(|| {
     let sdk = as_global(include_str!("views/mcp-app.js")).replace("</script", "<\\/script");
     let look = include_str!("views/endeavor-view.js").replace("</script", "<\\/script");
     include_str!("views/notebook.html").replacen("/*MCP_APP_SDK*/", &sdk, 1).replacen("/*ENDEAVOR_VIEW*/", &look, 1)
 });
 
-/// The SDK's module with its closing `export{a as B,...}` made `window.McpAppLib={B:a,...}`, so
-/// that it runs inline in the view's own script.
 fn as_global(module: &str) -> String {
     let Some(at) = module.rfind("export{") else { return module.to_owned() };
     let Some(end) = module[at..].find('}').map(|i| at + i) else { return module.to_owned() };
@@ -76,31 +51,22 @@ pub fn is_view_tool(name: &str) -> bool {
     NAMES.contains(&name)
 }
 
-/// Whether a client's `initialize` says it draws MCP App views.
 pub fn client_draws_views(initialize: &Value) -> bool {
     initialize["params"]["capabilities"]["extensions"].get(EXTENSION).is_some()
 }
 
-/// The schemas of the view's tools, for `tools/list` and the argument check.
 pub fn schemas() -> Vec<Value> {
     TOOLS.as_array().cloned().unwrap_or_default()
 }
 
-/// `new_notebook`'s and `open_notebook`'s argument, for a client that draws views, to open the
-/// notebook in the browser after all.
 pub const IN_BROWSER: &str = "in_browser";
 
-/// `tools/list` for a client that draws views: the tools that open a notebook show it, and the
-/// view's own tools are listed for the view.
 pub fn add_to(tools: &mut Vec<Value>) {
     for tool in tools.iter_mut().filter(|tool| tool["name"].as_str().is_some_and(|name| SHOWN_BY.contains(&name))) {
         tool["_meta"] = json!({ "ui": { "resourceUri": URI }, "ui/resourceUri": URI });
-        // Claude's desktop app shows the title in the call's row, after "Widget from <server>" (2026-11-12).
         if tool["title"].is_null() {
             tool["title"] = json!(if tool["name"] == "new_notebook" { "New notebook" } else { "Open notebook" });
         }
-        // A client may say it draws views and still show no card (Claude's desktop app, in its Chat
-        // tab, 2026-11-12, #311): the way back to the browser.
         tool["inputSchema"]["properties"][IN_BROWSER] = json!({
             "type": "boolean",
             "description": "Open the notebook in the user's browser instead of beside the chat. Set it when the user says they don't see the notebook or its card. Default: false.",
@@ -113,35 +79,21 @@ pub fn resources_list() -> Value {
     json!({ "resources": [{ "uri": URI, "name": "Notebook", "description": "The notebook, live, beside the chat.", "mimeType": MIME }] })
 }
 
-/// The web hosts the view lets cell outputs load files from (`resources_read`), and the one they may fetch from.
 const LOADS_FROM: [&str; 2] = ["https://cdn.jsdelivr.net", "https://esm.sh"];
 const FETCHES_FROM: [&str; 1] = ["https://cdn.jsdelivr.net"];
 
-/// `resources/read`'s result, or None for a resource we don't have.
 pub fn resources_read(params: &Value) -> Option<Value> {
     (params["uri"] == URI).then(|| {
         json!({ "contents": [{
             "uri": URI,
             "mimeType": MIME,
             "text": PAGE.as_str(),
-            // Claude's own field: open in the side panel, not in the conversation. The view also
-            // declares that it shows in the panel only (`availableDisplayModes`). Claude's desktop app
-            // ignores `prefersBorder` for a local server (2026-11-12) and keeps its bordered frame.
-            //
-            // The frame loads nothing from the web unless its `csp` names the host, and Claude's desktop
-            // app honours it for a local server (checked 2026-11-12). jsDelivr serves Pluto's fonts and
-            // MathJax's speech-rule maps, Ember's MathJax, the scripts of some PlutoUI widgets (RangeSlider,
-            // Scrubbable) and the font of Masque's controls. esm.sh serves plotly.js: PlutoPlotly imports it
-            // from there unless a cell runs `enable_plutoplotly_offline()`. Only jsDelivr is fetched from
-            // (MathJax's maps). Other hosts are left out. The README says so (Claude's desktop app).
             "_meta": { "ui": { "prefersBorder": false, "preferredDisplayMode": "fullscreen",
                 "csp": { "resourceDomains": LOADS_FROM, "connectDomains": FETCHES_FROM } } },
         }] })
     })
 }
 
-/// Pluto's page for the notebook view, from Julia (`endeavor/page_bundle`). Ember's comes from R's
-/// adapter (`page_bundle`, Ember's `view_page()`), through the core's engines.
 pub fn page_from_julia(port: u16, token: &str) -> Result<String, String> {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/page_bundle" }).to_string();
     let bearer = format!("Bearer {token}");
@@ -154,32 +106,18 @@ pub fn page_from_julia(port: u16, token: &str) -> Result<String, String> {
     }
 }
 
-/// What the core keeps for the views: each engine's page, made once, and the open sockets.
 #[derive(Default)]
 pub struct Views {
-    /// Pluto's private port and secret, once Julia is up.
     pub pluto: OnceLock<(u16, String)>,
-    /// Ember's port and secret, from the R that runs now, and which start of R that is (from 1): each
-    /// start may have a newer Ember, and may well reuse the port (Ember tries 4321 first).
     ember: Mutex<Option<(u16, String, u64)>>,
-    /// Each engine's page, with the start of the engine that made it (0 for Julia, which starts once):
-    /// a page from an R that has ended is made again.
     pages: Mutex<Vec<(Backend, u64, Arc<String>)>>,
-    /// The engine of each notebook a view's socket opened for, as `open` said then: the view opens
-    /// one before it reads its page, so the page's parts need no `open` (a snapshot of every
-    /// notebook) each.
     engines: Mutex<HashMap<String, Backend>>,
     sockets: Mutex<HashMap<u64, Arc<Socket>>>,
     next: AtomicU64,
-    /// The widget files the view read last, with the start of R that served them: one is read in
-    /// parts, and a few outputs ask for the same files in turn.
     files: Mutex<Vec<(u64, String, Arc<File>)>>,
-    /// The pictures Point's box picks drew in the view (`notebook_crop`), newest last, for the agent's
-    /// `view_cell_output` with `crop`: the view's frame can reach only our tools.
     crops: Mutex<VecDeque<Crop>>,
 }
 
-/// A picture of a box the user drew in the view: its id, the notebook, when, and the PNG.
 struct Crop {
     id: String,
     notebook: String,
@@ -187,43 +125,28 @@ struct Crop {
     png: Arc<Vec<u8>>,
 }
 
-/// A widget file: its `Content-Type` and its bytes.
 type File = (String, Vec<u8>);
 
-/// A socket the view hasn't asked about for this long is closed: the view went away.
 const IDLE: Duration = Duration::from_secs(60);
-/// A long-poll waits at most this long.
 const WAIT_MAX: Duration = Duration::from_millis(1500);
-/// What one receive returns at most, before base64: a larger message comes in parts (`more`), as
-/// the page does, since a client may limit a tool result's size.
 const RECV_BYTES: usize = 1_000_000;
-/// What a socket holds for its view at most. A view that stops reading for this long is gone.
 const INBOX_BYTES: usize = 256_000_000;
-/// Sockets open at once, over all views. Each view has one; an old one goes when its view does.
 const SOCKETS_MAX: usize = 16;
-/// A page part at most.
 const PART_MAX: usize = 2_000_000;
-/// A file part, before base64: a multiple of 3, so the parts' base64 joins up.
 const FILE_PART: usize = 999_999;
-/// A widget file at most (plotly's bundle is about 3.5 MB).
 const FILE_MAX: usize = 64_000_000;
-/// Widget files kept for the view's next parts.
 const FILES_KEPT: usize = 8;
-/// A box's picture at most, as PNG: a box over a full-screen panel at 2x is about 1 MB.
 const CROP_MAX: usize = 8_000_000;
-/// Pictures kept, and for how long: the agent reads one in the turn the user sends its quote.
 const CROPS_KEPT: usize = 32;
 const CROP_KEPT_FOR: Duration = Duration::from_secs(3600);
 
 impl Views {
-    /// R started: Ember's port and secret.
     pub fn set_ember(&self, port: u16, secret: String) {
         let mut ember = self.ember.lock().unwrap();
         let start = ember.as_ref().map_or(0, |(_, _, start)| *start) + 1;
         *ember = Some((port, secret, start));
     }
 
-    /// Where an engine's page and WebSocket are, and which start of it this is, or why not.
     fn engine(&self, backend: Backend) -> Result<(u16, String, u64), String> {
         match backend {
             Backend::Pluto => self.pluto.get().map(|(port, secret)| (*port, secret.clone(), 0)).ok_or_else(|| "not_ready: Julia isn't running".to_owned()),
@@ -232,9 +155,6 @@ impl Views {
         }
     }
 
-    /// One of the view's tool calls. `page` makes an engine's page for a notebook open in it (Pluto's
-    /// from Julia, Ember's from R's adapter), and `open` says which engine has a notebook id open, if
-    /// any. A `notebook_page` without a notebook is Pluto's.
     pub fn call(&self, name: &str, arguments: &Value, page: impl FnOnce(Backend, Option<&str>) -> Result<String, String>, open: impl FnOnce(&str) -> Option<Backend>) -> Result<Value, String> {
         self.close_idle();
         let socket_of = || -> Result<Arc<Socket>, String> {
@@ -261,7 +181,6 @@ impl Views {
                 let notebook = arguments["notebook_id"].as_str().ok_or("notebook_id must be a string")?;
                 let backend = open(notebook).ok_or_else(|| format!("not_open: no open notebook has the id {notebook}"))?;
                 {
-                    // A notebook's engine stays its engine while it's open; ids are few.
                     let mut engines = self.engines.lock().unwrap();
                     if engines.len() >= 1024 {
                         engines.clear();
@@ -274,7 +193,6 @@ impl Views {
                     return Err("too_many: too many notebook views are open".into());
                 }
                 let socket = Socket::connect(port, &format!("/?secret={secret}"), IDLE, INBOX_BYTES).map_err(|e| format!("not_connected: couldn't reach {engine}'s notebook server: {e}"))?;
-                // Counted again with the insert, under one lock: calls at the same moment stay under the cap.
                 let mut sockets = self.sockets.lock().unwrap();
                 if sockets.len() >= SOCKETS_MAX {
                     socket.close();
@@ -296,7 +214,6 @@ impl Views {
                 if got.closed {
                     self.sockets.lock().unwrap().retain(|_, s| !Arc::ptr_eq(s, &socket));
                 }
-                // `more`: the last message goes on in the next receive.
                 Ok(json!({ "messages": got.messages.iter().map(|m| STANDARD.encode(m)).collect::<Vec<_>>(), "more": got.more, "closed": got.closed }))
             }
             "notebook_file" => {
@@ -306,7 +223,6 @@ impl Views {
                     Some(backend) => backend,
                     None => open(notebook).ok_or_else(|| format!("not_open: no open notebook has the id {notebook}"))?,
                 };
-                // Only Ember serves a notebook's widget files; Pluto's widgets come with the page.
                 if backend != Backend::Ember {
                     return Err("not_found: only an R notebook's widgets have files".into());
                 }
@@ -327,8 +243,6 @@ impl Views {
                 if png.len() > CROP_MAX {
                     return Err(format!("too_large: the picture is {} MB, more than {} MB", png.len() / 1_000_000, CROP_MAX / 1_000_000));
                 }
-                // The view names it, so that its message needn't wait for this call (Claude's desktop app takes
-                // a view's message only just after the user's press): 16 hex digits it picked at random.
                 let id = match arguments["crop"].as_str() {
                     Some(id) if id.len() == 16 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => id.to_owned(),
                     Some(_) => return Err("crop must be 16 lowercase hex digits".into()),
@@ -356,15 +270,11 @@ impl Views {
         }
     }
 
-    /// The picture `crop` of a box the user drew over notebook `notebook` in the view, while it's kept.
     pub fn crop(&self, notebook: &str, crop: &str) -> Option<Arc<Vec<u8>>> {
         let crops = self.crops.lock().unwrap();
         crops.iter().find(|c| c.id == crop && c.notebook == notebook && c.at.elapsed() < CROP_KEPT_FOR).map(|c| c.png.clone())
     }
 
-    /// A widget file of the R that runs now, as Ember serves it: `deps/<name>-<version>/<file>`,
-    /// read from Ember's server on this computer with its secret, the way the notebook's own page
-    /// reads it. Ember serves only the folders of widgets a notebook's outputs use.
     fn file(&self, path: &str) -> Result<Arc<File>, String> {
         if !widget_file(path) {
             return Err(format!("not_found: {path} isn't a widget's file"));
@@ -405,7 +315,6 @@ impl Views {
 
     fn close_idle(&self) {
         let mut sockets = self.sockets.lock().unwrap();
-        // A socket Pluto closed stays until the view reads what's left and hears of the close.
         sockets.retain(|_, socket| {
             let keep = socket.used.lock().unwrap().elapsed() < IDLE;
             if !keep {
@@ -421,8 +330,6 @@ impl Views {
     }
 }
 
-/// Whether `path` names a widget's file as Ember's outputs do, `deps/<name>-<version>/<file>`, with
-/// nothing that could reach outside that folder or change the request.
 fn widget_file(path: &str) -> bool {
     let Some(rest) = path.strip_prefix("deps/") else { return false };
     let mut parts = rest.split('/');
@@ -431,8 +338,6 @@ fn widget_file(path: &str) -> bool {
         && parts.all(|part| !part.is_empty() && part != "." && part != ".." && part.chars().all(|c| c.is_ascii_alphanumeric() || "._-+@".contains(c)))
 }
 
-/// The part of `page` from byte `offset`, at most `size` bytes and ending on a character, and where
-/// the next part starts.
 fn part(page: &str, offset: usize, size: usize) -> (&str, usize) {
     let start = offset.min(page.len());
     let start = (0..=start).rev().find(|&i| page.is_char_boundary(i)).unwrap_or(0);
@@ -440,19 +345,12 @@ fn part(page: &str, offset: usize, size: usize) -> (&str, usize) {
     while !page.is_char_boundary(end) {
         end -= 1;
     }
-    // A part smaller than one character still moves on.
     if end == start && start < page.len() {
         end = (start + 1..=page.len()).find(|&i| page.is_char_boundary(i)).unwrap_or(page.len());
     }
     (&page[start..end], end)
 }
 
-/// Pluto's offline page (`generate_html(offline_bundle=true)`) as JSON the view puts together:
-/// `head` and `body` markup without scripts, and `scripts` in order, each `{attrs, text}` with a
-/// `data:` source read into its text. The view can't parse the page itself: Pluto's code holds
-/// sequences (`<!--<script`) that change how HTML reads a script once it is inline. Here the
-/// scripts are still `data:` sources, so a script's end is the first `</script` after it.
-/// Stylesheets from `data:` become `<style>`.
 pub fn split_page(html: &str) -> Result<String, String> {
     let lower = html.to_ascii_lowercase();
     let head_start = lower.find("<head").and_then(|i| lower[i..].find('>').map(|j| i + j + 1)).ok_or("no <head> in Pluto's page")?;
@@ -508,7 +406,6 @@ fn without_scripts(html: &str, lower: &str, scripts: &mut Vec<Value>) -> Result<
     }
 }
 
-/// A tag's attributes: `name="value"`, `name='value'`, `name=value` or a bare `name`.
 fn attributes(text: &str) -> serde_json::Map<String, Value> {
     let mut attrs = serde_json::Map::new();
     let bytes = text.as_bytes();
@@ -551,7 +448,6 @@ fn unescape(value: &str) -> String {
     value.replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 }
 
-/// A `data:` URL's text: base64 or percent-encoded. None for anything else.
 fn data_url(url: &str) -> Option<String> {
     let (head, data) = url.strip_prefix("data:")?.split_once(',')?;
     if head.ends_with(";base64") {
@@ -576,7 +472,6 @@ fn data_url(url: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// A WebSocket client to Pluto on loopback: a reader thread fills the inbox.
 struct Socket {
     stream: Mutex<wire::Shared>,
     inbox: Mutex<Inbox>,
@@ -585,14 +480,12 @@ struct Socket {
     used: Mutex<Instant>,
 }
 
-/// Pluto's messages the view hasn't read yet, and their bytes.
 #[derive(Default)]
 struct Inbox {
     messages: VecDeque<Vec<u8>>,
     bytes: usize,
 }
 
-/// One receive: whole messages, except that the last goes on in the next receive when `more`.
 struct Got {
     messages: Vec<Vec<u8>>,
     more: bool,
@@ -600,10 +493,7 @@ struct Got {
 }
 
 impl Socket {
-    /// A socket that closes itself when its view hasn't asked about it for `idle`, or has left more
-    /// than `inbox_max` bytes unread: the view went away without saying so (Claude quit, say).
     fn connect(port: u16, path: &str, idle: Duration, inbox_max: usize) -> io::Result<Arc<Socket>> {
-        // One handle for the reader and the writer, not a `try_clone` (wire::Shared says why).
         let stream = wire::Shared::new(TcpStream::connect(("127.0.0.1", port))?);
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         let mut key = [0u8; 16];
@@ -632,7 +522,6 @@ impl Socket {
         let socket = Arc::new(Socket { stream: Mutex::new(stream), inbox: Mutex::default(), arrived: Condvar::new(), closed: AtomicBool::new(false), used: Mutex::new(Instant::now()) });
         let reading = socket.clone();
         std::thread::spawn(move || reading.read_all(reader, inbox_max));
-        // The watch: no view call is needed for an idle socket to close.
         let watched = Arc::downgrade(&socket);
         let every = (idle / 4).min(Duration::from_secs(5));
         std::thread::spawn(move || loop {
@@ -642,7 +531,6 @@ impl Socket {
                 return;
             }
             if socket.used.lock().unwrap().elapsed() >= idle {
-                // Nobody will read what's left: free it now, not when a view next calls.
                 socket.close();
                 *socket.inbox.lock().unwrap() = Inbox::default();
                 return;
@@ -687,8 +575,6 @@ impl Socket {
         self.write_frame(0x2, data)
     }
 
-    /// The messages that have come, up to `RECV_BYTES`, waiting up to `wait` for the first; and
-    /// whether the socket is closed (with nothing more to read).
     fn recv(&self, wait: Duration) -> Got {
         self.recv_at_most(wait, RECV_BYTES)
     }
@@ -710,7 +596,6 @@ impl Socket {
         while let Some(message) = inbox.messages.front_mut() {
             if bytes + message.len() > at_most {
                 if out.is_empty() {
-                    // Too large for one receive: its first part now, the rest next time.
                     let rest = message.split_off(at_most);
                     out.push(std::mem::replace(message, rest));
                     inbox.bytes -= at_most;
@@ -734,7 +619,6 @@ impl Socket {
         self.arrived.notify_all();
     }
 
-    /// One masked frame, as a client sends.
     fn write_frame(&self, opcode: u8, payload: &[u8]) -> io::Result<()> {
         let mut frame = Vec::with_capacity(payload.len() + 14);
         frame.push(0x80 | opcode);
@@ -756,7 +640,6 @@ impl Socket {
     }
 }
 
-/// One frame: whether it ends its message, its opcode, and its payload (unmasked).
 fn read_frame(reader: &mut impl Read) -> io::Result<(bool, u8, Vec<u8>)> {
     let mut head = [0u8; 2];
     reader.read_exact(&mut head)?;
@@ -772,7 +655,6 @@ fn read_frame(reader: &mut impl Read) -> io::Result<(bool, u8, Vec<u8>)> {
         reader.read_exact(&mut b)?;
         len = u64::from_be_bytes(b);
     }
-    // Pluto's messages are its notebook's state: large, but not this large.
     if len > 1 << 30 {
         return Err(io::Error::other("a message over 1 GB"));
     }
@@ -791,8 +673,6 @@ fn read_frame(reader: &mut impl Read) -> io::Result<(bool, u8, Vec<u8>)> {
     Ok((fin, opcode, payload))
 }
 
-/// Bytes for the WebSocket key and masks, which need not be secret (RFC 6455 asks for
-/// unpredictable masks against proxies; this connection is on loopback).
 fn fill_random(bytes: &mut [u8]) {
     use std::hash::{BuildHasher, Hasher};
     for chunk in bytes.chunks_mut(8) {
@@ -896,7 +776,6 @@ mod tests {
         assert_eq!(data_url("https://x"), None);
     }
 
-    /// A WebSocket server that echoes each message, then closes after `closes_after` of them.
     fn echo_server(closes_after: usize) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -962,7 +841,6 @@ mod tests {
         assert!(gone.unwrap_err().starts_with("closed"));
     }
 
-    /// Wait up to 3 s for `socket` to close.
     fn closes(socket: &Socket) -> bool {
         let began = Instant::now();
         while !socket.closed.load(Ordering::SeqCst) && began.elapsed() < Duration::from_secs(3) {
@@ -1053,7 +931,6 @@ mod tests {
         assert_eq!(title(read("r").unwrap()), "<title>Ember r</title>");
         assert_eq!(title(read("jl").unwrap()), "<title>Pluto jl</title>");
         assert!(read("gone").unwrap_err().starts_with("not_open"));
-        // Made once per R: the same R's page is kept, a new R's is made again.
         let again = |id: Option<&str>| views.call("notebook_page", &json!({ "notebook_id": "r", "offset": 0, "size": 100000 }), move |_, _| id.map(|id| format!("<html><head>{id}</head><body></body></html>")).ok_or("made again".to_owned()), open);
         assert_eq!(title(again(None).unwrap()), "<title>Ember r</title>");
         views.set_ember(2, "e".into());
@@ -1069,7 +946,6 @@ mod tests {
         views.set_ember(echo_server(1), "s".into());
         let socket = views.call("notebook_socket_open", &json!({ "notebook_id": "r" }), |_, _| unreachable!(), open).unwrap()["socket"].clone();
         views.call("notebook_socket_close", &json!({ "socket": socket }), |_, _| unreachable!(), open).unwrap();
-        // The view's probe told the views the notebook's engine: its page's parts don't ask again.
         let part = |offset: u64| views.call("notebook_page", &json!({ "notebook_id": "r", "offset": offset, "size": 10 }), |backend, _| Ok(format!("<html><head>{backend:?}</head><body></body></html>")), |_| unreachable!("a snapshot per part"));
         assert_eq!(part(0).unwrap()["next"], 10);
         assert_eq!(part(10).unwrap()["next"], 20);
@@ -1085,8 +961,6 @@ mod tests {
         }
     }
 
-    /// A stand-in for Ember's server: `GET /deps/w-1/big.js?secret=s` gives `body`, anything else a
-    /// 404; the count is of the requests it answered.
     fn deps_server(body: Vec<u8>) -> (u16, Arc<AtomicU64>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1145,7 +1019,6 @@ mod tests {
         assert_eq!(served.load(Ordering::SeqCst), 2, "a path that isn't a widget's file never reaches Ember");
         let julia = call(json!({ "notebook_id": "jl", "path": "deps/w-1/big.js" }), Backend::Pluto).unwrap_err();
         assert!(julia.starts_with("not_found:"), "{julia}");
-        // R started again: the file is read again, from the new R.
         views.set_ember(port, "s".into());
         file(0).unwrap();
         assert_eq!(served.load(Ordering::SeqCst), 3);
@@ -1160,7 +1033,6 @@ mod tests {
         let crop = save(NB, png).unwrap()["crop"].as_str().unwrap().to_owned();
         assert_eq!(crop.len(), 16);
         assert_eq!(views.crop(NB, &crop).unwrap().as_slice(), png);
-        // Not another notebook's, nor a made-up id.
         assert!(views.crop("22222222-0000-4000-8000-000000000002", &crop).is_none());
         assert!(views.crop(NB, "0000000000000000").is_none());
         assert!(save(NB, b"GIF89a").unwrap_err().starts_with("not_png"));
@@ -1168,12 +1040,10 @@ mod tests {
         let mut big = png.to_vec();
         big.resize(CROP_MAX + 1, 0);
         assert!(save(NB, &big).unwrap_err().starts_with("too_large"));
-        // The view may name it, once.
         let named = |id: &str| views.call("notebook_crop", &json!({ "notebook_id": NB, "png": STANDARD.encode(png), "crop": id }), |_, _| unreachable!(), |_| Some(Backend::Pluto));
         assert_eq!(named("0123456789abcdef").unwrap()["crop"], "0123456789abcdef");
         assert!(named("0123456789abcdef").unwrap_err().starts_with("taken"));
         assert!(named("0123456789ABCDEF").is_err() && named("../x").is_err());
-        // The oldest go first, past CROPS_KEPT.
         for _ in 0..CROPS_KEPT {
             save(NB, png).unwrap();
         }
