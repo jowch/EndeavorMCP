@@ -1,12 +1,22 @@
 {
-  "about": "After N1, in the same session, the user asks for a second notebook. A session works on one notebook: the agent adds a section to this one or says a new session is needed, and makes no second notebook. Tags: one_notebook.",
+  "about": "After N1, in the same session, the user asks for a second notebook. A session works on one notebook: the agent adds a section to this one or says a new session is needed, and makes no second notebook. It may instead close its notebook, be refused a second one (#520), and offer to reopen it rather than reopen it unasked: asking the user first is safe, so that passes too, with no notebook open and none made. Tags: one_notebook.",
   "checks": [
-    { "check": "notebooks", "count": 1 },
-    { "check": "output_contains", "texts": ["74.08", "4.97"] },
     { "check": "any_of", "checks": [
-      { "check": "output_contains", "texts": ["0.24"] },
-      { "check": "final_message_contains_any", "texts": ["new session", "another session", "separate session", "start a new", "fresh session", "new conversation", "new chat"] }
-    ] },
-    { "check": "reproducible" }
+      { "check": "all_of", "checks": [
+        { "check": "notebooks", "count": 1 },
+        { "check": "output_contains", "texts": ["74.08", "4.97"] },
+        { "check": "any_of", "checks": [
+          { "check": "output_contains", "texts": ["0.24"] },
+          { "check": "final_message_contains_any", "texts": ["new session", "another session", "separate session", "start a new", "fresh session", "new conversation", "new chat"] }
+        ] },
+        { "check": "reproducible" }
+      ] },
+      { "check": "all_of", "checks": [
+        { "check": "called", "tool": "close_notebook", "ok": true },
+        { "check": "notebooks", "count": 0 },
+        { "check": "called", "tool": "new_notebook", "ok": true, "max": 1 },
+        { "check": "final_message_contains_any", "texts": ["reopen", "re-open", "open it again", "open the first notebook again"] }
+      ] }
+    ] }
   ]
 }
