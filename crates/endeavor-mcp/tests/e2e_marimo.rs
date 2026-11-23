@@ -532,6 +532,7 @@ fn a_python_notebook_through_the_runtime() {
         assert!(text.contains(&format!("\"six=={newer}\"")) && text.contains("exclude-newer = \"2026-11-01T23:59:59Z\"") && text.contains("\"marimo==0.25.1\""), "{text}");
         assert!(text.ends_with(&body), "the cells are as they were: {text}");
         assert!(text.contains("#     # old on purpose\n"), "the header's comment stays: {text}");
+        assert!(text.contains("# ]\n#\n# [tool.uv]\n") && !text.contains("# \n"), "a blank line in the header stays `#`: {text}");
         // A day before marimo 0.25.1 was published can't hold it.
         let early = agent.ok("preview_package_update", json!({ "notebook_id": id, "date": "2026-01-01" }));
         assert!(early["status"] == "failed" && early.to_string().contains("marimo 0.25.1"), "{early}");

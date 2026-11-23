@@ -1067,6 +1067,31 @@ def pin_at(header, stamp, versions):
     return with_deps_and_date(header, [pinned(d) for d in header_deps(header)], stamp)
 
 
+def write_header(path, header, previous):
+    """Write `header` as the notebook's PEP 723 header, under marimo's lock for the file, unless the header
+    is no longer `previous`: then nothing is written, and False. As marimo's own `write_manifest`, but a
+    blank line stays `#`, not `# `, so the rest of the user's header doesn't change."""
+    from marimo._environments import script_metadata
+    with script_metadata.notebook_file_lock(path):
+        if script_metadata.read_manifest(path) != previous:
+            return False
+        with open(path, encoding="utf-8", newline="") as f:
+            text = f.read()
+        newline = "\r\n" if "\r\n" in text else "\n"
+        lines = ["# /// script", *("#" if not line.strip() else f"# {line}" for line in header.rstrip().split("\n")), "# ///"]
+        block = newline.join(lines)
+        if script_metadata.loads(text) is not None:
+            text = script_metadata.replace_block(text, block)
+        elif text.startswith("#!"):
+            shebang, _, rest = text.partition("\n")
+            text = f"{shebang}\n{block}{newline}{rest}"
+        else:
+            text = f"{block}{newline}{text}"
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+    return True
+
+
 def resolve(path, header):
     """The versions uv picks for the notebook at `path` with the header `header`, {canonical name: version},
     and None with uv's reason when it can't. Resolved in a copy, so the notebook and its lock are untouched,
@@ -1716,13 +1741,10 @@ class Adapter:
         nb.previewed = None
         if new is None or version_changes(old, new) != shown["changes"]:
             raise argument_error("no_preview", again)
-        from marimo._environments import script_metadata
-        try:
-            # Before the restart: marimo's save keeps the header the file has, so the session can't write the
-            # old one back, and a header that changed under us (a start adding marimo) stops it with nothing done.
-            script_metadata.write_manifest(nb.path, pin_at(before, shown["stamp"], new), previous=before)
-        except script_metadata.ManifestConflictError:
-            raise argument_error("no_preview", again) from None
+        # Before the restart: marimo's save keeps the header the file has, so the session can't write the
+        # old one back, and a header that changed under us (a start adding marimo) stops it with nothing done.
+        if not write_header(nb.path, pin_at(before, shown["stamp"], new), before):
+            raise argument_error("no_preview", again)
         nb.mtime = os.stat(nb.path).st_mtime
         if nb.live:
             await self.restart(nb)

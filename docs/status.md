@@ -435,7 +435,9 @@ Next:
   and the apply pins those versions, moves `exclude-newer`, and restarts a live
   notebook so its sandbox is built again. Packages move only with the date (no
   `package`), and a notebook with no date gets one this way. The date can't be
-  earlier than the marimo the server runs.
+  earlier than the marimo the server runs. A day is held as its end in UTC; with
+  no day (today), it is the moment of the preview, which the apply writes, so it
+  matches what the preview showed.
   A package new to the notebook (not in its header) waits for the user's OK
   first, as in Julia (#355): the cells stay queued, `packages.step` is
   `asking`, and `approve_install` installs it; the app's Auto mode doesn't ask,
