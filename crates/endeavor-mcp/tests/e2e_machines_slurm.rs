@@ -90,10 +90,21 @@ fn machine<'a>(listed: &'a Value, name: &str) -> &'a Value {
     listed["machines"].as_array().and_then(|m| m.iter().find(|m| m["name"] == name)).unwrap_or_else(|| panic!("{name} is listed: {listed}"))
 }
 
+/// Held by each test for its whole run. Both submit jobs as the same user, and the first counts the user's
+/// `endeavor` jobs before and after its steps, so run at once it took the other's job for one it had
+/// submitted (#60).
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+/// The turn of a test that submits jobs; one that failed before it let go doesn't hold up the next.
+fn my_turn() -> std::sync::MutexGuard<'static, ()> {
+    ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 #[ignore = "needs ENDEAVOR_TEST_SSH_HOST and Slurm, submits one small real job, several minutes the first time: ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines_slurm -- --ignored"]
 fn the_machine_tools_over_real_slurm() {
     common::require_debug_build();
+    let _turn = my_turn();
     let Ok(host) = std::env::var("ENDEAVOR_TEST_SSH_HOST") else {
         eprintln!("SKIPPED: ENDEAVOR_TEST_SSH_HOST isn't set. Name a host this user can ssh to with a key and that has Slurm, such as localhost.");
         return;
@@ -342,6 +353,7 @@ fn the_machine_tools_over_real_slurm() {
 #[ignore = "needs ENDEAVOR_TEST_SSH_HOST and Slurm, submits one small real job held for 90 s: ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines_slurm -- --ignored"]
 fn a_held_job_is_queued_with_its_id_and_a_session_that_attaches_to_it_knows_the_id() {
     common::require_debug_build();
+    let _turn = my_turn();
     let Ok(host) = std::env::var("ENDEAVOR_TEST_SSH_HOST") else {
         eprintln!("SKIPPED: ENDEAVOR_TEST_SSH_HOST isn't set. Name a host this user can ssh to with a key and that has Slurm, such as localhost.");
         return;
