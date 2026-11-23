@@ -279,6 +279,7 @@ pub fn main(argv: &[String]) -> ! {
     }
 
     let stop = stopped.recv().unwrap_or(Stop::Shutdown);
+    served.bridge.notebooks.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     if !matches!(stop, Stop::Julia(_)) {
         served.julia.kill();
     }
@@ -1981,6 +1982,7 @@ fn pass_on_stop_signals(set: libc::sigset_t, served: Arc<Served>) {
             if unsafe { libc::sigwait(&set, &mut signal) } == 0 {
                 let julia = &served.julia;
                 julia.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+                served.bridge.notebooks.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
                 let first = julia.signalled.compare_exchange(0, signal, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok();
                 match julia.pid.load(std::sync::atomic::Ordering::SeqCst) {
                     // A second one (a second Ctrl-C) is passed straight on; the first's steps still follow.
@@ -2142,6 +2144,7 @@ impl Served {
     fn shutdown(&self) {
         let julia = &self.julia;
         julia.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.bridge.notebooks.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
         match self.bridge.julia.port.get() {
             Some(&port) if julia.pid.load(std::sync::atomic::Ordering::SeqCst) > 0 && bridge_call(port, "/call", &self.julia.token, "endeavor/shutdown").is_ok() => {}
             _ => {

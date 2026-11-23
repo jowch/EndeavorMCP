@@ -298,6 +298,17 @@ pub fn language(backend: Backend) -> &'static str {
     }
 }
 
+/// Why a notebook of `backend` starting can outlast one call, for the agent: on its open, or as it
+/// leaves safe preview (`allow_execution`), when its packages may need installing too.
+pub fn slow_start(backend: Backend, leaving_preview: bool) -> String {
+    match (backend, leaving_preview) {
+        (Backend::Pluto, false) => "the first notebook in a new Julia process takes a while to compile".into(),
+        (Backend::Pluto, true) => "a new Julia process starts for it, and its packages may need installing".into(),
+        (other, false) => format!("{} can take a while to start a notebook, the first time most of all", language(other)),
+        (other, true) => format!("{} sets the notebook up to run, and its packages may need installing", language(other)),
+    }
+}
+
 fn result(reply: &str) -> Option<Value> {
     let mut reply: Value = serde_json::from_str(reply).ok()?;
     if reply.get("error").is_some() {
@@ -310,6 +321,17 @@ fn result(reply: &str) -> Option<Value> {
 mod tests {
     use super::*;
     use std::io::BufRead;
+
+    #[test]
+    fn a_slow_start_names_the_notebooks_own_language() {
+        for leaving_preview in [false, true] {
+            assert!(slow_start(Backend::Pluto, leaving_preview).contains("Julia"));
+            for (backend, language) in [(Backend::Marimo, "Python"), (Backend::Ember, "R")] {
+                let why = slow_start(backend, leaving_preview);
+                assert!(why.starts_with(language) && !why.contains("Julia"), "{why}");
+            }
+        }
+    }
 
     /// An engine that answers from a table and records what it was asked.
     #[derive(Default)]
