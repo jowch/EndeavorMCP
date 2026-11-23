@@ -2094,6 +2094,15 @@ fn a_julia_that_would_need_downloading_isnt_started_ahead() {
     // The first call that needs Julia looks again and says what's missing, as without the warm-up.
     let opened = tool_call(&core, "open_notebook", serde_json::json!({ "path": path.display().to_string() }));
     assert_eq!(opened["error"], "julia_not_found", "{opened}");
+
+    // A cluster job's core is handed the Julia found on the login node (#80): the next call starts it.
+    let bridge = FakeBridge::start(&dir);
+    let julia = serving_julia(&dir, &bridge);
+    let message = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "endeavor/use_julia", "params": { "path": julia.display().to_string() } });
+    app_call(&core, &message.to_string());
+    let _ = tool_call(&core, "open_notebook", serde_json::json!({ "path": path.display().to_string() }));
+    wait_for("the Julia it was given to start", || julia_pids(&dir).len() == 1);
+    assert!(std::fs::read_dir(&home).unwrap().next().is_none(), "still nothing downloaded");
 }
 
 #[test]

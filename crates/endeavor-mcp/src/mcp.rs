@@ -69,7 +69,7 @@ pub(crate) fn current_name(name: &str) -> &str {
 /// the runtime, allowing Endeavor's own Julia to be downloaded when the runtime finds none as Julia
 /// is first needed, or its own R to be installed on a Mac when no R is found, where Julia is,
 /// starting it now (the app's Retry), and where R notebooks' setup is.
-const JULIA_CALLS: [&str; 10] = ["endeavor/set_folder", "endeavor/shutdown", "endeavor/allow_julia_install", "endeavor/allow_r_install", "endeavor/julia_status", "endeavor/start_julia", "endeavor/r_status", "endeavor/leave_to_plugin", "endeavor/keep_for_app", "endeavor/end_when_idle"];
+const JULIA_CALLS: [&str; 11] = ["endeavor/set_folder", "endeavor/shutdown", "endeavor/allow_julia_install", "endeavor/use_julia", "endeavor/allow_r_install", "endeavor/julia_status", "endeavor/start_julia", "endeavor/r_status", "endeavor/leave_to_plugin", "endeavor/keep_for_app", "endeavor/end_when_idle"];
 
 /// Whether a runtime offers a tool by this name, to some session, the old name of a renamed tool
 /// included (a past session's calls use it). The machine tools are the front's.
@@ -1594,7 +1594,7 @@ mod tests {
         let calls: Vec<String> = quoted_names(code(include_str!("mcp.rs")), "endeavor/").iter().map(|call| call["endeavor/".len()..].to_owned()).collect();
         let calls_then = [
             "allow_julia_install", "allow_r_install", "answer_run", "end_when_idle", "file_info", "julia_status", "keep_for_app", "leave_to_plugin", "move_notebook", "new_notebook", "r_status", "recent_sessions", "restart_notebook", "restore_cells", "run_preview", "set_folder",
-            "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result",
+            "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result", "use_julia",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
         assert_eq!((crate::core::INTERFACE, calls, record_fields()), (46, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");

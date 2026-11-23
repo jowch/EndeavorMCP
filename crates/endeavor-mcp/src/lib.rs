@@ -454,8 +454,12 @@ fn serve(args: &mut Args, mux: &Arc<Mux>) -> Result<std::convert::Infallible, St
     // The folder of the runtime attached, if one is; else it is decided when it is used (`state_dir_now`).
     let attached_dir: Arc<RwLock<Option<PathBuf>>> = Arc::default();
     let answer: Answer = {
-        let (attached_dir, named, unnamed, launcher, any_node, parts) = (attached_dir.clone(), args.state_dir.clone(), args.unnamed.clone(), args.launcher, args.any_node, parts.clone());
+        let (attached_dir, named, unnamed, launcher, any_node, parts, julia) = (attached_dir.clone(), args.state_dir.clone(), args.unnamed.clone(), args.launcher, args.any_node, parts.clone(), args.julia.clone());
         Arc::new(move |request| match request {
+            wire::files::Request::Julia { download } => match slurm::login_julia(&julia, *download) {
+                Ok(julia) => wire::files::Reply::Julia { julia },
+                Err(message) => wire::files::Reply::Error { message },
+            },
             wire::files::Request::Runtime => {
                 let dir = attached_dir.read().unwrap().clone().unwrap_or_else(|| state_dir_now(&unnamed, &named));
                 wire::files::Reply::Runtime { runtime: check(&dir, launcher, any_node) }
