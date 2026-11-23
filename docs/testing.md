@@ -431,6 +431,9 @@ the host (`localhost` on a single-node cluster) and submits one job of 1 CPU,
 ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines_slurm -- --ignored --nocapture
 ```
 
+Its two tests take turns (`my_turn`): both submit jobs as the same user, and
+one compares the user's whole queue before and after its steps (#60).
+
 Through `endeavor mcp` it runs `add_machine` with `slurm: true` (the partitions
 and their limits), `use_machine` with no resources (`needs_job`, nothing in
 `squeue`), then with resources (the job's id, node and end time), a cell that
