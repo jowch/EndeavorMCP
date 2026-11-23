@@ -1321,7 +1321,7 @@ const ERRORS_TOPIC_HINT: &str = "See `notebook_guide` with `topic` set to `endea
 /// Kinds that say something is still starting, not that the call failed: Julia, R notebooks' setup,
 /// or a notebook's open that outlasted the call. The agent only waits and makes the same call again,
 /// so the result isn't marked an error; it keeps the `error` code, which clients match on.
-const STARTING_KINDS: [&str; 3] = ["julia_starting", "r_installing", "notebook_opening"];
+const STARTING_KINDS: [&str; 4] = ["julia_starting", "r_installing", "python_installing", "notebook_opening"];
 
 /// A tool's result that is a PNG (base64), with `meta` as its text.
 pub(crate) fn image_result(meta: &Value, png_base64: String) -> Value {
@@ -1789,6 +1789,7 @@ Start a code cell that defines no name, such as a plot or a check, with a `# ` c
         assert_eq!(starting["isError"], false);
         assert_eq!(text("julia_starting::Julia is starting"), r#"{"error":"julia_starting","message":"Julia is starting"}"#);
         assert_eq!(tool_error("r_installing::Installing Ember", false)["isError"], false);
+        assert_eq!(tool_error("python_installing::Setting up Python notebooks", false)["isError"], false);
         assert_eq!(tool_error("notebook_opening::Opening", false)["isError"], false);
         assert_eq!(tool_error("julia_failed::It stopped", false)["isError"], true);
     }

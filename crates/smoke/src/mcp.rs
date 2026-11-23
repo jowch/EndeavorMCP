@@ -73,8 +73,8 @@ impl Session {
             let text = msg["result"]["content"][0]["text"].as_str().unwrap_or_default().to_owned();
             // Still starting is a normal result (Julia, a notebook's open, a machine's runtime), or an error from an older runtime.
             let code = serde_json::from_str::<Value>(&text).ok().and_then(|reply| reply["error"].as_str().map(str::to_owned)).unwrap_or_default();
-            // Ember's first install, for an R notebook, takes minutes.
-            if code == "r_installing" && began.elapsed() < Duration::from_secs(1200) {
+            // Ember's first install, for an R notebook, takes minutes; so may uv's first fetch of Python and marimo.
+            if matches!(code.as_str(), "r_installing" | "python_installing") && began.elapsed() < Duration::from_secs(1200) {
                 std::thread::sleep(Duration::from_secs(5));
                 continue;
             }

@@ -240,6 +240,8 @@ fn a_python_notebook_through_the_runtime() {
         .env("XDG_STATE_HOME", work.join("state-home"))
         // The install step reads while a package installs, which a warm uv cache would otherwise finish first.
         .env("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS", "3")
+        // A call waits no time for marimo's start, so the first open answers `python_installing` (#354).
+        .env("ENDEAVOR_TEST_MARIMO_WAIT_SECS", "0")
         .env("XDG_CONFIG_HOME", work.join("config"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -267,7 +269,21 @@ fn a_python_notebook_through_the_runtime() {
 
     let path = folder.join("growth.py").display().to_string();
     let notebook = step("opening a marimo notebook starts marimo, in safe preview", || {
-        let opened = agent.ok("open_notebook", json!({ "path": "growth.py" }));
+        // The first call doesn't wait for marimo's start: it says so as a normal result, and the start goes
+        // on for the same call again.
+        let (failed, first) = agent.call("open_notebook", json!({ "path": "growth.py" }));
+        assert!(!failed && first["error"] == "python_installing", "{first}");
+        assert!(first["message"].as_str().unwrap_or_default().contains("Make the same call again"), "{first}");
+        let began = Instant::now();
+        let opened = loop {
+            let (failed, opened) = agent.call("open_notebook", json!({ "path": "growth.py" }));
+            assert!(!failed, "{opened}");
+            if opened["error"] != "python_installing" {
+                break opened;
+            }
+            assert!(began.elapsed() < Duration::from_secs(120), "marimo didn't start: {opened}");
+            std::thread::sleep(Duration::from_millis(200));
+        };
         assert_eq!((&opened["path"], &opened["execution_allowed"]), (&json!(path), &json!(false)), "{opened}");
         let id = opened["notebook_id"].as_str().unwrap().to_owned();
         let encoded = path.replace(' ', "%20");

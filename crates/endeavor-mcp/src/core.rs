@@ -238,7 +238,7 @@ pub fn main(argv: &[String]) -> ! {
     let starting = (r.clone(), served.clone(), marimo.clone());
     let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, came, wait| match backend {
         Backend::Ember => starting.0.start_noting(&starting.1, came + wait.min(ember_wait())),
-        Backend::Marimo => starting.2.start(&starting.1),
+        Backend::Marimo => starting.2.start(&starting.1, came + wait.min(marimo_wait())),
         Backend::Pluto => starting.1.julia.wait(&starting.1, wait.saturating_sub(came.elapsed()).min(julia_wait())).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
     }));
     // A folder that has Julia notebooks gets Julia started ahead, so its first notebook doesn't wait. Set before
@@ -1532,6 +1532,16 @@ struct MarimoStarter {
     mask: Option<libc::sigset_t>,
     spawn: Spawner,
     child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
+    /// A start that a call stopped waiting for (`python_installing`): the next call waits on for it.
+    pending: std::sync::Mutex<Option<MarimoPending>>,
+}
+
+/// A start of the adapter that hasn't written its state yet.
+struct MarimoPending {
+    child: std::process::Child,
+    last_words: Option<Arc<LastWords>>,
+    secret: String,
+    began: std::time::Instant,
 }
 
 impl MarimoStarter {
@@ -1547,11 +1557,15 @@ impl MarimoStarter {
             mask: None,
             spawn: Spawner::new(),
             child: Arc::default(),
+            pending: Default::default(),
         }
     }
 
-    /// Start the adapter and wait until marimo answers: what answers for Python, and marimo's page on `/marimo/`.
-    fn start(&self, served: &Served) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+    /// Start the adapter and wait until marimo answers: what answers for Python, and marimo's page on
+    /// `/marimo/`. The first start may download Python and marimo, which takes longer than an agent's
+    /// call may wait: a call waits `until`, then answers `python_installing`, and the start goes on for
+    /// the next call to wait on, up to `MARIMO_START` in all.
+    fn start(&self, served: &Served, until: std::time::Instant) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         if cfg!(windows) {
             return Err("unsupported::Python notebooks don't work on Windows yet".into());
         }
@@ -1561,6 +1575,65 @@ impl MarimoStarter {
         if served.bridge.standalone.is_none() && !self.this_computer {
             return Err("unsupported::Python notebooks work with the Endeavor plugin on this computer (`endeavor serve` or `endeavor mcp`), not yet on a server".into());
         }
+        let mut pending = self.pending.lock().unwrap();
+        if pending.is_none() {
+            *pending = Some(self.spawn_adapter()?);
+        }
+        let deadline = pending.as_ref().unwrap().began + MARIMO_START;
+        let state = loop {
+            let starting = pending.as_mut().unwrap();
+            if let Ok(Some(status)) = starting.child.try_wait() {
+                let said = starting.last_words.as_ref().map(|words| words.after_end(Duration::from_secs(1))).unwrap_or_default();
+                *pending = None;
+                return Err(format!("python_failed::Python notebooks' engine stopped while starting: {}", why_stopped("Python", Some(status), &said)));
+            }
+            if let Ok(state) = std::fs::read(&self.state).map_err(|_| ()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ())) {
+                break state;
+            }
+            // The core is ending: `stop` waits for this lock, and ends the start.
+            if served.bridge.notebooks.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("python_failed::Endeavor is stopping".into());
+            }
+            let now = std::time::Instant::now();
+            if now > deadline {
+                let mut child = pending.take().unwrap().child;
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("python_failed::Python notebooks' engine didn't start within {} seconds", MARIMO_START.as_secs()));
+            }
+            if now > until {
+                return Err(format!("python_installing::Setting up Python notebooks: uv is getting Python and marimo, which can take a few minutes the first time ({} seconds so far). Make the same call again right away: each call waits up to {} seconds.", starting.began.elapsed().as_secs(), marimo_wait().as_secs()));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        // The pending start stays held until its child is in `child`, so a `stop` meanwhile finds it.
+        let MarimoPending { mut child, last_words, secret, .. } = pending.take().unwrap();
+        let port = |key: &str| state[key].as_u64().and_then(|p| u16::try_from(p).ok()).ok_or_else(|| format!("python_failed::marimo's state has no {key}: {state}"));
+        let (bridge, page) = match (port("bridge_port"), port("marimo_port")) {
+            (Ok(bridge), Ok(page)) => (bridge, page),
+            (Err(why), _) | (_, Err(why)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(why);
+            }
+        };
+        *served.marimo.lock().unwrap() = Some(Page { port: page, secret });
+        let (children, pid) = (self.child.clone(), child.id());
+        if let Some(mut old) = self.child.lock().unwrap().replace(child) {
+            let _ = old.kill();
+            let _ = old.wait();
+        }
+        drop(pending);
+        let why_ended = move || {
+            let said = last_words.as_ref().map(|words| words.after_end(Duration::from_secs(1))).unwrap_or_default();
+            let status = children.lock().unwrap().as_mut().filter(|child| child.id() == pid).and_then(|child| child.try_wait().ok().flatten());
+            Some(why_stopped("Python", status, &said))
+        };
+        Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone()).telling(Box::new(why_ended))))
+    }
+
+    /// Run the adapter through uv, with a new secret for marimo's page.
+    fn spawn_adapter(&self) -> Result<MarimoPending, String> {
         let uv = find_uv().ok_or_else(|| "python_not_found::Python notebooks need uv, which isn't installed. Install it (https://docs.astral.sh/uv/getting-started/installation/), then try again.".to_owned())?;
         let _ = std::fs::remove_file(&self.state);
         let secret = ember_secret().map_err(|e| format!("python_failed::{e}"))?;
@@ -1592,42 +1665,13 @@ impl MarimoStarter {
         }
         let mut child = self.spawn.spawn(command).map_err(|e| format!("python_not_found::Couldn't start uv ({}): {e}", uv.display()))?;
         let last_words = child.stderr.take().map(pass_on_stderr);
-        // ponytail: the first start downloads marimo and maybe Python, which the call waits for
-        // whole; no "installing" answer to come back to, as R has.
-        let deadline = std::time::Instant::now() + MARIMO_START;
-        let state = loop {
-            if let Ok(Some(status)) = child.try_wait() {
-                let said = last_words.as_ref().map(|words| words.after_end(Duration::from_secs(1))).unwrap_or_default();
-                return Err(format!("python_failed::Python notebooks' engine stopped while starting: {}", why_stopped("Python", Some(status), &said)));
-            }
-            if let Ok(state) = std::fs::read(&self.state).map_err(|_| ()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ())) {
-                break state;
-            }
-            if std::time::Instant::now() > deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("python_failed::Python notebooks' engine didn't start within {} seconds", MARIMO_START.as_secs()));
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        let port = |key: &str| state[key].as_u64().and_then(|p| u16::try_from(p).ok()).ok_or_else(|| format!("python_failed::marimo's state has no {key}: {state}"));
-        let (bridge, page) = (port("bridge_port")?, port("marimo_port")?);
-        *served.marimo.lock().unwrap() = Some(Page { port: page, secret });
-        let (children, pid) = (self.child.clone(), child.id());
-        if let Some(mut old) = self.child.lock().unwrap().replace(child) {
-            let _ = old.kill();
-            let _ = old.wait();
-        }
-        let why_ended = move || {
-            let said = last_words.as_ref().map(|words| words.after_end(Duration::from_secs(1))).unwrap_or_default();
-            let status = children.lock().unwrap().as_mut().filter(|child| child.id() == pid).and_then(|child| child.try_wait().ok().flatten());
-            Some(why_stopped("Python", status, &said))
-        };
-        Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone()).telling(Box::new(why_ended))))
+        Ok(MarimoPending { child, last_words, secret, began: std::time::Instant::now() })
     }
 
     fn stop(&self) {
-        if let Some(mut child) = self.child.lock().unwrap().take() {
+        // A start still under way, then the adapter that runs.
+        let pending = self.pending.lock().unwrap().take().map(|pending| pending.child);
+        for mut child in pending.into_iter().chain(self.child.lock().unwrap().take()) {
             // SIGTERM first: the adapter stops marimo, which stops each notebook's kernel.
             #[cfg(unix)]
             {
@@ -1647,6 +1691,13 @@ impl MarimoStarter {
 
 /// How long the first Python notebook waits for marimo: uv may download Python and marimo first.
 const MARIMO_START: Duration = Duration::from_secs(300);
+
+/// How long a call that starts Python notebooks' engine waits for it before answering
+/// `python_installing`: as long as Julia's start. ENDEAVOR_TEST_MARIMO_WAIT_SECS sets it in debug builds.
+fn marimo_wait() -> Duration {
+    let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_MARIMO_WAIT_SECS").ok()?.parse().ok()).flatten();
+    test.map_or(JULIA_WAIT, Duration::from_secs)
+}
 
 const MARIMO_STATE: &str = "marimo.json";
 

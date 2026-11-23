@@ -9,6 +9,7 @@ These come back the same way, but nothing failed and the call is not marked an e
 | `error` | Meaning | Do |
 |---|---|---|
 | `julia_starting` | Julia is starting, for the first Julia notebook opened or made, or ahead of it when the session will use Julia notebooks. The first start can take 10 minutes; the message says how long so far | Make the same call again |
+| `python_installing` | The first Python notebook on this computer: uv is getting Python and marimo, which can take a few minutes | Make the same call again |
 | `r_installing` | The first R notebook on this computer or machine: Endeavor is installing its own R (on the user's own Mac, after they agreed) or Ember, which takes a few minutes | Make the same call again |
 | `no_preview` | `apply_package_update` without a ready `preview_package_update` for that date, or the notebook's packages changed since | Preview that date again, tell the user what changes, then apply |
 | `not_updatable` | `preview_package_update` with a `package` that isn't in the notebook's packages, or doesn't come from CRAN | Only a CRAN package in the notebook has release dates to move to. Tell the user; a package from elsewhere changes with its install call |
