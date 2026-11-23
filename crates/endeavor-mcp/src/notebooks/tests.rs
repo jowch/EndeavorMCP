@@ -3687,17 +3687,35 @@ fn the_smoke_checks_that_wait_for_julias_asking_message_still_find_it() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "using Example")]);
     let ran = s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
-    let message = ran["message"].as_str().unwrap();
+    // Both of Julia's asking messages: the plain one, as a run gives it, and the one for a name
+    // close to a widely used package's (#416).
+    let near = Snapshot::parse(&json!({
+        "notebook_id": NB, "path": "/n/a.jl", "cell_order": [], "cells": [],
+        "packages": { "step": "asking", "new": true, "download": { "packages": [{ "package": "Plts", "close_to": "Plots" }] } },
+    })).unwrap();
+    let messages = [ran["message"].as_str().unwrap().to_owned(), super::tools::asking_message(&near)];
+    // `asked_user` checks at any depth, inside `any_of` and `all_of` too (as N8 nests its checks).
+    fn asked(check: &Value, into: &mut Vec<Value>) {
+        if check["check"] == "asked_user" {
+            into.push(check.clone());
+        }
+        for inner in check["checks"].as_array().into_iter().flatten() {
+            asked(inner, into);
+        }
+    }
     let tasks = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../smoke/tasks");
     let mut found = Vec::new();
     for task in std::fs::read_dir(&tasks).unwrap() {
         let path = task.unwrap().path().join("checks.json");
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
         let checks: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let checks = checks.as_array().or(checks["checks"].as_array()).cloned().unwrap_or_default();
-        for phrase in checks.iter().filter(|c| c["check"] == "asked_user").flat_map(|c| c["when_reply"].as_array().cloned().unwrap_or_default()) {
+        let mut specs = Vec::new();
+        asked(&checks, &mut specs);
+        for phrase in specs.iter().flat_map(|c| c["when_reply"].as_array().cloned().unwrap_or_default()) {
             let phrase = phrase.as_str().unwrap();
-            assert!(message.contains(phrase), "{}: when_reply {phrase:?} isn't in the asking message: {message}", path.display());
+            for message in &messages {
+                assert!(message.contains(phrase), "{}: when_reply {phrase:?} isn't in the asking message: {message}", path.display());
+            }
             found.push(path.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned());
         }
     }
