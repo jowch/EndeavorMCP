@@ -93,10 +93,18 @@ impl Drop for Asker {
     }
 }
 
+/// How long a connection's last bytes are read, after its answer or its refusal, before it is closed.
+const DRAIN_LIMIT: Duration = Duration::from_millis(500);
+
 /// One askpass: the token, then its `Ask`, within `MOST_BYTES` and `READ_LIMIT`; a connection
 /// without the token is closed unanswered.
 fn serve(socket: TcpStream, token: &str, answer: &AnswerFn) {
     let socket = wire::Shared::new(socket);
+    answer_one(socket.clone(), token, answer);
+    close(&socket);
+}
+
+fn answer_one(socket: wire::Shared, token: &str, answer: &AnswerFn) {
     let mut writer = socket.clone();
     let mut reader = BufReader::new(Until { socket, until: Instant::now() + READ_LIMIT }.take(MOST_BYTES));
     let mut line = String::new();
@@ -108,6 +116,16 @@ fn serve(socket: TcpStream, token: &str, answer: &AnswerFn) {
     let mut reply = serde_json::to_string(&Answer { text: answer(ask) }).expect("serializable");
     reply.push('\n');
     let _ = writer.write_all(reply.as_bytes());
+}
+
+/// End the connection so that the client reads its answer, or the empty refusal, to the end. A socket
+/// closed with bytes it hasn't read sends a reset instead of an end, which the client may get before
+/// the answer, as Windows' does (#112). So the write half is shut first, and what the client still
+/// sends is read for a moment (at most `MOST_BYTES` more, or until it closes its end).
+fn close(socket: &wire::Shared) {
+    let _ = socket.shutdown(std::net::Shutdown::Write);
+    let mut rest = Until { socket: socket.clone(), until: Instant::now() + DRAIN_LIMIT }.take(MOST_BYTES);
+    let _ = std::io::copy(&mut rest, &mut std::io::sink());
 }
 
 /// Whether `a` and `b` are the same, in a time that doesn't depend on where they differ.
@@ -169,6 +187,22 @@ mod tests {
         assert_eq!(ask(asker.port(), &format!("not-the-token\n{secret}\n")), "", "the wrong token gets nothing");
         assert_eq!(ask(asker.port(), &format!("{secret}\n")), "", "no token gets nothing");
         assert_eq!(asked.lock().unwrap().len(), 2, "only the two with the token reached the user");
+    }
+
+    /// What the client sends after the line that is refused still reaches the Asker, which reads it before it
+    /// closes: closed with those bytes unread, it would send a reset, and the client's read would fail
+    /// instead of ending empty (#112).
+    #[test]
+    fn a_refused_client_that_is_still_sending_reads_an_empty_reply_not_a_reset() {
+        let asker = Asker::start(|_| Some("x".into())).unwrap();
+        let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, asker.port())).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket.write_all(b"not-the-token\n").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = socket.write_all(b"{\"prompt\":\"late\"}\n");
+        std::thread::sleep(Duration::from_millis(100));
+        let mut reply = String::new();
+        assert_eq!(socket.read_to_string(&mut reply).map_err(|e| e.kind()), Ok(0));
     }
 
     #[test]
