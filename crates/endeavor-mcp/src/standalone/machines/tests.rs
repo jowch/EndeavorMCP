@@ -630,3 +630,18 @@ fn where_a_dialog_asks_the_asking_step_says_so_and_the_rest_stays() {
     assert_eq!(question, "Endeavor needs to install Endeavor's helper (about 20 MB, into /srv/e) on lab. The same yes lets Endeavor download its own Julia there if a notebook needs Julia and none is found. Install it now?");
     assert!(!install_question("lab", &info.items, "add_machine").contains("Julia"));
 }
+
+#[test]
+fn only_an_answered_sign_in_keeps_the_user_counted_as_there() {
+    let long_ago = Instant::now() - Duration::from_secs(90);
+    let wanted = Mutex::new(long_ago);
+    // Nobody answered: a reconnect's next question, past the window, opens no page.
+    assert_eq!(put_to_user("lab", &wanted, || Reply::GaveUp), Reply::GaveUp);
+    assert_eq!(put_to_user("lab", &wanted, || Reply::Refused), Reply::Refused);
+    assert_eq!(*wanted.lock().unwrap(), long_ago, "neither a page nobody answered nor a Cancel counts as the user asking");
+    assert_eq!(put_to_user("lab", &wanted, || Reply::Answered("code".into())), Reply::Answered("code".into()));
+    assert!(wanted.lock().unwrap().elapsed() < Duration::from_secs(5), "an answer does: a code asked after the password gets a page");
+
+    let wanted = Mutex::new(Instant::now() - SIGN_IN_WINDOW - Duration::from_secs(1));
+    assert_eq!(put_to_user("lab", &wanted, || panic!("put to the user past the window")), Reply::GaveUp);
+}

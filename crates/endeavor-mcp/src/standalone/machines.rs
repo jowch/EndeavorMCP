@@ -127,19 +127,29 @@ fn sign_in(server: &Server, wanted: &Arc<Mutex<Instant>>) -> Option<Asker> {
     }
     let (name, wanted) = (server.display_name(), wanted.clone());
     Asker::replying(move |ask| {
-        if wanted.lock().unwrap().elapsed() > SIGN_IN_WINDOW {
-            eprintln!("[ Info: {name} asked to sign in while no machine tool waited for it; not asking the user");
-            return Reply::GaveUp;
-        }
         // A debug build's test waits less (`ENDEAVOR_TEST_SIGN_IN_WAIT_MS`).
         let wait = test_var("ENDEAVOR_TEST_SIGN_IN_WAIT_MS").and_then(|ms| ms.into_string().ok()?.parse().ok()).map_or(SIGN_IN_WAIT, Duration::from_millis);
-        let reply = SIGN_IN.ask(&name, &ask, wait, &open_page);
-        // The user is there: a second question after a slow first one (a code after the password) is theirs too.
-        *wanted.lock().unwrap() = Instant::now();
-        reply
+        put_to_user(&name, &wanted, || SIGN_IN.ask(&name, &ask, wait, &open_page))
     })
     .map_err(|e| eprintln!("┌ Warning: {e}; {} signs in with keys only", server.display_name()))
     .ok()
+}
+
+/// One of ssh's sign-in questions on `name`'s connection, put to the user by `ask` if a machine tool
+/// asked for the connection within `SIGN_IN_WINDOW` (`wanted`); otherwise nobody answers it.
+fn put_to_user(name: &str, wanted: &Mutex<Instant>, ask: impl FnOnce() -> Reply) -> Reply {
+    if wanted.lock().unwrap().elapsed() > SIGN_IN_WINDOW {
+        eprintln!("[ Info: {name} asked to sign in while no machine tool waited for it; not asking the user");
+        return Reply::GaveUp;
+    }
+    let reply = ask();
+    // The user answered, so they are there: a second question after a slow first one (a code after the
+    // password) is theirs too. Not when nobody answered: a reconnect that keeps trying would then open
+    // a page each time.
+    if matches!(reply, Reply::Answered(_)) {
+        *wanted.lock().unwrap() = Instant::now();
+    }
+    reply
 }
 
 /// A machine's connection and the settings it was made with, which a `Session` doesn't give back.
