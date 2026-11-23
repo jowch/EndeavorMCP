@@ -380,10 +380,10 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     if !opens.is_empty() {
         let opened = crate::mcp::Session::start(endeavor, work, &project).and_then(|mut s| opens.iter().map(|path| crate::mcp::open_and_run(&mut s, path, RUN_LIMIT)).collect::<Result<Vec<_>, _>>());
         match opened {
-            // `{notebook_id}` in a message is the first one's id, as a quote of it names it.
+            // `{opened_notebook_id}` in a message is the first one's id, as a quote of it names it.
             Ok(ids) => {
                 for turn in &mut turns {
-                    *turn = turn.replace("{notebook_id}", &ids[0]);
+                    *turn = turn.replace("{opened_notebook_id}", &ids[0]);
                 }
             }
             Err(e) => problems.push(format!("setting up: {e}")),
