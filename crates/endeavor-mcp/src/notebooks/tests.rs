@@ -3617,6 +3617,10 @@ fn a_julia_run_that_adds_a_package_asks_first_except_in_auto_mode() {
     assert!(message.contains("Julia has to install packages this notebook doesn't have yet: Example") && message.contains(super::tools::ASK_STEP), "{ran}");
     assert!(!message.contains("download"), "a new package isn't a download: {message}");
     assert_eq!(ran["packages"]["step"], "asking", "{ran}");
+    // Held for the OK, the cells wait without running, and list_notebooks says so (#506).
+    let listed = s.call("7", "list_notebooks", json!({})).unwrap();
+    let listed = listed.as_array().unwrap().iter().find(|nb| nb["notebook_id"] == NB).cloned().unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!((&listed["running"], &listed["packages"]["step"]), (&json!([]), &json!("asking")), "{listed}");
     let approved = s.call("7", "approve_install", json!({ "notebook_id": NB })).unwrap();
     assert!(approved["approved"] == true && approved["message"].as_str().unwrap().contains("packages are approved"), "{approved}");
 

@@ -529,9 +529,11 @@ impl Snapshot {
     }
 
     /// What `list_notebooks` says of it; `this_session`: it's the caller's
-    /// own notebook. `exited` only while its own Julia has ended by itself.
+    /// own notebook. `exited` only while its own Julia has ended by itself. Cells held for the
+    /// user's OK to a package aren't running: they wait, queued, as read_cell says (#506).
     fn summary(&self, pending_run: &[String], this_session: bool) -> Value {
-        let running: Vec<&String> = self.order.iter().filter(|id| self.cells.get(*id).is_some_and(|c| self.is_running(c))).collect();
+        let held = self.held();
+        let running: Vec<&String> = self.order.iter().filter(|id| self.cells.get(*id).is_some_and(|c| self.is_running(c) && !held)).collect();
         let mut summary = json!({
             "notebook_id": self.id, "path": self.path, "cell_count": self.order.len(),
             "pending_run": pending_run, "running": running, "execution_allowed": self.execution_allowed,

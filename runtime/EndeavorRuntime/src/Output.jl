@@ -243,8 +243,7 @@ function _cell_png(session, nb, cell)
     # A worker running cells answers only when they yield, which a long computation may not
     # do for minutes (#62): then wait a while, not for the run. Without cells running, the
     # render itself can take long (a first Makie plot compiles), so it's waited for.
-    busy() = any(c -> c.running || c.queued, values(nb.cells_dict))
-    if busy() && timedwait(() -> istaskdone(asked) || !busy(), _BUSY_RENDER_WAIT) === :timed_out
+    if _cells_running(nb) && timedwait(() -> istaskdone(asked) || !_cells_running(nb), _BUSY_RENDER_WAIT) === :timed_out
         embedded = _embedded_png(cell.output)
         embedded === nothing || return (embedded, "embedded image")
         throw(ArgumentError("no_image::Cell $(cell.cell_id): the notebook's worker $(_BUSY) " *
@@ -314,20 +313,29 @@ function _html_text(html::AbstractString)
     return strip(s)
 end
 
+"""Whether the notebook's worker is running cells or has cells queued to run, which it would
+finish before answering. Cells held for the user's OK to a new package (`_asking`) are
+queued, but wait without running (#506)."""
+function _cells_running(nb)
+    held = _asking(nb)
+    any(c -> c.running || (c.queued && (held === nothing || c ∉ held.cells)), values(nb.cells_dict))
+end
+
 """
     _cell_text(session, nb, cell) -> Union{String, Nothing}
 
 Text form of a cell's output when Pluto shows it as something other than text
 (HTML, tables, trees, images): the value's `text/plain` display, rendered by the
 notebook's worker. `nothing` when the output already is text, or is empty or an error.
-While cells are running the worker isn't asked, since it would wait for them; stored
-HTML is stripped to text instead.
+While cells are running or queued to run the worker isn't asked, since it would wait for
+them; stored HTML is stripped to text instead. Cells held for the user's OK to a new
+package (`_asking`) don't count: they wait without running.
 """
 function _cell_text(session, nb, cell)
     cell.errored && return nothing
     body = cell.output.body
     (body === nothing || cell.output.mime == MIME("text/plain")) && return nothing
-    busy = any(c -> c.running || c.queued, values(nb.cells_dict))
+    busy = _cells_running(nb)
     workspace = busy ? nothing : Pluto.WorkspaceManager.get_workspace((session, nb); allow_creation=false)
     if workspace !== nothing
         cell_id = cell.cell_id

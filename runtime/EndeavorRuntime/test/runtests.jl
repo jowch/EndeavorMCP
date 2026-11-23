@@ -952,10 +952,14 @@ end
             run_asking(cells) = result("run", Dict("notebook_id" => nid, "cells" => cells, "wait" => true, "timeout" => 60, "ask_new" => true))
             stdlib = insert("using Dates", 2)
             @test !haskey(run_asking([stdlib]), "asking")
-            pkg = insert("using Example", 3)
+            array = insert("[1.0, 2.5]", 3)
+            @test result("run", Dict("notebook_id" => nid, "cells" => [array], "wait" => true, "timeout" => 60))["completed"] == [array]
+            pkg = insert("using Example", 4)
             asked = run_asking([pkg])
             @test (asked["asking"], asked["completed"], asked["timed_out"]) == (["Example"], [], [pkg])
             @test nb.cells_dict[UUID(pkg)].queued
+            # Nothing runs while it waits, so a finished cell still reads as text, not as "cells are running" (#506).
+            @test occursin("2.5", result("render_text", Dict("notebook_id" => nid, "cell_id" => array))["text"])
             step = result("snapshot", Dict("notebook_id" => nid))["packages"]
             @test (step["step"], step["new"], [p["package"] for p in step["download"]["packages"]]) == ("asking", true, ["Example"])
             @test !haskey(Pluto.PkgCompat.project(nb.nbpkg_ctx).dependencies, "Example")
@@ -989,7 +993,7 @@ end
             @test [p["package"] for p in result("snapshot", Dict("notebook_id" => nid))["packages"]["download"]["packages"]] == ["CSV"]
             result("interrupt", Dict("notebook_id" => nid))
             result("apply", ops(Dict("op" => "delete", "cell_id" => two)))
-            result("apply", ops(Dict("op" => "delete", "cell_id" => pkg), Dict("op" => "delete", "cell_id" => stdlib)))
+            result("apply", ops(Dict("op" => "delete", "cell_id" => pkg), Dict("op" => "delete", "cell_id" => stdlib), Dict("op" => "delete", "cell_id" => array)))
             result("run", Dict("notebook_id" => nid, "cells" => [], "wait" => true, "timeout" => 60))
 
             @test result("validate", Dict("notebook_id" => nid, "cell_id" => X, "code" => "a = 1\nb = 2"))["errors"][1]["type"] == "pluto_multi_expression"
