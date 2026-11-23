@@ -651,6 +651,29 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("close_notebook", json!({ "notebook_id": nb }));
     });
 
+    step("a table's text shows its first 25 rows, so a small table is whole", || {
+        // marimo's own page is 10 rows, which cut an 11-row table's last row from the agent (smoke N1, 11-23).
+        let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        let made = agent.ok("new_notebook", json!({ "path": "tables.py" }));
+        let nb = made["notebook_id"].clone();
+        let first = made["cell_ids"][0].as_str().unwrap().to_owned();
+        agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": first }));
+        agent.ok("edit_cell", json!({ "notebook_id": nb, "cell_id": first, "code": "import marimo as mo" }));
+        let small = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": first, "code": "mo.ui.table([{\"t\": i} for i in range(11)])" }))["cell_id"].as_str().unwrap().to_owned();
+        let big = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": small, "code": "mo.ui.table([{\"t\": i} for i in range(30)])" }))["cell_id"].as_str().unwrap().to_owned();
+        agent.ok("submit_changes", json!({ "notebook_id": nb, "wait_for_completion": true }));
+        let text = |agent: &mut Agent, cell: &str| {
+            let read = agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": cell }));
+            read["output_text"].as_str().or(read["output"].as_str()).unwrap_or_default().to_owned()
+        };
+        let shown = text(&mut agent, &small);
+        assert!(shown.lines().any(|l| l.split_whitespace().last() == Some("10")) && !shown.contains("the first"), "all 11 rows: {shown}");
+        let shown = text(&mut agent, &big);
+        assert!(shown.contains("[the first 25 of 30 rows]") && shown.lines().any(|l| l.split_whitespace().last() == Some("24")), "{shown}");
+        agent.ok("close_notebook", json!({ "notebook_id": nb }));
+    });
+
     step("headings from a hand-written file keep their own code when the file changes under marimo", || {
         // A file written by hand keeps `mo.md("## A")` as written; marimo's first save writes it triple-quoted.
         // Kept as written in the session, six such headings were paired with each other's code by marimo's
