@@ -34,6 +34,7 @@ Every call into marimo's internals is in this file; marimo is pinned
 
 import asyncio
 import collections
+import functools
 import ast
 import json
 import html as html_module
@@ -257,7 +258,8 @@ def file_form(code):
     heading's code to another (L1 on Haiku, 11-20). marimo writes a markdown string's value into a plain
     `\"\"\"`, so a backslash in it (LaTeX's `\\alpha`) would become an escape (#433): such a cell takes a raw
     `r\"\"\"`, which marimo keeps, and is kept as sent only when that can't hold its value either. A cell kept
-    as sent can still change in the file, since marimo's save writes it its own way (#449)."""
+    as sent can still change in the file, since marimo's save writes it its own way: its cells get a note
+    that says so (`changes_in_file`, #449)."""
     try:
         kept = _marimo_writes(code)
         if kept == code or _meaning(kept) == _meaning(code):
@@ -270,6 +272,24 @@ def file_form(code):
         return code
     except Exception:  # noqa: BLE001 - code marimo can't write, or that doesn't parse, is kept as it came
         return code
+
+
+# A note on a markdown cell that `file_form` kept as sent although marimo writes it in another form, so
+# the file, and the notebook once reopened, has other code than this session (#449).
+FILE_FORM_NOTE = ("markdown_in_file::marimo writes this markdown cell to the file in another form, so reopening "
+                  "the notebook changes it: a backslash at the end of its text, or \"\"\" together with a backslash, "
+                  "becomes another escape, and keyword arguments to mo.md are dropped. To keep it as it is, write the "
+                  "text so mo.md(r\"\"\"...\"\"\") can hold it (no \"\"\" in it, no backslash at its end) with "
+                  "no keyword arguments, or build the text in a variable first and pass that to mo.md.")
+
+
+@functools.lru_cache(maxsize=1024)
+def changes_in_file(code):
+    """Whether marimo's file gives `code`, a markdown cell's, back with another meaning (`file_form`)."""
+    try:
+        return _meaning(_marimo_writes(code)) != _meaning(code)
+    except Exception:  # noqa: BLE001 - code marimo can't write, or that doesn't parse, says nothing
+        return False
 
 
 def _marimo_writes(code):
@@ -747,6 +767,9 @@ class Notebook:
              # stale for the tools too.
              "stale": bool(c["stale"]) or (c["ran_code"] is not None and c["ran_code"] != c["code"]),
              "not_run": never and not c["errored"], "off": False, "notes": [], "inputs": []}
+        # Not `markdown` alone: marimo takes a call with keyword arguments as markdown too.
+        if c["code"].lstrip().startswith("mo.md(") and changes_in_file(c["code"]):
+            d["notes"].append(FILE_FORM_NOTE)
         if waiting:
             pass
         elif c["errored"]:

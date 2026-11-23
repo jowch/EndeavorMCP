@@ -886,6 +886,22 @@ fn a_staged_edit_gives_the_old_run_as_previous() {
 }
 
 #[test]
+fn a_staged_edit_keeps_the_notes_on_its_own_code_as_notes() {
+    // What the cell printed is the old run's, but a note on its code (a markdown cell marimo will
+    // write another way, #449) is about the code just sent.
+    let s = setup();
+    s.engine.open(NB, "/n/a.py", &[(X, "mo.md(\"## a\")")]);
+    s.read("", NB, X);
+    s.engine.with(NB, |nb| nb.cells[0].notes = vec!["printed::old run".into(), "markdown_in_file::marimo writes it in another form".into()]);
+    let receipt = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "mo.md(\"C:\\\\\")" })).unwrap();
+    assert_eq!((&receipt["notes"], &receipt["previous_notes"]), (&json!(["markdown_in_file::marimo writes it in another form"]), &json!(["printed::old run"])), "{receipt}");
+    // With only a code note, there are no previous_notes.
+    s.engine.with(NB, |nb| nb.cells[0].notes = vec!["markdown_in_file::marimo writes it in another form".into()]);
+    let receipt = s.call("", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "mo.md(\"D:\\\\\")" })).unwrap();
+    assert_eq!(receipt.get("previous_notes"), None, "{receipt}");
+}
+
+#[test]
 fn a_run_in_lazy_mode_says_so_and_names_the_stale_cells() {
     // Ember's lazy mode marks a run's dependents stale instead of rerunning
     // them; the agent is told, not left to find them (#196).
@@ -1076,7 +1092,7 @@ fn what_a_julia_cell_printed_and_logged_reaches_the_agent() {
     // only ran along, a run's reply keeps its errors and warnings and leaves the rest to read_cell.
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x + 1")]);
-    let notes = ["logged_warning::3 rows dropped (n = 3)", "logged_info::loaded", "printed::fitting\ndone"];
+    let notes = ["logged_warning::3 rows dropped (n = 3)", "logged_info::loaded", "printed::fitting\ndone", "markdown_in_file::marimo writes this markdown cell in another form"];
     s.engine.with(NB, |nb| nb.cells.iter_mut().for_each(|c| c.notes = notes.iter().map(|n| n.to_string()).collect()));
     s.read("", NB, X);
     s.engine.with(NB, |nb| nb.reruns_besides = vec![Y.into()]);
@@ -1089,7 +1105,8 @@ fn what_a_julia_cell_printed_and_logged_reaches_the_agent() {
     assert!(ran["message"].as_str().unwrap().contains("tell the user what it says"), "{ran}");
     // The same warning on both cells is one line.
     assert!(warnings.contains(&format!("logged_warning::Cells {X}, {Y}: 3 rows dropped (n = 3)").as_str()), "{ran}");
-    assert!(!warnings.iter().any(|w| w.contains(Y) && (w.starts_with("printed::") || w.starts_with("logged_info::"))), "{ran}");
+    // A note on the cell's own code (#449) is said for the cell that was asked for, not one that ran along.
+    assert!(!warnings.iter().any(|w| w.contains(Y) && (w.starts_with("printed::") || w.starts_with("logged_info::") || w.starts_with("markdown_in_file::"))), "{ran}");
     let read = s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap();
     assert_eq!(read["notes"], json!(notes), "{read}");
     assert!(read["message"].as_str().unwrap().starts_with(&format!("Cell {Y} logged a warning: \"3 rows dropped (n = 3)\"")), "{read}");
