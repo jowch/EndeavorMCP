@@ -474,7 +474,8 @@ Next:
   its notifications by long-polling. The core makes Ember's page secret and
   hands it to R. `new_notebook` makes one from an `.R` path, `read_cell`
   shows Ember's own `stale` (a result from before an ancestor ran, or from code
-  the cell no longer has, such as an edit to the file that hasn't run, #291) and
+  the cell no longer has, such as an edit on Ember's page that hasn't run, #291;
+  Ember doesn't reload an edit made to the file outside it, Ember #636) and
   `not_run` (every cell after a restart), a
   warning in a cell's output starts with `Warning:`, and `read_notebook_code`
   marks cells as an Ember file does (`# %% id=`). `edit_cell` can fold the
