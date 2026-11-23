@@ -342,9 +342,10 @@ snapshot_cell <- function(v) {
     # Ember has no boilerplate cells to hide.
     hidden = FALSE,
     markdown = !identical(v$kind, "code"),
-    # Ember knows these itself: a result made before an ancestor last ran, and a
+    # Ember knows these itself: a result made before an ancestor last ran, or from
+    # code the cell no longer has (an edit to the file that hasn't run, #291), and a
     # cell that hasn't run since the notebook started (a restart leaves all so).
-    stale = isTRUE(v$stale),
+    stale = isTRUE(v$stale) || isTRUE(v$code_differs),
     not_run = identical(v$status, "not_run") && identical(v$kind, "code"),
     # A disabled cell, or one downstream of it, that Ember won't run (#232).
     off = isTRUE(v$disabled) || !is.na(v$disabled_by %||% NA_character_))
