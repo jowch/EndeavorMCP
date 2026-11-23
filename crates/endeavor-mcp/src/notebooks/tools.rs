@@ -2123,7 +2123,7 @@ pub(crate) const ASK_STEP: &str = "Stop here and ask the user whether to install
 /// What the agent hears while an R notebook's install waits for an OK before a large download
 /// (Ember #37): what it would download and how much, and that the user decides. Only the user
 /// can say yes to it, so the agent asks them and doesn't wait.
-fn asking_message(nb: &Snapshot) -> String {
+pub(super) fn asking_message(nb: &Snapshot) -> String {
     let download = nb.packages.as_ref().map(|p| p["download"].clone()).unwrap_or_default();
     // A Julia notebook's run that would add packages it doesn't have yet (#397), or a Python
     // notebook's import of one (#355).
