@@ -158,7 +158,7 @@ fixed this on master (JuliaLang/julia#62069).
   an InterruptException, as Malt does in-process. A cell that never yields
   (a loop in compiled code) gets Pluto's Ctrl+C as before.
 - This is a method on PlutoRunner's `run_inside_trycatch`, only on the Pluto
-  releases `_stop_hook_ok` knows. It is a shortcut to remove once the pinned
+  releases `_stop_hook_ok` knows. It is a shortcut to remove (#567) once the pinned
   Julia's interrupts reach a waiting task.
 - Only the cell Stop meant, and only right away: a late message mustn't stop
   the next run. A process with no hook answers false and falls back at once.
