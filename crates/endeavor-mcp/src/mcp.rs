@@ -132,7 +132,7 @@ pub(crate) fn refuses_r_for_want_of_it(tool: &str, arguments: &Value, result: &V
 }
 
 /// What the app's sessions get for a Python notebook, which the app can't show yet.
-pub(crate) const PYTHON_NOT_IN_APP: &str = "ArgumentError: unsupported::Python notebooks work with the Endeavor plugin on this computer (`endeavor serve` or `endeavor mcp`), not yet in the Endeavor app";
+pub(crate) const PYTHON_NOT_IN_APP: &str = "ArgumentError: unsupported::This version of the Endeavor app doesn't show Python notebooks. A newer one does, and so does the Endeavor plugin on this computer (`endeavor serve` or `endeavor mcp`)";
 
 /// Whether `tool` with `arguments` opens or makes a Python notebook: by its path, else (a new
 /// notebook with none) by the session's kind.
@@ -194,10 +194,6 @@ pub(crate) fn browser_link(port: u16, target: &str) -> String {
 }
 
 /// `value` for a URL's query: percent-encoded, but for what's plain in a path.
-pub(crate) fn query_value(value: &str) -> String {
-    value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
-}
-
 /// `url` with the runtime's `token`, which lets a browser in: its first visit gets the cookie. Only
 /// for the user's own browser and terminal, never for a tool result.
 pub(crate) fn entry_link(url: &str, token: &str) -> String {
@@ -226,6 +222,7 @@ pub struct Bridge {
     /// Each agent session's working folder on this machine, by its key; none is a session that was
     /// told it has no project folder.
     folders: Mutex<HashMap<String, Option<String>>>,
+    sessions_showing_python: Mutex<std::collections::HashSet<String>>,
     /// Each agent session's last tool results, for the app to look up.
     results: Results,
     /// Each agent session's open or creation the user allowed on a card, with when they did, while
@@ -415,6 +412,7 @@ impl Bridge {
             token,
             policies: Mutex::default(),
             folders: Mutex::default(),
+            sessions_showing_python: Mutex::default(),
             results: Results::default(),
             starting_calls: Mutex::default(),
             shell_env,
@@ -422,6 +420,10 @@ impl Bridge {
             on_folder: std::sync::OnceLock::new(),
             views: crate::views::Views::default(),
         }
+    }
+
+    fn shows_python(&self, owner: &str) -> bool {
+        self.sessions_showing_python.lock().unwrap().contains(owner)
     }
 
     /// A session's working folder: the one it was given, else the standalone runtime's. The app's
@@ -523,6 +525,10 @@ impl Bridge {
                     }
                     None => self.notebooks.kind(&owner),
                 };
+                if let Some(shows) = params["shows_python"].as_bool() {
+                    let mut showing = self.sessions_showing_python.lock().unwrap();
+                    if shows { showing.insert(owner.clone()) } else { showing.remove(&owner) };
+                }
                 let mut folders = self.folders.lock().unwrap();
                 if params["no_folder"] == true {
                     folders.insert(owner, None);
@@ -570,9 +576,7 @@ impl Bridge {
             "endeavor/file_info" => return Some(answer(notebooks::file_info(&text("path", "")))),
             "endeavor/new_notebook" => {
                 let owner = text("owner", "");
-                // The app's New notebook, in the session's kind: never Python, which it can't show yet
-                // (the agent's own calls are refused in `refusal`, #358). Its chip doesn't offer Python today.
-                if opens_python("new_notebook", &json!({}), self.notebooks.kind(&owner)) {
+                if !self.shows_python(&owner) && opens_python("new_notebook", &json!({}), self.notebooks.kind(&owner)) {
                     return Some(answer(Err(PYTHON_NOT_IN_APP.to_owned())));
                 }
                 let folder = self.folder(&owner);
@@ -795,7 +799,7 @@ impl Bridge {
                     wire::backend::Backend::Ember => format!("/ember/edit?id={id}"),
                     // marimo's page names its notebook by path.
                     wire::backend::Backend::Marimo => match fields.get("path").and_then(Value::as_str) {
-                        Some(path) => format!("/marimo/?file={}", query_value(path)),
+                        Some(path) => format!("/marimo/?file={}", wire::backend::query_value(path)),
                         None => return,
                     },
                 },
@@ -879,12 +883,7 @@ impl Bridge {
         if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
             return Some(host_tool_refusal(tool));
         }
-        // ponytail: the app has no pane for marimo's page yet (Endeavor #1). Refused by caller, not by
-        // runtime, since the app and the plugin may share one (#358): the plugin's sessions open Python
-        // notebooks on the app's runtime too, and the app's never do on the plugin's.
-        // Only opening or making one is refused: an app session is bound to its one notebook
-        // (`endeavor/set_notebook`), so it never reaches a Python notebook a plugin session opened.
-        if caller.app && opens_python(tool, arguments, self.notebooks.kind(&caller.owner)) {
+        if caller.app && !self.shows_python(&caller.owner) && opens_python(tool, arguments, self.notebooks.kind(&caller.owner)) {
             return Some(PYTHON_NOT_IN_APP.to_owned());
         }
         let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p.policy == "plan");
@@ -1562,7 +1561,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (47, "31806aaaff1c73b0"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (48, "31806aaaff1c73b0"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1609,7 +1608,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result", "use_julia",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (47, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (48, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

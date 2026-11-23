@@ -480,10 +480,12 @@ Next:
   and its WebSocket open only for a notebook that is open and allowed to run,
   since opening one builds its environment; the proxy decodes a path before it
   matches the refusals, as marimo's server does. A new notebook's header also
-  holds Python to the minor version it was made with (interface 42). The app's
-  sessions and a server's runtime refuse Python notebooks for now; the refusal
-  goes by the caller, so a plugin session that shares the app's runtime on this
-  computer opens them, and an app session on the plugin's runtime doesn't (#358). In safe preview an
+  holds Python to the minor version it was made with (interface 42). An app
+  session opens and makes Python notebooks only once the app says it shows them
+  (`shows_python` in `endeavor/set_session_folder`, interface 48, Endeavor #1);
+  an older app's sessions are refused, and told a newer app shows them. The
+  refusal goes by the caller, so a plugin session that shares the app's runtime
+  on this computer opens them either way (#358). In safe preview an
   edit is written with marimo's own save and no session, so nothing runs or installs, and when the
   notebook goes live the cells marimo loads are given the ids the preview handed out (#351). A file
   written by hand is saved once in marimo's own form when it goes live (a heading's

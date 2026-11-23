@@ -56,7 +56,7 @@ impl Backend {
 
     pub fn notebook_url(self, root: &str, id: &str) -> String {
         match self {
-            Backend::Marimo => root.replacen("/?", &format!("{}/?", self.prefix()), 1),
+            Backend::Marimo => root.replacen("/?", &format!("{}/?file={}&", self.prefix(), query_value(id)), 1),
             _ => root.replacen("/?", &format!("{}/edit?id={id}&", self.prefix()), 1),
         }
     }
@@ -69,6 +69,10 @@ impl Backend {
         }
         query.split('&').find_map(|kv| kv.strip_prefix("id="))
     }
+}
+
+pub fn query_value(text: &str) -> String {
+    text.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
 fn is_marimo(path: &Path) -> bool {
@@ -133,8 +137,8 @@ mod tests {
 
     #[test]
     fn marimo_pages_are_under_their_own_prefix() {
-        let url = Backend::Marimo.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc");
-        assert_eq!(url, "http://127.0.0.1:1234/marimo/?token=t0k3n");
+        let url = Backend::Marimo.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "/w/a b&c.py");
+        assert_eq!(url, "http://127.0.0.1:1234/marimo/?file=/w/a%20b%26c.py&token=t0k3n", "marimo's page names its notebook by path");
         assert_eq!(Backend::Marimo.notebook_id(&url), None);
         assert_eq!(Backend::Marimo.notebook_id("http://127.0.0.1:1234/marimo/edit?id=abc"), None);
     }
