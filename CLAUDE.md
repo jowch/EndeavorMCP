@@ -82,24 +82,35 @@ including the network hosts Julia needs, are in Endeavor's `docs/cloud.md`.
 ## No comments
 
 Don't write comments, and that includes `///` and `//!` doc comments and
-Julia docstrings: nothing here is published as a library, so they only ever
-reach someone reading the source. Comments go stale; code doesn't. When you
-want to explain something, change the code so it says it: a better name, a
-smaller function, a type, an `assert!`, or a test that fails if someone
-undoes it. When the reason can't
-live in code (a platform quirk, why the obvious way was rejected), put it in
-the commit message, where `git blame` finds it, or in `docs/` if it's design.
-Known gaps and shortcuts are GitHub issues.
+Julia docstrings: neither crate goes to a registry (the app takes them from
+git), so they only ever reach someone reading the source. Comments go stale;
+code doesn't. When you want to explain something, change the code so it says
+it: a better name, a smaller function, a type, an `assert!`, or a test that
+fails if someone undoes it. When the reason can't live in code (a platform
+quirk, why the obvious way was rejected), put it in the commit message, where
+`git blame` finds it, or in `docs/` if it's design. Known gaps and shortcuts
+are GitHub issues.
 
 Only these stay, because a tool or a reader outside the source needs them:
-license headers, shebangs, lint and format directives (`#[allow]`,
-`eslint-disable`, `# shellcheck`), build-tool pragmas, and `// SAFETY:` on an
-`unsafe` block, which states the invariant the compiler can't check. UI text,
-MCP tool descriptions and skill text are product strings, not comments. Leave
-copied and generated files alone: the app's view, which changes in the app
-and is synced here, the plugin copies, and `release-key`.
 
-Reviewers flag every new comment that isn't one of these.
+- license headers, shebangs, lint and format directives (`#[allow]`,
+  `# shellcheck`), and build-tool pragmas;
+- `// SAFETY:` on an `unsafe` block, which states the invariant the compiler
+  can't check;
+- comments that are a file format: Pluto's notebook markers
+  (`### A Pluto.jl notebook ###`, `# ╔═╡`, `# ╟─`) in fixtures and in notebook
+  text built by tests, and marimo's PEP 723 `# /// script` header;
+- user content: the files under `smoke/tasks/*/project/` stand in for a
+  user's folder, and their comments are the user's.
+
+Triple-quoted Julia strings that aren't docstrings are code. UI text, MCP tool
+descriptions and skill text are product strings, not comments. Leave copied
+and generated files alone: the app's view, which changes in the app and is
+synced here, the plugin copies, and `release-key`. `scripts/cloud-setup.sh`
+is a copy of the app's; change both the same way.
+
+The rule covers every file: Rust, Julia, shell, YAML, TOML. Reviewers flag
+every new comment that isn't one of the kept kinds above.
 
 ## Style
 
