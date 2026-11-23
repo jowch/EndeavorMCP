@@ -119,6 +119,9 @@ check("a cell that runs: not off", isFALSE(A$snapshot_cell(view())$off))
 check("a disabled cell: off", isTRUE(A$snapshot_cell(view(disabled = TRUE))$off))
 check("a cell downstream of a disabled one: off, though it ran before", isTRUE(A$snapshot_cell(view(disabled_by = "d"))$off))
 check("an Ember without disabled_by: not off", isFALSE(A$snapshot_cell(view(disabled_by = NULL))$off))
+check("a result from code the cell no longer has: stale (#291)", isTRUE(A$snapshot_cell(view(code_differs = TRUE))$stale))
+check("a current result: not stale", isFALSE(A$snapshot_cell(view(code_differs = FALSE))$stale) && isFALSE(A$snapshot_cell(view())$stale))
+check("a result before an ancestor ran: stale", isTRUE(A$snapshot_cell(view(stale = TRUE))$stale))
 
 # A cell rerun after an error, now waiting at a prompt: Ember keeps the last run's error on it
 # while it runs. The agent sees what this run printed, not the old error (trial 20).
