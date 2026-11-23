@@ -1,9 +1,3 @@
-//! `endeavor core` with a stand-in Julia (see `common`): it starts it,
-//! writes `runtime.json` once it's ready, passes the requests on its port it
-//! doesn't answer through to Pluto or Julia's bridge, streams as they're
-//! written, lets a browser in with its cookie, and lives and dies with it.
-
-// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
 #![allow(clippy::disallowed_methods)]
 
 #![cfg(unix)]
@@ -23,13 +17,11 @@ use common::*;
 struct Core {
     process: Child,
     port: u16,
-    /// Julia's, if it started with the core.
     julia_pid: i32,
     dir: Option<std::path::PathBuf>,
 }
 
 impl Core {
-    /// Start the core in `dir` and wait for its `runtime.json`.
     fn start(dir: &Path, bridge: &FakeBridge) -> Core {
         Core::start_with_home(dir, bridge, &std::env::var("HOME").unwrap())
     }
@@ -42,13 +34,11 @@ impl Core {
         Core::try_start_with_env(dir, bridge, env).unwrap_or_else(|status| panic!("the core exited before it wrote runtime.json: {status}"))
     }
 
-    /// `start_with_env`, which gives the core's exit status if it ends before it writes `runtime.json`.
     fn try_start_with_env(dir: &Path, bridge: &FakeBridge, env: &[(&str, &str)]) -> Result<Core, ExitStatus> {
         let julia = serving_julia(dir, bridge);
         Core::try_start_with(dir, env, &[std::ffi::OsStr::new("--julia"), julia.as_os_str()])
     }
 
-    /// The core with `--julia-when-needed` and `julia`, which hasn't started Julia once it wrote `runtime.json`.
     fn start_when_needed(dir: &Path, julia: &Path) -> Core {
         let core = Core::try_start_with(dir, &[], &[std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed")]).unwrap();
         assert!(julia_pids(dir).is_empty() && !dir.join("julia.json").exists(), "Julia waits until it's needed");
@@ -113,7 +103,6 @@ impl Drop for Core {
     }
 }
 
-/// The Julias the core started: the one it had at its start, and any it started later.
 fn julia_pids_of(core: &Core) -> Vec<i32> {
     let mut pids: Vec<i32> = Some(core.julia_pid).into_iter().filter(|pid| *pid > 0).collect();
     if let Some(dir) = &core.dir {
@@ -122,7 +111,6 @@ fn julia_pids_of(core: &Core) -> Vec<i32> {
     pids
 }
 
-/// Read one response: its head, and its body undone from chunks or by length.
 fn response(reader: &mut impl BufRead) -> (String, Vec<(String, String)>, String) {
     let mut status = String::new();
     reader.read_line(&mut status).unwrap();
@@ -156,7 +144,6 @@ fn response(reader: &mut impl BufRead) -> (String, Vec<(String, String)>, String
     (status.trim_end().to_owned(), headers, String::from_utf8(body).unwrap())
 }
 
-/// Read a stream until `text` has come.
 fn read_until(reader: &mut impl BufRead, text: &str) -> String {
     let mut got = String::new();
     while !got.contains(text) {
@@ -216,7 +203,6 @@ fn answers_julias_calls_itself_and_hands_the_folder_to_julia() {
     assert_eq!(seen.header("Authorization"), Some(format!("Bearer {}", engine_token(&dir)).as_str()), "the engines' key, not the bearer token");
     assert!(String::from_utf8_lossy(&seen.body).contains(r#""path":"/n""#));
 
-    // A chunked call, which the core reads whole to see its method.
     let allow = r#"{"jsonrpc":"2.0","id":8,"method":"endeavor/allow_julia_install"}"#;
     write!(socket, "POST /endeavor/call HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
     write!(socket, "{:x}\r\n{}\r\n", 20, &allow[..20]).unwrap();
@@ -229,7 +215,6 @@ fn answers_julias_calls_itself_and_hands_the_folder_to_julia() {
     assert_eq!(serde_json::from_str::<serde_json::Value>(&response(&mut reader).2).unwrap(), serde_json::json!({ "jsonrpc": "2.0", "id": 9, "result": {} }));
     assert!(!bridge.seen().iter().any(|s| String::from_utf8_lossy(&s.body).contains("allow_")), "the core answers these itself");
 
-    // The same connection carries the next request.
     write!(socket, "GET /endeavor/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     assert_eq!(response(&mut reader).0, "HTTP/1.1 404 Not Found");
     write!(socket, "GET /edit?id=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
@@ -237,7 +222,6 @@ fn answers_julias_calls_itself_and_hands_the_folder_to_julia() {
     write!(socket, "GET /edit?id=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {PAGES}\r\n\r\n").unwrap();
     assert_eq!(response(&mut reader).2, "Pluto: GET /edit?id=1 HTTP/1.1");
 
-    // HTTP/1.0, as the helper's own calls are.
     let mut socket = core.connect();
     write!(socket, "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
     let mut reply = String::new();
@@ -271,7 +255,6 @@ fn passes_request_bodies_intact() {
     let seen = bridge.pluto_seen().pop().unwrap();
     assert_eq!((seen.header("Cookie"), seen.header("Authorization")), (Some("secret=s3cret"), None), "Pluto gets its secret, not the token");
 
-    // A chunked body, sent in pieces.
     write!(socket, "POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {PAGES}\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
     socket.write_all(b"6\r\nhello \r\n").unwrap();
     std::thread::sleep(Duration::from_millis(50));
@@ -292,11 +275,9 @@ fn streams_events_as_written_and_closes_with_either_side() {
     bridge.event("second");
     read_until(&mut reader, "data: second");
 
-    // The client going away closes Julia's end at once, with nothing written.
     drop((socket, reader));
     assert!(bridge.events_closed(), "the core closed the stream to Julia");
 
-    // Julia's end closing mid-stream closes the client's.
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     write!(socket, "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {PAGES}\r\n\r\n").unwrap();
@@ -307,7 +288,6 @@ fn streams_events_as_written_and_closes_with_either_side() {
     reader.read_to_end(&mut rest).unwrap();
 }
 
-/// A notebook as the adapter's `snapshot` reports it, with one cell.
 fn notebook(id: &str, code: &str) -> serde_json::Value {
     serde_json::json!({
         "notebook_id": id, "path": "/n/a.jl", "cell_order": ["c1"], "execution_allowed": true, "safe_preview": false, "pending_run": [],
@@ -323,13 +303,11 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     wait_for("the core to follow Julia's notifications", || bridge.seen().iter().any(|s| s.line == "GET /notifications HTTP/1.0"));
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
-    // HTTP/1.0, as the app asks: the stream runs to the end of the connection.
     write!(socket, "GET /endeavor/events HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\r\n").unwrap();
     let head = read_until(&mut reader, "\r\n\r\n");
     assert!(head.starts_with("HTTP/1.1 200 OK\r\n") && head.contains("Content-Type: text/event-stream\r\n") && !head.contains("chunked"), "{head}");
     assert_eq!(read_until(&mut reader, "\n\n"), "data: {\"asks\":[],\"build\":\"1.0.0-abc\",\"cells\":{},\"engine_ended\":[],\"idle_stopped\":[],\"notebooks\":[]}\n\n", "the state now, and the build it came from");
 
-    // Julia says a notebook changed: the core reads it and tells the app.
     bridge.set_notebooks(vec![notebook("n1", "x = 1")]);
     bridge.notify(serde_json::json!({ "method": "notebook_opened", "params": { "notebook_id": "n1", "path": "/n/a.jl" } }));
     let event = read_until(&mut reader, "\n\n");
@@ -340,7 +318,6 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     );
     assert_eq!(event["cells"]["n1"][0]["author"], serde_json::Value::Null);
 
-    // The same state again isn't news; a change the tools didn't make is the user's.
     bridge.notify(serde_json::json!({ "method": "topology_changed", "params": { "notebook_id": "n1" } }));
     bridge.set_notebooks(vec![notebook("n1", "x = 2")]);
     bridge.notify(serde_json::json!({ "method": "cell_state", "params": { "notebook_id": "n1", "cells": [{ "cell_id": "c1", "code": "x = 2" }] } }));
@@ -348,7 +325,6 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     let event: serde_json::Value = serde_json::from_str(event.strip_prefix("data: ").unwrap().trim_end()).unwrap();
     assert_eq!(event["cells"]["n1"][0]["author"], "user");
 
-    // Tool calls the core answers are news too, and don't reach Julia.
     let keep = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"keep_notebook_alive","arguments":{"notebook_id":"aaaaaaaa-0000-0000-0000-000000000000","keep":true}}}"#;
     let (status, body) = mcp(&core, keep, &[("X-Endeavor-Session", "7")]);
     assert_eq!(status, "HTTP/1.1 200 OK");
@@ -363,14 +339,11 @@ fn serves_the_apps_events_from_what_the_adapter_reports() {
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")));
 }
 
-/// POST one JSON-RPC message to `/mcp`, as the agent's MCP client does: the
-/// response's status and body (a request's reply, or nothing for `202`).
 fn mcp(core: &Core, message: &str, caller: &[(&str, &str)]) -> (String, String) {
     let (status, _, body) = mcp_response(core, message, caller);
     (status, body)
 }
 
-/// `mcp`, with the response's headers (names in lower case).
 fn mcp_response(core: &Core, message: &str, caller: &[(&str, &str)]) -> (String, Vec<(String, String)>, String) {
     let mut socket = core.connect();
     let headers: String = caller.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect();
@@ -448,9 +421,6 @@ fn an_agent_without_the_session_header_is_told_apart_by_its_mcp_session_id() {
     assert_eq!(call(&two, "open_notebook", serde_json::json!({ "path": b }))["path"], serde_json::json!(b), "the other session may");
     assert_eq!(marked(&two), vec![(a.clone(), false), (b.clone(), true)]);
 
-    // A front whose client serves several conversations on one connection (Claude's desktop app)
-    // says so, and its session works on each notebook it opens. It can't say which is the
-    // conversation's, so none is `this_session`.
     let desktop = [("X-Endeavor-Session", "desktop"), ("X-Endeavor-Notebooks", "several")];
     assert_eq!(call(&desktop, "open_notebook", serde_json::json!({ "path": a }))["path"], serde_json::json!(a));
     assert_eq!(call(&desktop, "open_notebook", serde_json::json!({ "path": b }))["path"], serde_json::json!(b), "a second notebook isn't refused");
@@ -483,7 +453,6 @@ fn sessions_join_an_open_notebook_and_the_runtime_says_how_many_called_lately() 
         serde_json::from_str::<serde_json::Value>(&app_call(&core, &body.to_string())).unwrap()["result"].clone()
     };
 
-    // The first session opens the notebook; the second joins it.
     let one = [("Mcp-Session-Id", plain.as_str())];
     let opened = call(&one, "open_notebook", serde_json::json!({ "path": path }));
     assert_eq!((&opened["notebook_id"], opened.get("already_open")), (&serde_json::json!(id), Some(&serde_json::json!(true))), "the notebook was open already");
@@ -493,7 +462,6 @@ fn sessions_join_an_open_notebook_and_the_runtime_says_how_many_called_lately() 
     let marked = call(&two, "list_notebooks", serde_json::json!({}));
     assert_eq!(marked[0]["this_session"], true);
 
-    // Each is another to the other; the app, which has no session, finds both; neither leaves a record for the check itself.
     for (owner, count) in [("stdio-1", 1), (plain.as_str(), 1), ("", 2), ("nobody", 2)] {
         let said = recent(owner);
         assert!((said["count"].as_u64(), said["active_seconds_ago"].as_u64().map(|s| s < 5)) == (Some(count), Some(true)), "{owner:?}: {said}");
@@ -536,7 +504,6 @@ fn a_call_with_arguments_the_tool_does_not_take_is_refused_and_is_not_the_sessio
     );
     assert!(!send(5, "list_notebooks", serde_json::json!({})).contains("invalid_argument"), "a valid call still runs");
 
-    // Calls that were refused leave no mark on the session: its last call stays the one that opened the notebook.
     let opened = serde_json::json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": { "name": "open_notebook", "arguments": { "path": path } } });
     mcp(&core, &opened.to_string(), &caller);
     std::thread::sleep(Duration::from_millis(2100));
@@ -553,7 +520,6 @@ fn a_call_with_arguments_the_tool_does_not_take_is_refused_and_is_not_the_sessio
 
 #[test]
 fn a_front_whose_client_is_in_auto_mode_adds_new_packages_without_asking() {
-    // Claude Code's own auto mode, as the plugin's front says it with each call (#397).
     let dir = state_dir("core-client-auto");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
@@ -580,13 +546,11 @@ fn a_front_whose_client_is_in_auto_mode_adds_new_packages_without_asking() {
     assert_eq!(asks_new(&front, 2), true, "not in auto mode: asked");
     assert_eq!(asks_new(&auto, 3), false, "in auto mode: not asked");
     assert_eq!(asks_new(&front, 4), true, "the user left auto mode");
-    // Only a front says its client's mode: for another caller the mode is the app's to set.
     let app_session = [("X-Endeavor-Session", "7"), ("X-Endeavor-Mode", "auto")];
     call(5, "open_notebook", serde_json::json!({ "path": path }), &app_session);
     assert_eq!(asks_new(&app_session, 6), true);
 }
 
-/// The engine calls the core made, by method and parameters.
 fn engine_calls(bridge: &FakeBridge) -> Vec<(String, serde_json::Value)> {
     let calls = bridge.seen().into_iter().filter(|s| s.line.starts_with("POST /adapter"));
     calls.map(|s| serde_json::from_slice::<serde_json::Value>(&s.body).unwrap()).map(|c| (c["method"].as_str().unwrap().to_owned(), c["params"].clone())).collect()
@@ -600,7 +564,6 @@ fn a_runtime_without_a_folder_refuses_relative_paths_before_anything_is_asked_or
     let bridge = FakeBridge::start(&dir);
     let home = temp_folder("core-no-folder-home");
     let core = Core::start_with_env(&dir, &bridge, &[("ENDEAVOR_NO_FOLDER", "1"), ("HOME", home.to_str().unwrap())]);
-    // It works in the home folder, not in the folder of the process that started it, and says it has no project folder.
     let record = read_json(&dir.join("runtime.json"));
     assert_eq!((record["folder"].as_str(), record["no_folder"].clone()), (home.to_str(), serde_json::json!(true)), "{record}");
     let set_folder = bridge.seen().into_iter().find(|s| String::from_utf8_lossy(&s.body).contains("endeavor/set_folder")).expect("Pluto hears a folder");
@@ -622,7 +585,6 @@ fn a_runtime_without_a_folder_refuses_relative_paths_before_anything_is_asked_or
     let asked = |method: &str| engine_calls(&bridge).into_iter().filter(|(m, _)| m == method).count();
     let tell = |body: serde_json::Value| app_call(&core, &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/set_session_folder", "params": body }).to_string());
 
-    // A session that was never told a folder works from the home folder; it is not one that has none.
     send("untold", 30, "new_notebook", serde_json::json!({}));
     let (_, params) = engine_calls(&bridge).into_iter().find(|(m, _)| m == "new").expect("the engine was asked for a notebook");
     assert_eq!(params, serde_json::json!({ "folder": home.to_str().unwrap() }));
@@ -638,7 +600,6 @@ fn a_runtime_without_a_folder_refuses_relative_paths_before_anything_is_asked_or
     }
     assert_eq!(asked("new"), was_asked, "the engine was asked nothing more");
 
-    // An absolute path goes through.
     let made = folder.join("made.jl").display().to_string();
     send("s1", 10, "new_notebook", serde_json::json!({ "path": made }));
     let (_, params) = engine_calls(&bridge).into_iter().filter(|(m, _)| m == "new").last().expect("the engine was asked for the notebook");
@@ -647,7 +608,6 @@ fn a_runtime_without_a_folder_refuses_relative_paths_before_anything_is_asked_or
     let joined: serde_json::Value = serde_json::from_str(&send("s2", 11, "open_notebook", serde_json::json!({ "path": path }))).unwrap();
     assert!(joined["result"]["content"][0]["text"].as_str().unwrap().contains(r#""already_open":true"#), "{joined}");
 
-    // A session that is told a folder has relative paths; one that is told it has none is refused, whatever the runtime's own folder.
     tell(serde_json::json!({ "owner": "s3", "folder": folder }));
     let joined = send("s3", 12, "open_notebook", serde_json::json!({ "path": "a.jl" }));
     assert!(joined.contains(r#"already_open\":true"#), "{joined}");
@@ -659,7 +619,6 @@ fn a_runtime_without_a_folder_refuses_relative_paths_before_anything_is_asked_or
     let forgotten = send("s5", 15, "open_notebook", serde_json::json!({ "path": "a.jl" }));
     assert!(forgotten.contains("file_not_found") && forgotten.contains(&format!("{}/a.jl", home.display())), "forgetting a folder leaves the runtime's, which is the home folder: {forgotten}");
 
-    // A refused call is not the session's activity.
     send("s4", 20, "open_notebook", serde_json::json!({ "path": path }));
     std::thread::sleep(Duration::from_millis(2100));
     let ago = || {
@@ -734,19 +693,15 @@ fn serves_the_agents_mcp_messages() {
     let core = Core::start(&dir, &bridge);
     let caller = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
 
-    // A request gets its reply in the same response.
     let message = r#"{"jsonrpc":"2.0","id":1,"method":"resources/list","params":{}}"#;
     assert_eq!(mcp(&core, message, &caller), ("HTTP/1.1 200 OK".into(), r#"{"error":{"code":-32601,"message":"Method not found: resources/list"},"id":1,"jsonrpc":"2.0"}"#.into()));
     assert_eq!(mcp(&core, r#"{"jsonrpc":"2.0","id":"p","method":"ping"}"#, &caller), ("HTTP/1.1 200 OK".into(), r#"{"id":"p","jsonrpc":"2.0","result":{}}"#.into()));
-    // A notification gets 202 and no body.
     assert_eq!(mcp(&core, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, &caller), ("HTTP/1.1 202 Accepted".into(), String::new()));
-    // An agent with the plugin is told to load its skill.
     let init = mcp(&core, r#"{"jsonrpc":"2.0","id":2,"method":"initialize"}"#, &[("X-Endeavor-Skills", "plugin")]);
     assert_eq!(init.0, "HTTP/1.1 200 OK");
     let init: serde_json::Value = serde_json::from_str(&init.1).unwrap();
     assert_eq!(init["result"]["serverInfo"], serde_json::json!({ "name": "endeavor-runtime", "version": env!("CARGO_PKG_VERSION") }));
     assert!(init["result"]["instructions"].as_str().unwrap().starts_with("Before your first notebook tool call in a session, load the `endeavor-notebooks` skill"), "{init}");
-    // An agent without Endeavor's plugin is told to read the guide, and can.
     let init: serde_json::Value = serde_json::from_str(&mcp(&core, r#"{"jsonrpc":"2.0","id":3,"method":"initialize"}"#, &[]).1).unwrap();
     assert!(init["result"]["instructions"].as_str().unwrap().contains("call `notebook_guide` once"));
     let guide = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"notebook_guide","arguments":{}}}"#;
@@ -783,12 +738,9 @@ fn negotiates_the_protocol_version_on_initialize() {
         let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
         reply["result"]["protocolVersion"].as_str().unwrap().to_owned()
     };
-    // No protocolVersion in params: our latest.
     assert_eq!(version(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#), "2025-06-18");
-    // A supported version, not the latest: echoed back.
     assert_eq!(version(r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#), "2024-11-05");
     assert_eq!(version(r#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#), "2025-03-26");
-    // A version we don't speak: our latest, per the spec's fallback (initialize never errors on this).
     assert_eq!(version(r#"{"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#), "2025-06-18");
 }
 
@@ -828,7 +780,6 @@ fn keeps_concurrent_sessions_apart() {
     });
 }
 
-/// One of the app's `/call`s, as the app makes them: the reply's body.
 fn app_call(core: &Core, body: &str) -> String {
     let mut socket = core.connect();
     write!(socket, "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", core.port, body.len()).unwrap();
@@ -837,7 +788,6 @@ fn app_call(core: &Core, body: &str) -> String {
     reply
 }
 
-/// A failed tool call's reply, as the agent saw it from Julia.
 fn tool_error(id: u32, kind: &str, message: &str) -> String {
     let text = serde_json::Value::from(format!(r#"{{"error":"{kind}","message":{}}}"#, serde_json::Value::from(message)));
     format!(r#"{{"id":{id},"jsonrpc":"2.0","result":{{"content":[{{"text":{text},"type":"text"}}],"isError":true}}}}"#)
@@ -878,7 +828,6 @@ fn the_app_looks_up_a_sessions_tool_results() {
     let look_up = |params: &str| app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":9,"method":"endeavor/tool_result","params":{params}}}"#));
     let found: serde_json::Value = serde_json::from_str(&look_up(r#"{"owner":"7","call_id":"toolu_01","tool":"keep_notebook_alive","arguments":{}}"#)).unwrap();
     assert_eq!(found["result"], serde_json::json!({ "content": said["result"]["content"], "isError": true }), "by the id Claude Code sends");
-    // An agent whose call ids the runtime never saw: by tool and arguments, oldest first, each once.
     let by_arguments = r#"{"owner":"7","call_id":"cursor-1","tool":"keep_notebook_alive","arguments":{"notebook_id":"aaaaaaaa-0000-0000-0000-000000000000","keep":true}}"#;
     let found: serde_json::Value = serde_json::from_str(&look_up(by_arguments)).unwrap();
     assert_eq!(found["result"]["isError"], true);
@@ -886,7 +835,6 @@ fn the_app_looks_up_a_sessions_tool_results() {
     assert_eq!(look_up(r#"{"owner":"8","tool":"keep_notebook_alive","arguments":{}}"#), r#"{"id":9,"jsonrpc":"2.0","result":null}"#);
 }
 
-/// Follow the app's `/endeavor/events` stream until `done` holds for an event; that event.
 fn event_where(reader: &mut impl BufRead, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
     loop {
         let event = read_until(reader, "\n\n");
@@ -911,10 +859,8 @@ fn in_ask_to_run_a_run_waits_for_the_users_answer() {
     };
     let policy = |policy: &str, asks: bool| app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{{"owner":"7","policy":"{policy}","asks":{asks}}}}}"#));
 
-    // An app from before runtime asks never turns them on: the run goes ahead.
     policy("ask", false);
     assert_eq!(text(&mcp(&core, &shell(1), &caller).1)["stdout"], "ran\n");
-    // On, with no app following to ask: it fails at once.
     policy("ask", true);
     assert_eq!(text(&mcp(&core, &shell(2), &caller).1)["error"], "no_app");
     let open = |run: bool| format!(r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"open_notebook","arguments":{{"path":"/nope.jl","run_notebook":{run}}}}}}}"#);
@@ -927,7 +873,6 @@ fn in_ask_to_run_a_run_waits_for_the_users_answer() {
     event_where(&mut reader, |_| true);
     let answer = |id: &serde_json::Value, allow: bool| app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":2,"method":"endeavor/answer_run","params":{{"id":{id},"allow":{allow},"user_ran":[]}}}}"#));
     std::thread::scope(|scope| {
-        // Allowed: it runs once the user says so.
         let call = scope.spawn(|| mcp(&core, &shell(3), &caller).1);
         let ask = event_where(&mut reader, |e| e["asks"].as_array().is_some_and(|a| !a.is_empty()))["asks"][0].clone();
         assert_eq!((&ask["owner"], &ask["call_id"], &ask["tool"], &ask["arguments"]), (&"7".into(), &"toolu_3".into(), &"run_shell".into(), &serde_json::json!({ "command": "echo ran" })));
@@ -937,20 +882,17 @@ fn in_ask_to_run_a_run_waits_for_the_users_answer() {
         event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
         assert!(answer(&ask["id"], true).contains("no_ask"), "answered once");
 
-        // Denied: it doesn't run, and the agent hears why.
         let call = scope.spawn(|| mcp(&core, &shell(4), &caller).1);
         let ask = event_where(&mut reader, |e| e["asks"].as_array().is_some_and(|a| !a.is_empty()))["asks"][0].clone();
         answer(&ask["id"], false);
         assert_eq!(text(&call.join().unwrap()), serde_json::json!({ "error": "not_approved", "message": "The user chose not to run this." }));
 
-        // Cancelled by the agent: the ask goes.
         let call = scope.spawn(|| mcp(&core, &shell(5), &caller).1);
         event_where(&mut reader, |e| e["asks"].as_array().is_some_and(|a| !a.is_empty()));
         assert_eq!(mcp(&core, r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5}}"#, &caller).0, "HTTP/1.1 202 Accepted");
         assert_eq!(text(&call.join().unwrap())["error"], "cancelled");
         event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
 
-        // The agent hangs up: the ask goes.
         let mut socket = core.connect();
         let message = shell(6);
         write!(socket, "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nX-Endeavor-Session: 7\r\nX-Endeavor-Host: gpu-box\r\nContent-Length: {}\r\n\r\n{message}", message.len()).unwrap();
@@ -959,7 +901,6 @@ fn in_ask_to_run_a_run_waits_for_the_users_answer() {
         event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
     });
 
-    // Auto runs without asking; so does a call that runs nothing.
     policy("auto", true);
     assert_eq!(text(&mcp(&core, &shell(7), &caller).1)["stdout"], "ran\n");
 }
@@ -976,7 +917,6 @@ fn run_shells_command_starts_with_the_signal_mask_the_core_started_with() {
     let shell = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_shell","arguments":{"command":"cat /proc/self/status"}}}"#;
     let reply: serde_json::Value = serde_json::from_str(&mcp(&core, shell, &caller).1).unwrap();
     let text: serde_json::Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    // The core blocks SIGINT, SIGTERM and SIGHUP for its own thread; a command it starts doesn't (#165).
     let core_status = std::fs::read_to_string(format!("/proc/{}/status", core.process.id())).unwrap();
     assert_ne!(blocked(&core_status), blocked(&std::fs::read_to_string("/proc/thread-self/status").unwrap()), "the core's mask is its own");
     assert_eq!(blocked(text["stdout"].as_str().unwrap()), blocked(&std::fs::read_to_string("/proc/thread-self/status").unwrap()), "{text}");
@@ -1006,7 +946,6 @@ fn a_held_call_answers_as_an_event_stream_at_once() {
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
 
-    // A call that asked for progress: the stream begins while it waits, with a progress notification.
     post(&mut socket, &shell(1, r#""progressToken":"p1""#));
     let head = read_until(&mut reader, "\r\n\r\n");
     assert!(head.starts_with("HTTP/1.1 200 OK\r\n") && head.contains("Content-Type: text/event-stream\r\n") && head.contains("Transfer-Encoding: chunked\r\n"), "{head}");
@@ -1017,7 +956,6 @@ fn a_held_call_answers_as_an_event_stream_at_once() {
         "{waiting:?}"
     );
     app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":2,"method":"endeavor/answer_run","params":{{"id":{},"allow":true,"user_ran":[]}}}}"#, ask["id"]));
-    // The reply is the stream's last event, and the chunked body ends after it.
     let rest = read_until(&mut reader, "0\r\n\r\n");
     let reply = rest.split("data: ").nth(1).unwrap().split("\n\n").next().unwrap();
     let reply: serde_json::Value = serde_json::from_str(reply).unwrap();
@@ -1026,7 +964,6 @@ fn a_held_call_answers_as_an_event_stream_at_once() {
     assert!(rest.contains("event: message\n") && rest.ends_with("\r\n0\r\n\r\n"), "{rest:?}");
     event_where(&mut events_reader, |e| e["asks"] == serde_json::json!([]));
 
-    // The same connection carries the next call; without a progress token it waits with an SSE comment.
     post(&mut socket, &shell(2, ""));
     read_until(&mut reader, "\r\n\r\n");
     assert!(read_until(&mut reader, "\n\n").ends_with(": waiting for the user's answer\n\n"));
@@ -1034,7 +971,6 @@ fn a_held_call_answers_as_an_event_stream_at_once() {
     app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":3,"method":"endeavor/answer_run","params":{{"id":{},"allow":false,"user_ran":[]}}}}"#, ask["id"]));
     assert!(read_until(&mut reader, "0\r\n\r\n").contains(r#"\"error\":\"not_approved\""#));
 
-    // A call that isn't held still gets plain JSON.
     let read = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_folder","arguments":{"path":"/"}}}"#;
     post(&mut socket, read);
     let (status, headers, _) = response(&mut reader);
@@ -1051,7 +987,6 @@ fn a_yes_on_the_apps_card_approves_only_the_packages_the_card_named() {
     bridge.set_notebooks(vec![serde_json::json!({
         "notebook_id": NB, "path": "/n/a.jl", "cell_order": [], "execution_allowed": true, "safe_preview": false, "pending_run": [], "cells": [],
     })]);
-    // The app's agent: its yes is the card's.
     let caller = [("X-Endeavor-Session", "7"), ("X-Endeavor-Client", "app")];
     app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{"owner":"7","policy":"auto","asks":true}}"#);
     let mut events = core.connect();
@@ -1063,7 +998,6 @@ fn a_yes_on_the_apps_card_approves_only_the_packages_the_card_named() {
     };
     let call = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "approve_install", "arguments": { "notebook_id": NB, "packages": ["CSV", "JSON"] } } }).to_string();
     std::thread::scope(|scope| {
-        // The card named CSV only: JSON, which the agent names too, came after it, and the yes doesn't cover it (#418).
         let waits = scope.spawn(|| mcp(&core, &call, &caller).1);
         let ask = event_where(&mut reader, |e| e["asks"].as_array().is_some_and(|a| !a.is_empty()))["asks"][0].clone();
         assert_eq!(ask["tool"], "approve_install");
@@ -1110,10 +1044,8 @@ fn in_manual_an_edit_waits_for_the_users_answer() {
     let waiting = |e: &serde_json::Value| e["asks"].as_array().is_some_and(|a| !a.is_empty());
 
     policy("ask", true);
-    // Reads never wait.
     assert_eq!(text(&mcp(&core, &tool(1, "read_cell", serde_json::json!({ "notebook_id": NB, "cell_id": CELL })), &caller).1)["code"], "x = 1");
     std::thread::scope(|scope| {
-        // Denied: nothing reaches the notebook, and the agent hears why.
         let call = scope.spawn(|| mcp(&core, &edit(2), &caller).1);
         let ask = event_where(&mut reader, waiting)["asks"][0].clone();
         assert_eq!((&ask["tool"], &ask["arguments"]["code"]), (&"edit_cell".into(), &"x = 2".into()));
@@ -1123,7 +1055,6 @@ fn in_manual_an_edit_waits_for_the_users_answer() {
         assert_eq!(applied(), 0, "the notebook is unchanged");
         event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
 
-        // An edit that was to run after isn't made either.
         let run_after = tool(3, "edit_cell", serde_json::json!({ "notebook_id": NB, "cell_id": CELL, "code": "x = 2", "run_after": true }));
         let (on, from) = (&core, &caller);
         let call = scope.spawn(move || mcp(on, &run_after, from).1);
@@ -1133,7 +1064,6 @@ fn in_manual_an_edit_waits_for_the_users_answer() {
         assert_eq!(applied(), 0, "the notebook is unchanged");
         event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
 
-        // Allowed: the edit goes ahead only once the user says so.
         let call = scope.spawn(|| mcp(&core, &edit(4), &caller).1);
         let ask = event_where(&mut reader, waiting)["asks"][0].clone();
         assert_eq!(applied(), 0, "not before the answer");
@@ -1142,7 +1072,6 @@ fn in_manual_an_edit_waits_for_the_users_answer() {
         assert_eq!(applied(), 1, "made once allowed");
         event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
 
-        // Runs allowed for the session (policy "auto"): Manual still asks before an edit.
         policy("auto", true);
         let call = scope.spawn(|| mcp(&core, &edit(5), &caller).1);
         let ask = event_where(&mut reader, waiting)["asks"][0].clone();
@@ -1152,14 +1081,12 @@ fn in_manual_an_edit_waits_for_the_users_answer() {
         event_where(&mut reader, |e| e["asks"] == serde_json::json!([]));
     });
 
-    // Ask to run holds runs, not edits; neither does an app that doesn't say `edits`.
     policy("ask", false);
     mcp(&core, &edit(6), &caller);
     assert_eq!(applied(), 3, "made without asking");
     app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{"owner":"7","policy":"ask","asks":true}}"#);
     mcp(&core, &edit(7), &caller);
     assert_eq!(applied(), 4, "made without asking");
-    // Plan refuses edits rather than holding them.
     policy("plan", true);
     assert_eq!(text(&mcp(&core, &edit(8), &caller).1)["error"], "plan_mode");
 }
@@ -1170,8 +1097,6 @@ fn an_agent_in_the_app_gets_r_notebooks() {
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
     let call = |id: u32, name: &str, path: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"path":"{path}"}}}}}}"#);
-    // The app's pane shows Ember's page, so its agents' R notebooks aren't refused (on Windows they
-    // still are, as everywhere there).
     let seven = [("X-Endeavor-Session", "7")];
     for (id, name, path) in [(1, "new_notebook", "/nope/growth.R"), (2, "open_notebook", "/nope/growth.r")] {
         let said = mcp(&core, &call(id, name, path), &seven).1;
@@ -1182,7 +1107,6 @@ fn an_agent_in_the_app_gets_r_notebooks() {
 
 #[test]
 fn python_notebooks_are_refused_to_the_apps_sessions_and_not_to_the_plugins_on_one_runtime() {
-    // The app has no pane for marimo's page yet; the plugin's sessions may share the app's runtime (#358).
     let dir = state_dir("core-python-callers");
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
@@ -1199,9 +1123,7 @@ fn python_notebooks_are_refused_to_the_apps_sessions_and_not_to_the_plugins_on_o
         let theirs = text(&mcp(&core, &call(id + 10, tool, "/w/fit.py"), &plugin).1);
         assert!(!theirs.contains("not yet in the Endeavor app"), "the plugin's {tool} isn't refused for the app's sake: {theirs}");
     }
-    // A Julia notebook is the app's as before.
     assert!(!text(&mcp(&core, &call(3, "open_notebook", "/w/fit.jl"), &app).1).contains("not yet in the Endeavor app"));
-    // The app's own New notebook, in a session of the Python kind, makes none either.
     app_call(&core, r#"{"jsonrpc":"2.0","id":4,"method":"endeavor/set_session_folder","params":{"owner":"7","folder":"/w","kind":"python"}}"#);
     let made = app_call(&core, r#"{"jsonrpc":"2.0","id":5,"method":"endeavor/new_notebook","params":{"owner":"7"}}"#);
     assert!(made.contains("unsupported") && made.contains("not yet in the Endeavor app"), "{made}");
@@ -1213,7 +1135,6 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     let bridge = FakeBridge::start(&dir);
     let core = Core::start(&dir, &bridge);
     let tool = |id: u32, name: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"notebook_id":"n1"}}}}}}"#);
-    // A call that passes the check of its arguments, which a refusal comes before.
     let valid = |id: u32, name: &str| {
         let arguments = match name {
             "edit_cell" => r#"{"notebook_id":"n1","cell_id":"c1","code":"x"}"#,
@@ -1221,7 +1142,6 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
         };
         format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#)
     };
-    // The core reads the notebooks' state after every tool call, to tell the app.
     let reads = || bridge.seen().iter().filter(|s| s.line.starts_with("POST /adapter")).count();
     let plan_edit = "Plan mode is read-only: `edit_cell` would change or run the notebook. Finish the plan; the user switches modes to carry it out.";
     let not_a_notebook = |id| tool_error(id, "invalid_notebook_id", "Invalid notebook ID: 'n1'\nSee `notebook_guide` for how to use these tools.");
@@ -1235,18 +1155,15 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     assert_eq!(mcp(&core, &tool(1, "edit_cell"), &seven).1, tool_error(1, "plan_mode", plan_edit));
     assert!(reads() > before, "the app hears the notebooks' state after it");
 
-    // Reads pass, and so do other sessions' writes and the app's own.
     assert_eq!(mcp(&core, &valid(2, "read_cell"), &seven).1, not_a_notebook(2));
     assert_eq!(mcp(&core, &valid(3, "edit_cell"), &[("X-Endeavor-Session", "8")]).1, not_a_notebook(3));
     assert_eq!(app_call(&core, &valid(4, "edit_cell")), not_a_notebook(4));
 
-    // Opening a notebook is refused in Plan mode only when it would run it.
     let open = |id: u32, run: bool| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"open_notebook","arguments":{{"path":"/nope.jl","run_notebook":{run}}}}}}}"#);
     let plan_open = "Plan mode is read-only: `open_notebook` would change or run the notebook. Finish the plan; the user switches modes to carry it out.";
     assert_eq!(mcp(&core, &open(20, true), &seven).1, tool_error(20, "plan_mode", plan_open));
     assert!(!mcp(&core, &open(21, false), &seven).1.contains("plan_mode"));
 
-    // Host tools: plan mode refuses run_shell too; without a server, none run.
     let on_server = [("X-Endeavor-Session", "7"), ("X-Endeavor-Host", "gpu-box")];
     let plan_shell = "Plan mode is read-only: `run_shell` would run a command on the server. Finish the plan; the user switches modes to carry it out.";
     assert_eq!(mcp(&core, &tool(5, "run_shell"), &on_server).1, tool_error(5, "plan_mode", plan_shell));
@@ -1254,7 +1171,6 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     assert_eq!(mcp(&core, &tool(6, "run_shell"), &seven).1, tool_error(6, "host_tools", &not_here("run_shell")), "the host check comes first");
     assert_eq!(app_call(&core, &tool(7, "list_folder")), tool_error(7, "host_tools", &not_here("list_folder")));
 
-    // Null arguments are none: the plan refusal comes first. Others that aren't an object are refused.
     let null_args = r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"edit_cell","arguments":null}}"#;
     assert_eq!(mcp(&core, null_args, &seven).1, tool_error(8, "plan_mode", plan_edit));
     let list_args = r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"edit_cell","arguments":[]}}"#;
@@ -1263,7 +1179,6 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     assert_eq!(app_call(&core, &set.replace("plan", "ask")), r#"{"id":5,"jsonrpc":"2.0","result":{}}"#);
     assert_eq!(mcp(&core, &valid(9, "edit_cell"), &seven).1, not_a_notebook(9));
 
-    // Every tool says whether it only reads, for Claude Code's own plan mode.
     let (_, body) = mcp(&core, r#"{"jsonrpc":"2.0","id":10,"method":"tools/list"}"#, &seven);
     let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     let hint = |name: &str| reply["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].clone();
@@ -1273,20 +1188,17 @@ fn plan_mode_refuses_a_sessions_writes_and_runs_and_host_tools_need_a_server() {
     assert!(!bridge.seen().iter().any(|s| s.line.starts_with("POST /dispatch")), "Julia answers only the adapter's calls");
 }
 
-/// A folder of its own for a test.
 fn temp_folder(name: &str) -> std::path::PathBuf {
     let dir = state_dir(name);
     dir.canonicalize().unwrap()
 }
 
-/// A session on a server, calling host tools.
 struct OnServer<'a> {
     core: &'a Core,
     next: u32,
 }
 
 impl OnServer<'_> {
-    /// A tool call's result (`Ok`) or error (`Err`), as the agent reads them.
     fn call(&mut self, owner: &str, name: &str, arguments: serde_json::Value) -> Result<serde_json::Value, serde_json::Value> {
         self.next += 1;
         let message = serde_json::json!({ "jsonrpc": "2.0", "id": self.next, "method": "tools/call", "params": { "name": name, "arguments": arguments } });
@@ -1321,7 +1233,6 @@ fn host_tools_are_listed_for_sessions_on_a_server_and_run_here() {
     assert_eq!(tools[36]["inputSchema"]["required"], serde_json::json!(["command"]));
     assert!(!mcp(&core, list, &[]).1.contains("list_folder"), "not on this Mac");
 
-    // Answered here, and the app hears the notebooks' state after each call.
     let mut server = OnServer { core: &core, next: 1 };
     let reads = || bridge.seen().iter().filter(|s| s.line.starts_with("POST /adapter")).count();
     let before = reads();
@@ -1334,8 +1245,6 @@ fn a_standalone_runtime_has_a_folder_a_fixed_port_and_host_tools_for_every_sessi
     let dir = state_dir("core-standalone");
     let bridge = FakeBridge::start(&dir);
     let folder = temp_folder("core-standalone-folder");
-    // A port found free can be taken before the core binds it, by a connection or a listener of another
-    // test: the core then exits at once, and another port is tried.
     let mut attempts = 0;
     let (core, port) = loop {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -1448,7 +1357,6 @@ fn the_status_tools_old_name_is_gone() {
     };
     let names: Vec<String> = ask("tools/list", serde_json::json!({}))["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
     assert!(names.contains(&"session_status".to_owned()) && !names.iter().any(|n| n.contains("pluto")), "{names:?}");
-    // `pluto_session_status` ran for one release after the rename (interface 2); not any more.
     let old = ask("tools/call", serde_json::json!({ "name": "pluto_session_status", "arguments": {} }));
     assert_eq!(old["isError"], true, "{old}");
     assert!(old["content"][0]["text"].as_str().unwrap().contains("unknown_tool"), "{old}");
@@ -1572,7 +1480,6 @@ fn run_shell_runs_in_the_login_shell_and_keeps_to_its_limits() {
     let env = server.run(serde_json::json!({ "command": "echo \"$JULIA_DEPOT_PATH|$ENDEAVOR_TOKEN|$ENDEAVOR_LAUNCHER$ENDEAVOR_BUILD\"" }));
     assert_eq!(env["stdout"], format!("/opt/depot:{}:||\n", home.join(".julia").display()), "Julia's environment, with the user's depot behind ours (#367), without the runtime's secrets");
 
-    // A session's own folder is where it runs by default.
     let set = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_session_folder","params":{{"owner":"8","folder":"{}"}}}}"#, folder.display());
     assert_eq!(app_call(&core, &set), r#"{"id":1,"jsonrpc":"2.0","result":{}}"#);
     assert_eq!(server.call("8", "run_shell", serde_json::json!({ "command": "pwd" })).unwrap()["stdout"], format!("{}\n", folder.display()));
@@ -1594,13 +1501,11 @@ fn run_shell_runs_in_the_login_shell_and_keeps_to_its_limits() {
     let killed = server.run(serde_json::json!({ "command": "kill -9 $$" }));
     assert_eq!((&killed["exit_code"], &killed["timed_out"]), (&serde_json::Value::Null, &serde_json::json!(false)));
 
-    // A timeout kills everything the command started, background jobs included.
     let started = std::time::Instant::now();
     let slow = server.run(serde_json::json!({ "command": "sleep 5 & sleep 5", "timeout_seconds": 1 }));
     assert_eq!((&slow["exit_code"], &slow["timed_out"]), (&serde_json::Value::Null, &serde_json::json!(true)));
     assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
 
-    // A background job that outlives the command holds its output open only so long.
     let started = std::time::Instant::now();
     let lingering = server.run(serde_json::json!({ "command": "echo done; sleep 30 &" }));
     assert_eq!((&lingering["exit_code"], &lingering["stdout"]), (&serde_json::json!(0), &serde_json::json!("done\n")));
@@ -1617,7 +1522,6 @@ fn a_command_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_res
     let policy = |policy: &str, asks: bool| app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{{"owner":"7","policy":"{policy}","asks":{asks}}}}}"#));
     let slow = serde_json::json!({ "command": "echo first; sleep 3; echo last" });
 
-    // The call returns what the command printed so far; the command goes on.
     policy("auto", true);
     let started = std::time::Instant::now();
     let first = server.call("7", "run_shell", slow.clone()).unwrap();
@@ -1625,14 +1529,10 @@ fn a_command_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_res
     assert_eq!((&first["still_running"], &first["stdout"], &first["cwd"]), (&serde_json::json!(true), &serde_json::json!("first\n"), &serde_json::json!(home)));
     assert!(first["message"].as_str().unwrap().contains("Make the same call again"), "{first}");
 
-    // A different command isn't the same call: it runs on its own.
     assert_eq!(server.call("7", "run_shell", serde_json::json!({ "command": "echo other" })).unwrap()["stdout"], "other\n");
-    // Nor is the same command from another session: it runs its own, and gets its own result.
     let other_started = std::time::Instant::now();
     assert_eq!(server.call("8", "run_shell", slow.clone()).unwrap()["still_running"], true);
 
-    // The same call again waits for it, without asking the user again (no app is following to ask),
-    // and gets its whole result.
     policy("ask", true);
     let mut result = server.call("7", "run_shell", slow.clone()).unwrap();
     while result["still_running"] == true {
@@ -1647,10 +1547,8 @@ fn a_command_that_outlasts_the_call_goes_on_and_the_same_call_again_gets_its_res
     assert_eq!(result["stdout"], "first\nlast\n");
     assert!(other_started.elapsed() >= Duration::from_secs(3), "its own run, not the first session's: {:?}", other_started.elapsed());
 
-    // Collected, it's gone: the same command again is a new run, and asks.
     assert_eq!(server.call("7", "run_shell", slow.clone()).unwrap_err()["error"], "no_app");
 
-    // A command still running at its timeout is killed then, as before.
     policy("auto", true);
     let timing_out = serde_json::json!({ "command": "echo a; sleep 30", "timeout_seconds": 2 });
     assert_eq!(server.call("7", "run_shell", timing_out.clone()).unwrap()["still_running"], true);
@@ -1674,7 +1572,6 @@ fn refuses_browsers_foreign_hosts_and_callers_without_the_token() {
     };
     let auth = format!("Authorization: Bearer {TOKEN}\r\n");
     let refused = |status: &str, error: &str| (format!("HTTP/1.1 {status}"), format!(r#"{{"error":"{error}"}}"#));
-    // The core reads notebooks from Julia on its own; those aren't passed-on requests.
     let passed_on = || bridge.seen().iter().filter(|s| !s.line.starts_with("POST /adapter") && !s.line.starts_with("GET /notifications")).count() + bridge.pluto_seen().len();
     let seen_before = passed_on();
     for route in ["POST /mcp", "POST /endeavor/call", "GET /endeavor/events", "POST /endeavor/dispatch", "GET /nope", "GET /edit?id=1"] {
@@ -1694,7 +1591,6 @@ fn refuses_browsers_foreign_hosts_and_callers_without_the_token() {
         assert_eq!(ask(&request).0, "HTTP/1.1 202 Accepted", "{host} is loopback");
     }
 
-    // A refused request leaves the connection for the next one.
     let mut socket = core.connect();
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     write!(socket, "POST /endeavor/call HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
@@ -1741,7 +1637,6 @@ fn a_browser_gets_in_with_its_link_and_then_reaches_only_plutos_page() {
     assert_eq!(ask(&format!("GET /edit?id=n1 HTTP/1.1\r\n{host}{origin}{cookie}\r\n")), refused("403 Forbidden", "browser_origin_refused"), "another runtime's page");
     assert_eq!(ask(&format!("GET /?token=nope HTTP/1.1\r\n{host}\r\n")), refused("401 Unauthorized", "unauthorized"));
     assert_eq!(ask(&format!("GET /?token={TOKEN} HTTP/1.1\r\n{host}\r\n")), refused("401 Unauthorized", "unauthorized"), "the bearer token doesn't let a browser in");
-    // A browser opening a page without the cookie, as from the link in a tool result, is told how to get in.
     for page in ["Sec-Fetch-Dest: document\r\n", "Accept: text/html,application/xhtml+xml\r\n"] {
         let (status, body) = ask(&format!("GET /edit?id=n1 HTTP/1.1\r\n{host}{page}\r\n"));
         assert!(status == "HTTP/1.1 401 Unauthorized" && body.contains("endeavor open") && !body.contains(TOKEN) && !body.contains(PAGES), "{page}: {status} {body}");
@@ -1810,14 +1705,12 @@ fn a_stop_signal_to_the_core_stops_julia() {
     unsafe { libc::kill(core.process.id() as i32, libc::SIGTERM) };
     assert_eq!(core.exits().signal(), Some(libc::SIGTERM));
     wait_for("Julia to exit", || !pid_alive(core.julia_pid));
-    // A ready Julia is asked through its bridge, not signalled: a SIGTERM mid-compile can hang it (#509).
     assert!(bridge.seen().iter().any(|s| String::from_utf8_lossy(&s.body).contains("endeavor/shutdown")), "it asked Julia to shut down");
     assert!(!dir.join("runtime.json").exists());
 }
 
 #[test]
 fn a_stop_signal_julia_goes_on_through_is_followed_by_a_shutdown_and_then_a_kill() {
-    // Julia with notebooks open didn't end on SIGTERM, so the core didn't either (#316).
     let dir = state_dir("core-stop-deaf");
     std::fs::write(dir.join("deaf"), "").unwrap();
     let bridge = FakeBridge::start(&dir);
@@ -1832,8 +1725,6 @@ fn a_stop_signal_julia_goes_on_through_is_followed_by_a_shutdown_and_then_a_kill
 
 #[test]
 fn a_julia_that_goes_on_through_the_signal_its_dead_core_left_it_is_killed_a_grace_later() {
-    // On Linux, Julia's SIGTERM from PR_SET_PDEATHSIG can leave it hung, with no core left to escalate (#509);
-    // on macOS nothing signals it at all.
     let dir = state_dir("core-died-deaf");
     std::fs::write(dir.join("deaf"), "").unwrap();
     let bridge = FakeBridge::start(&dir);
@@ -1853,7 +1744,6 @@ fn a_julia_that_ends_while_its_core_runs_leaves_no_watcher_behind() {
     let bridge = FakeBridge::start(&dir);
     let mut core = Core::start(&dir, &bridge);
     let julia = core.julia_pid.to_string();
-    // The shell that watches for the core's end, by its arguments (`sh -c <script> sh <pid> <grace>`).
     let watchers = || {
         let procs = std::fs::read_dir("/proc").unwrap().filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok());
         procs.filter(|&pid| {
@@ -1923,7 +1813,6 @@ fn a_core_started_when_needed_starts_julia_for_a_julia_notebook_and_not_before()
     assert_eq!(status["notebooks"], serde_json::json!([]), "{status}");
     assert!(julia_pids(&dir).is_empty(), "neither starts Julia");
 
-    // The runtime's own link, which an R user opens too, says Julia isn't running and starts nothing.
     let mut page = core.connect();
     write!(page, "GET / HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {PAGES}\r\n\r\n", core.port).unwrap();
     let mut said = String::new();
@@ -1932,7 +1821,6 @@ fn a_core_started_when_needed_starts_julia_for_a_julia_notebook_and_not_before()
     std::thread::sleep(Duration::from_millis(300));
     assert!(julia_pids(&dir).is_empty() && !dir.join("julia.json").exists(), "the link alone doesn't start Julia");
 
-    // Any other page of Pluto's starts Julia and is told it's starting; Julia then joins.
     let mut page = core.connect();
     write!(page, "GET /?start-julia HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {PAGES}\r\n\r\n", core.port).unwrap();
     let mut said = String::new();
@@ -1956,7 +1844,6 @@ fn a_core_started_when_needed_starts_julia_for_a_julia_notebook_and_not_before()
     let set = bridge.seen().into_iter().any(|s| String::from_utf8_lossy(&s.body).contains("endeavor/set_folder"));
     assert!(!set, "no folder to give a runtime of the app's that wasn't given one");
 
-    // From now on the core ends with Julia, as it always has.
     let julia = julia_pids(&dir)[0];
     // SAFETY: plain syscall.
     unsafe { libc::kill(julia, libc::SIGKILL) };
@@ -1976,7 +1863,6 @@ fn a_julia_notebook_waits_for_julia_and_the_folder_the_app_gave_reaches_it() {
     let path = folder.join("a.jl").display().to_string();
     std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
     let opened = tool_call(&core, "open_notebook", serde_json::json!({ "path": path }));
-    // The stand-in Pluto opens nothing it wasn't given, so its own answer shows the call reached it.
     assert_eq!(opened["message"], "not a notebook here", "the call waited for Julia: {opened}");
     assert_eq!(julia_pids(&dir).len(), 1);
     assert!(engine_calls(&bridge).iter().any(|(method, params)| method == "open" && params["path"] == path.as_str()), "{:?}", engine_calls(&bridge));
@@ -2034,12 +1920,10 @@ fn two_julia_notebooks_opened_at_once_start_one_julia() {
     assert_eq!(julia_pids(&dir).len(), 1, "one Julia for both");
 }
 
-/// A session's folder, as the app or a front gives it.
 fn give_folder(core: &Core, owner: &str, folder: &Path) {
     give_folder_of(core, owner, folder, None);
 }
 
-/// With the session's kind, when the caller knows it.
 fn give_folder_of(core: &Core, owner: &str, folder: &Path, kind: Option<&str>) {
     let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/set_session_folder", "params": { "owner": owner, "folder": folder.display().to_string(), "kind": kind } });
     app_call(core, &body.to_string());
@@ -2077,7 +1961,6 @@ fn a_folder_with_julia_notebooks_starts_julia_ahead_and_one_with_only_r_notebook
 #[test]
 fn a_julia_that_would_need_downloading_isnt_started_ahead() {
     let dir = state_dir("core-warm-download");
-    // No julia on the login shell's PATH and none of Endeavor's own: only a download would give one.
     let shell = dir.join("no-julia-shell");
     common::write_executable(&shell, "#!/bin/sh\nexit 1\n");
     let home = temp_folder("core-warm-download-home");
@@ -2091,11 +1974,9 @@ fn a_julia_that_would_need_downloading_isnt_started_ahead() {
     std::thread::sleep(Duration::from_millis(1000));
     assert!(julia_pids(&dir).is_empty(), "nothing started");
     assert!(std::fs::read_dir(&home).unwrap().next().is_none(), "nothing downloaded");
-    // The first call that needs Julia looks again and says what's missing, as without the warm-up.
     let opened = tool_call(&core, "open_notebook", serde_json::json!({ "path": path.display().to_string() }));
     assert_eq!(opened["error"], "julia_not_found", "{opened}");
 
-    // A cluster job's core is handed the Julia found on the login node (#80): the next call starts it.
     let bridge = FakeBridge::start(&dir);
     let julia = serving_julia(&dir, &bridge);
     let message = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "endeavor/use_julia", "params": { "path": julia.display().to_string() } });
@@ -2119,7 +2000,6 @@ fn a_session_said_to_be_julias_starts_julia_ahead_whatever_its_folder_has() {
     wait_for("Julia to start ahead", || julia_pids(&dir).len() == 1);
 }
 
-/// Where Julia is, as the app's `endeavor/julia_status` says.
 fn julia_status(core: &Core) -> serde_json::Value {
     let reply: serde_json::Value = serde_json::from_str(&app_call(core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/julia_status"}"#)).unwrap();
     reply["result"].clone()
@@ -2131,7 +2011,6 @@ fn a_call_made_while_embers_install_runs_waits_for_it_as_the_first_did() {
     let dir = state_dir("core-r-install-wait");
     let bridge = FakeBridge::start(&dir);
     let julia = serving_julia(&dir, &bridge);
-    // An R whose Ember install takes 5 s and then fails.
     let r = dir.join("slow-install-r");
     common::write_executable(&r, "#!/bin/sh\ncase \"$*\" in *install.R*) sleep 5; exit 1;; esac\nexit 1\n");
     let home = temp_folder("core-r-install-wait-home");
@@ -2143,11 +2022,9 @@ fn a_call_made_while_embers_install_runs_waits_for_it_as_the_first_did() {
     std::fs::write(&path, "### An Ember notebook ###\n").unwrap();
     give_folder(&core, "s1", &folder);
     let open = || tool_call(&core, "open_notebook", serde_json::json!({ "path": path.display().to_string() }));
-    // The call that starts the install waits its 2 s.
     let began = std::time::Instant::now();
     assert_eq!(open()["error"], "r_installing");
     assert!(began.elapsed() >= Duration::from_secs(2), "the first call waited");
-    // The next waits too, as the answer says, and has the install's end once it comes (#175).
     let began = std::time::Instant::now();
     let second = open();
     assert!(began.elapsed() >= Duration::from_millis(1500), "the second call waited too: {second}");
@@ -2161,7 +2038,6 @@ fn a_first_ember_install_that_ends_after_its_call_stopped_waiting_starts_r_then(
     let dir = state_dir("core-r-install-then-start");
     let bridge = FakeBridge::start(&dir);
     let julia = serving_julia(&dir, &bridge);
-    // An R whose Ember install takes 3 s and works, and whose adapter says when it was started.
     let (r, started) = (dir.join("installing-r"), dir.join("adapter-started"));
     let script = format!(
         "#!/bin/sh\ncase \"$*\" in\n*install.R*) sleep 3; folder=\"$3\"; mkdir -p \"$folder/b1/ember\"; printf 'Current: b1\\nPrevious: \\nFailed: \\n' > \"$folder/ember.dcf\"; exit 0;;\n*adapter.R*) echo started >> '{}'; sleep 30; exit 0;;\nesac\nexit 1\n",
@@ -2179,8 +2055,6 @@ fn a_first_ember_install_that_ends_after_its_call_stopped_waiting_starts_r_then(
     let opened = tool_call(&core, "open_notebook", serde_json::json!({ "path": path.display().to_string() }));
     assert_eq!(opened["error"], "r_installing", "{opened}");
     assert!(!started.exists(), "R isn't started before Ember is installed");
-    // No call comes again, and still R starts once the install has ended, so the next call needn't
-    // wait for it and the app's pane never reads `not_started` in between (#148).
     wait_for("R to start after its install", || started.exists());
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(std::fs::read_to_string(&started).unwrap().lines().count(), 1, "started once");
@@ -2192,7 +2066,6 @@ fn a_failed_ember_install_is_said_to_every_call_for_a_while_before_one_tries_aga
     let dir = state_dir("core-r-install-failed");
     let bridge = FakeBridge::start(&dir);
     let julia = serving_julia(&dir, &bridge);
-    // An R whose Ember install fails at once, and counts its tries.
     let (r, tries) = (dir.join("failing-install-r"), dir.join("install-tries"));
     common::write_executable(&r, &format!("#!/bin/sh\ncase \"$*\" in *install.R*) echo try >> '{}'; exit 1;; esac\nexit 1\n", tries.display()));
     let home = temp_folder("core-r-install-failed-home");
@@ -2211,18 +2084,15 @@ fn a_failed_ember_install_is_said_to_every_call_for_a_while_before_one_tries_aga
         serde_json::from_str::<serde_json::Value>(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
     };
     let tries_so_far = || std::fs::read_to_string(&tries).unwrap_or_default().lines().count();
-    // Every call is told the failure, from either agent, and none installs again (#183).
     let first = open("s1");
     assert_eq!(first["error"], "r_failed", "{first}");
     assert!(!first.to_string().contains("didn't try again"), "{first}");
     for agent in ["s1", "s2", "s1", "s2"] {
         let kept = open(agent);
         assert_eq!(kept["error"], "r_failed", "the same failure: {kept}");
-        // And says it was not tried again, so an agent doesn't report the old cause as current.
         assert!(kept.to_string().contains("this call didn't try again; a call made"), "{kept}");
     }
     assert_eq!(tries_so_far(), 1, "one install for all of them");
-    // Once its time is up, the next call tries again.
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(open("s2")["error"], "r_failed");
     assert_eq!(tries_so_far(), 2, "tried again");
@@ -2234,7 +2104,6 @@ fn calls_made_together_while_embers_install_runs_each_wait_no_longer_than_one_ca
     let dir = state_dir("core-r-install-together");
     let bridge = FakeBridge::start(&dir);
     let julia = serving_julia(&dir, &bridge);
-    // An R whose Ember install takes longer than all the calls below.
     let r = dir.join("slow-install-r");
     common::write_executable(&r, "#!/bin/sh\ncase \"$*\" in *install.R*) sleep 30; exit 1;; esac\nexit 1\n");
     let home = temp_folder("core-r-install-together-home");
@@ -2247,9 +2116,6 @@ fn calls_made_together_while_embers_install_runs_each_wait_no_longer_than_one_ca
     for agent in ["s1", "s2", "s3"] {
         give_folder(&core, agent, &folder);
     }
-    // Starts go one at a time, so a call that queues behind the others counts its wait from when it
-    // came, not from its turn: each answers within one wait of 4 s, where waiting a whole one after
-    // the calls before it would take 8, 12 s (#175).
     let answered: Vec<(Duration, serde_json::Value)> = std::thread::scope(|scope| {
         let calls: Vec<_> = ["s1", "s2", "s3"]
             .map(|agent| {
@@ -2295,7 +2161,6 @@ fn the_app_reads_where_julia_is_without_starting_it_and_a_start_that_stalls_fail
     std::thread::sleep(Duration::from_millis(300));
     assert!(julia_pids(&dir).is_empty(), "asking doesn't start Julia");
 
-    // A page of Pluto's starts Julia. Held, the stand-in says nothing more, as a hung start would.
     let start = || {
         let mut page = core.connect();
         write!(page, "GET /?start-julia HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nAccept: text/html\r\nAuthorization: Bearer {PAGES}\r\n\r\n", core.port).unwrap();
@@ -2317,7 +2182,6 @@ fn the_app_reads_where_julia_is_without_starting_it_and_a_start_that_stalls_fail
     // SAFETY: plain syscall; the core reaps its Julia, so a gone pid is not a zombie.
     wait_for("the stalled Julia to end", || unsafe { libc::kill(stalled, 0) } != 0);
 
-    // The app reading the failure doesn't use it up: the agent's next call still hears why, and starts nothing.
     let folder = temp_folder("core-julia-status-notebooks");
     let path = folder.join("a.jl").display().to_string();
     std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
@@ -2325,13 +2189,11 @@ fn the_app_reads_where_julia_is_without_starting_it_and_a_start_that_stalls_fail
     assert!(opened["error"] == "julia_failed" && opened["message"].as_str().unwrap().contains("no progress"), "{opened}");
     assert_eq!(julia_pids(&dir).len(), 1, "no second Julia yet");
 
-    // The app's Retry starts Julia afresh at once, and this time it gets ready.
     std::fs::remove_file(dir.join("hold")).unwrap();
     let retried: serde_json::Value = serde_json::from_str(&app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/start_julia"}"#)).unwrap();
     assert_eq!(retried["result"]["state"], "starting", "{retried}");
     wait_for("Julia to be ready", || julia_status(&core)["state"] == "ready");
     assert_eq!(julia_pids(&dir).len(), 2, "a second Julia");
-    // It says which Julia it started, so the app needn't work that out itself.
     let ready = julia_status(&core);
     assert_eq!((ready["julia"]["path"].as_str(), ready["julia"]["endeavors"].as_bool()), (Some(julia.to_str().unwrap()), Some(false)), "{ready}");
     assert!(ready["julia"]["version"].as_str().is_some_and(|v| !v.is_empty()), "{ready}");
@@ -2345,7 +2207,6 @@ fn an_allowed_notebook_call_made_again_while_julia_starts_isnt_asked_again() {
     std::fs::write(dir.join("hold"), "").unwrap();
     let julia = serving_julia(&dir, &bridge);
     let args = [std::ffi::OsStr::new("--julia"), julia.as_os_str(), std::ffi::OsStr::new("--julia-when-needed")];
-    // Long enough for a Stop to come while a call waits for Julia.
     let core = Core::try_start_with(&dir, &[("ENDEAVOR_TEST_JULIA_WAIT_SECS", "3")], &args).unwrap();
     let folder = temp_folder("core-julia-asks-notebooks");
     let path = folder.join("a.jl").display().to_string();
@@ -2353,7 +2214,6 @@ fn an_allowed_notebook_call_made_again_while_julia_starts_isnt_asked_again() {
     let policy = |owner: &str, policy: &str, edits: bool| {
         app_call(&core, &format!(r#"{{"jsonrpc":"2.0","id":1,"method":"endeavor/set_policy","params":{{"owner":"{owner}","policy":"{policy}","asks":true,"edits":{edits}}}}}"#));
     };
-    // Manual.
     policy("7", "ask", true);
     policy("8", "ask", true);
     let call = |owner: &str, name: &str, arguments: serde_json::Value| {
@@ -2363,7 +2223,6 @@ fn an_allowed_notebook_call_made_again_while_julia_starts_isnt_asked_again() {
     };
     let create = |owner: &str| call(owner, "new_notebook", serde_json::json!({ "path": path }));
 
-    // The app answers every card with Allow, and counts them.
     let mut events = core.connect();
     events.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
     let mut reader = BufReader::new(events.try_clone().unwrap());
@@ -2373,7 +2232,6 @@ fn an_allowed_notebook_call_made_again_while_julia_starts_isnt_asked_again() {
     std::thread::scope(|scope| {
         scope.spawn(|| {
             let mut line = String::new();
-            // Until the app goes.
             while reader.read_line(&mut line).unwrap_or(0) > 0 {
                 let Some(data) = line.strip_prefix("data: ") else {
                     line.clear();
@@ -2393,23 +2251,17 @@ fn an_allowed_notebook_call_made_again_while_julia_starts_isnt_asked_again() {
         });
         let asked = || cards.lock().unwrap().iter().map(|(_, what)| what.clone()).collect::<Vec<_>>();
 
-        // Julia is downloading: the allowed creation is told Julia is starting, and the agent makes it
-        // again, as agents do, until Julia is ready. The user said yes once.
         for _ in 0..4 {
             let created = create("7");
             assert_eq!(created["error"], "julia_starting", "{created}");
         }
         assert_eq!(asked(), ["7 new_notebook"], "one card for the four calls");
 
-        // The yes was this session's, for this call: another session's same call asks, and so does
-        // this one's once it has moved on to something else.
         assert_eq!(create("8")["error"], "julia_starting");
         assert_eq!(call("7", "new_notebook", serde_json::json!({ "path": other }))["error"], "julia_starting");
         assert_eq!(create("7")["error"], "julia_starting");
         assert_eq!(asked(), ["7 new_notebook", "8 new_notebook", "7 new_notebook", "7 new_notebook"]);
 
-        // A yes is the user's, on a card, in the mode it was asked in. A creation that ran in Auto
-        // without one asks once the user switches to Manual; an allowed one asks after any switch.
         policy("7", "auto", false);
         assert_eq!(create("7")["error"], "julia_starting");
         assert_eq!(asked().len(), 4, "Auto doesn't ask");
@@ -2420,7 +2272,6 @@ fn an_allowed_notebook_call_made_again_while_julia_starts_isnt_asked_again() {
         assert_eq!(create("7")["error"], "julia_starting");
         assert_eq!(asked().len(), 6, "the mode was set again");
 
-        // The user's Stop while the allowed call waits for Julia: the same call again asks.
         policy("7", "ask", true);
         let waiting = scope.spawn(|| create("7"));
         wait_for("the card to be answered", || asked().len() == 7);
@@ -2432,7 +2283,6 @@ fn an_allowed_notebook_call_made_again_while_julia_starts_isnt_asked_again() {
         assert_eq!(create("7")["error"], "julia_starting");
         assert_eq!(asked().len(), 8, "stopped, the yes went with the call");
 
-        // Once Julia is ready the call goes through, and it was the last one the yes covered.
         std::fs::remove_file(dir.join("hold")).unwrap();
         wait_for("Julia to be ready", || julia_status(&core)["state"] == "ready");
         let created = create("7");

@@ -1,14 +1,4 @@
-//! `scripts/install.ps1` under Windows PowerShell 5.1 (`powershell.exe`), against a release served
-//! over http on 127.0.0.1 whose files are behind redirects, as GitHub's are. Under 5.1 the script
-//! follows each redirect by hand (#98), so this checks that it still gets there, checks the
-//! checksum, and reports a missing file plainly. The refusal of a redirect from https to http needs
-//! a TLS server and isn't covered here.
-//!
-//! The script adds its folder to the user's PATH in the registry, so this runs only in CI
-//! (`CI` set), on a runner that is thrown away after.
-
 #![cfg(windows)]
-// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
 #![allow(clippy::disallowed_methods)]
 
 use std::collections::HashMap;
@@ -26,8 +16,6 @@ fn sha(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Serves `files` under `/real/`. `/rel/LATEST` redirects there with a relative address, any
-/// other `/rel/NAME` with an absolute one; anything else is a 404.
 fn serve(files: HashMap<String, Vec<u8>>) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -83,8 +71,6 @@ fn install(release: &str, dir: &Path, pin: Option<&str>) -> (bool, String) {
     (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
 }
 
-/// Whether `said` holds `text`. Windows PowerShell wraps an error's message at the console's width,
-/// so both are compared with their whitespace taken out.
 fn says(said: &str, text: &str) -> bool {
     let bare = |s: &str| s.split_whitespace().collect::<String>();
     bare(said).contains(&bare(text))
@@ -102,7 +88,6 @@ fn windows_powershell_follows_the_releases_redirects_by_hand_and_checks_the_down
     files.insert("LATEST".to_owned(), format!("{KEY}\n").into_bytes());
     files.insert(format!("endeavor-{KEY}.sha256"), format!("{}  {name}\n", sha(&exe)).into_bytes());
     files.insert(name.clone(), exe.clone());
-    // Main's pins: one naming an older build the release still holds, and one whose checksum isn't the release's binary's.
     let pinned = "00000000aaaa";
     let pinned_exe = b"the pinned build".to_vec();
     files.insert(format!("endeavor-{pinned}-windows-x86_64.exe"), pinned_exe.clone());
@@ -117,28 +102,23 @@ fn windows_powershell_follows_the_releases_redirects_by_hand_and_checks_the_down
     assert!(says(&said, &format!("Installed endeavor (build {KEY}, windows-x86_64)")), "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), exe);
 
-    // A release that answers 404 says which file it couldn't get, and installs nothing over the binary there.
     let (ok, said) = install(&format!("http://127.0.0.1:{port}/missing"), &dir, None);
     assert!(!ok && says(&said, &format!("Couldn't download http://127.0.0.1:{port}/missing/LATEST")) && says(&said, "404"), "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), exe);
 
-    // Main pins a build: that one is installed, checked against main's checksum.
     let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, Some(&format!("http://127.0.0.1:{port}/rel/pin-older")));
     assert!(ok, "{said}");
     assert!(says(&said, &format!("Installed endeavor (build {pinned}, windows-x86_64)")), "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), pinned_exe);
 
-    // The release's binary and checksum file agree, but main pins another checksum: refused.
     let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, Some(&format!("http://127.0.0.1:{port}/rel/pin-other-sum")));
     assert!(!ok && says(&said, "doesn't match the checksum main pins"), "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), pinned_exe);
 
-    // Main can't be read: nothing is installed, and the message says how to skip the pin.
     let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, Some(&format!("http://127.0.0.1:{port}/no-such-pin")));
     assert!(!ok && says(&said, "Couldn't read the build main pins") && says(&said, "ENDEAVOR_PIN_URL = 'none'"), "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), pinned_exe);
 
-    // With the pin skipped: LATEST, checked against the release's checksum file.
     let (ok, said) = install(&format!("http://127.0.0.1:{port}/rel"), &dir, Some("none"));
     assert!(ok, "{said}");
     assert_eq!(std::fs::read(dir.join("endeavor.exe")).unwrap(), exe);

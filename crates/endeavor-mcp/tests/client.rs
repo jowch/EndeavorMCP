@@ -1,8 +1,3 @@
-//! The client library against the helper binary, with a local `sh` standing in
-//! for ssh (`Transport::Shell`), and a `sleep` process with a small server on
-//! its port standing in for the runtime, so no ssh and no Julia are needed:
-//! installing the helper, reusing it, attaching, and each way a connection ends.
-
 #![cfg(unix)]
 
 #[path = "common/exec.rs"]
@@ -26,7 +21,6 @@ fn helper_binary(_os: &str, _arch: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(env!("CARGO_BIN_EXE_endeavor")))
 }
 
-/// A fresh folder under target/tmp with `root`, `state` and `home` in it.
 struct Place {
     root: PathBuf,
     state: PathBuf,
@@ -56,17 +50,13 @@ impl Place {
     }
 }
 
-/// Held by each test that calls `client::test`: those share one listener, as the app's tests run one at a time,
-/// so two at once reach each other's runtime through it.
 static ONE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The helpers running with `state` as their state folder: the one kind of process that has it in its arguments.
 fn helper_pids(state: &Path) -> Vec<i32> {
     let found = Command::new("pgrep").arg("-f").arg("--").arg(state.display().to_string()).output().unwrap();
     String::from_utf8_lossy(&found.stdout).split_whitespace().filter_map(|p| p.parse().ok()).collect()
 }
 
-/// Wait for every helper of `state` to be gone.
 fn no_helper_left(state: &Path) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !helper_pids(state).is_empty() {
@@ -89,11 +79,8 @@ fn hostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
-/// A process whose command looks like a runtime's core, for the probe that looks at what a recorded pid is.
 fn core_child() -> std::process::Child {
     let child = Command::new("sleep").arg("600").arg0("endeavor core --state-dir fake").process_group(0).spawn().unwrap();
-    // Just after the spawn the kernel may not have set the new command line yet, and `ps` then shows
-    // `[sleep]`: wait until it shows the core's.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !String::from_utf8_lossy(&Command::new("ps").args(["-p", &child.id().to_string(), "-o", "args="]).output().unwrap().stdout).contains("--state-dir") {
         assert!(std::time::Instant::now() < deadline, "the fake core never showed its command line");
@@ -102,7 +89,6 @@ fn core_child() -> std::process::Child {
     child
 }
 
-/// `core_child`, ended when it is dropped, whatever a test did before.
 struct CoreLike(std::process::Child);
 
 fn core_like() -> CoreLike {
@@ -116,8 +102,6 @@ impl Drop for CoreLike {
     }
 }
 
-/// A `PATH` for a login shell on the server that holds only the tools the bootstrap script uses, and
-/// a `squeue` that lists the jobs given (none at all for `None`), so that the real scheduler isn't asked.
 fn server_path(place: &Place, listed: Option<&str>) -> String {
     let bin = place.home.join(if listed.is_some() { "bin-squeue" } else { "bin" });
     std::fs::create_dir_all(&bin).unwrap();
@@ -136,7 +120,6 @@ fn looking(place: &Place, listed: Option<&str>) -> Transport {
     Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string()), ("PATH".into(), server_path(place, listed))], ask: None }
 }
 
-/// A runtime as the helper sees one: a live pid on this node, and a bridge that answers `ping`.
 struct FakeRuntime {
     process: Arc<Mutex<std::process::Child>>,
 }
@@ -189,7 +172,6 @@ impl Drop for FakeRuntime {
     }
 }
 
-/// The bridge's `ping` through a local port.
 fn ping(port: u16, token: &str) -> String {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
@@ -214,7 +196,6 @@ fn the_helper_is_installed_then_reused_and_attaches() {
     let installed = place.installed();
     assert!(installed.join("endeavor").is_file() && installed.join("runtime/boot.jl").is_file());
 
-    // Its files before any runtime: a folder under the (fake) home.
     std::fs::create_dir_all(place.home.join("decay-fits")).unwrap();
     std::fs::write(place.home.join("decay-fits/fit.jl"), "### A Pluto.jl notebook ###\n").unwrap();
     let listed = channel.files(files::Request::List { path: "~".into() }).expect("list");
@@ -223,7 +204,6 @@ fn the_helper_is_installed_then_reused_and_attaches() {
     assert!(matches!(&found, files::Reply::Notebooks { found } if found.len() == 1), "{found:?}");
     assert!(channel.files(files::Request::Preview { path: "~/nope.jl".into() }).is_err());
 
-    // Started on request, reachable through a listener.
     let listener = Listener::start("test").unwrap();
     let runtime = start(&channel, &listener, &StartOptions { install: true, ..StartOptions::default() }, &on, |_| {}).expect("start");
     assert!(runtime.reattached);
@@ -245,7 +225,6 @@ fn the_helper_is_installed_then_reused_and_attaches() {
     start(&channel, &listener, &StartOptions { install: true, ..StartOptions::default() }, &on, |_| {}).expect("start again");
     channel.stop().expect("stop");
     assert!(!fake.alive(), "Stop reaches the runtime's bridge");
-    // The helper stays connected after a stop.
     assert!(channel.files(files::Request::List { path: "~".into() }).is_ok());
     channel.detach();
 }
@@ -325,7 +304,6 @@ fn a_helper_that_cannot_be_read_is_named() {
 #[test]
 fn cancelling_ends_a_connect_that_waits_on_ssh() {
     let place = Place::new("cancel");
-    // A sign-in that never finishes.
     let transport = Transport::Shell { env: Vec::new(), ask: Some("sleep 30".into()) };
     let cancel = Arc::new(Cancel::default());
     let (done_tx, done) = mpsc::channel();
@@ -366,7 +344,6 @@ fn a_connect_that_fails_after_the_helper_started_leaves_no_helper_behind() {
     let frames = place.root.with_file_name("frames");
     std::fs::create_dir_all(frames.parent().unwrap()).unwrap();
     std::fs::write(&frames, wire::ToApp::Error { message: "no hello for you".into() }.frame().encode()).unwrap();
-    // Says an error instead of hello, then stays until the client sends it anything (a detach).
     let script = place.root.with_file_name("fake-helper");
     std::fs::write(&script, format!("#!/bin/sh\ncat '{}'\nhead -c 1 >/dev/null\n", frames.display())).unwrap();
     let fake = |_: &str, _: &str| Ok(script.clone());
@@ -415,7 +392,6 @@ fn cancelling_after_the_connect_is_over_ends_the_connection_while_it_lasts() {
 fn cancelling_a_test_while_its_start_waits_ends_it_at_once() {
     let _one = ONE_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let place = Place::new("cancel-test-start");
-    // Another start holds the lock, so the helper waits for it to say anything about Julia.
     let held = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(place.state.join("start.lock")).unwrap();
     // SAFETY: plain syscall on a file we hold open.
     assert_eq!(unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&held), libc::LOCK_EX | libc::LOCK_NB) }, 0);
@@ -455,7 +431,6 @@ fn cancelling_a_test_while_julia_boots_stops_the_runtime_it_was_starting() {
 fn a_start_outlives_a_connection_that_ends_while_julia_boots_when_it_is_not_a_test() {
     let (place, core) = cancel_while_booting("cancel-start-boot", false);
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    // The core has the state folder in its arguments too.
     while helper_pids(&place.state) != [core] {
         assert!(std::time::Instant::now() < deadline, "the helper is still running");
         std::thread::sleep(Duration::from_millis(50));
@@ -466,11 +441,8 @@ fn a_start_outlives_a_connection_that_ends_while_julia_boots_when_it_is_not_a_te
     unsafe { libc::kill(core, libc::SIGTERM) };
 }
 
-/// A `test` (`as_test`), or a `connect` and `start` as a session makes them, cancelled while Julia boots on a
-/// server reached through a stand-in for ssh. The core that was starting, and the place.
 fn cancel_while_booting(name: &str, as_test: bool) -> (Place, i32) {
     let place = Place::new(name);
-    // A Julia that boots until it is stopped.
     let julia = place.home.join("julia");
     exec::write_executable(&julia, "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'julia version 1.12.0'; exit 0; }\necho booting\nexec sleep 600\n");
     let server = Server { julia: Some(julia.display().to_string()), ..Default::default() };
@@ -478,10 +450,6 @@ fn cancel_while_booting(name: &str, as_test: bool) -> (Place, i32) {
     let (seen, on) = events();
     let (done_tx, done) = mpsc::channel();
     std::thread::spawn({
-        // As over ssh, ending the connection ends only this side, and the server's side hears its input end:
-        // `sh` is made to start the helper in a session of its own (perl's setsid: macOS has no `setsid`
-        // command), out of reach of the cancel's kill, and to talk to it through two `cat`s, which stand in for
-        // ssh and are killed.
         let (cancel, options) = (cancel.clone(), place.options());
         let ssh = r#"sh() { cat | perl -e 'use POSIX; POSIX::setsid(); exec @ARGV' /bin/sh "$@" 2>/dev/null | cat; }"#;
         let transport = Transport::Shell { env: vec![("HOME".into(), place.home.display().to_string())], ask: Some(ssh.into()) };
@@ -513,7 +481,6 @@ fn cancel_while_booting(name: &str, as_test: bool) -> (Place, i32) {
 fn a_test_that_finds_a_runtime_running_without_julia_yet_checks_that_julia_starts() {
     let _one = ONE_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let place = Place::new("test-lazy-julia");
-    // A julia that doesn't run, on a server whose runtime starts Julia only once a notebook needs it.
     let julia = place.home.join("julia");
     exec::write_executable(&julia, "#!/bin/sh\necho 'broken' >&2\nexit 1\n");
     let server = Server { julia: Some(julia.display().to_string()), ..Default::default() };
@@ -522,12 +489,10 @@ fn a_test_that_finds_a_runtime_running_without_julia_yet_checks_that_julia_start
     let runtime = start(&channel, &Listener::start("test").unwrap(), &StartOptions { install: true, ..StartOptions::default() }, &|_| {}, |_| {}).map_err(|e| e.message()).expect("a runtime starts without Julia");
     assert!(!runtime.reattached);
     channel.detach();
-    // Test connection reattaches, and the ping alone would pass (app #169).
     let (seen, on) = events();
     let err = endeavor_mcp::client::test(&server, &place.transport(), &place.options(), &Cancel::default(), &on).expect_err("Julia can't start there");
     assert!(err.starts_with("Endeavor runs on ") && err.contains("but Julia there can't start") && err.contains(&julia.display().to_string()), "{err}");
     assert!(seen.lock().unwrap().iter().any(|e| matches!(e, Event::Started { reattached: true, .. })), "{:?}", seen.lock().unwrap());
-    // It found the runtime running, so it leaves it so.
     let (channel, _) = connect(&server, &place.transport(), &lazy, &Cancel::default(), &|_| {}).map_err(|e| e.message).expect("connect");
     let again = start(&channel, &Listener::start("test").unwrap(), &StartOptions { attach_only: true, ..StartOptions::default() }, &|_| {}, |_| {}).map_err(|e| e.message()).expect("still running");
     assert!(again.reattached);
@@ -536,8 +501,6 @@ fn a_test_that_finds_a_runtime_running_without_julia_yet_checks_that_julia_start
     no_helper_left(&place.state);
 }
 
-/// With the real Julia on this machine: Test connection reattaches to a lazy runtime, starts its Julia, and
-/// passes, leaving the runtime running. Ignored like the other real-Julia tests (it loads Pluto).
 #[test]
 #[ignore = "starts a real Julia"]
 fn a_test_that_finds_a_runtime_running_without_julia_yet_starts_a_real_julia_and_passes() {
@@ -569,7 +532,6 @@ fn a_test_that_finds_a_runtime_running_without_julia_yet_starts_a_real_julia_and
 fn a_test_that_may_not_install_doesnt_download_julia_for_a_runtime_it_finds_running() {
     let _one = ONE_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let place = Place::new("test-lazy-no-julia");
-    // No julia on the login shell's PATH and none of Endeavor's own: only a download would give one.
     let shell = place.home.join("no-julia-shell");
     exec::write_executable(&shell, "#!/bin/sh\nexit 1\n");
     let home = place.home.display().to_string();
@@ -598,8 +560,6 @@ fn a_line_that_is_not_utf8_on_ssh_stderr_does_not_hide_the_reason_after_it() {
     assert!(err.contains("refused the sign-in") && err.contains("ssh-add"), "{err}");
 }
 
-/// Whether `pid` runs: a zombie doesn't, as for the runtime (`unixproc::start_time`), since a container's PID 1
-/// may not reap the core once it is reparented there. Without `/proc` (macOS, where launchd reaps) it is `kill -0`.
 fn running(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
     if unsafe { libc::kill(pid, 0) } != 0 {
@@ -609,7 +569,6 @@ fn running(pid: i32) -> bool {
     !stat.rfind(')').and_then(|end| stat[end + 1..].split_whitespace().next()).is_some_and(|state| state == "Z" || state == "X")
 }
 
-/// Everything under `dir`, as paths.
 fn tree(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -624,7 +583,6 @@ fn tree(dir: &Path) -> Vec<PathBuf> {
 #[test]
 fn without_permission_a_server_that_lacks_the_helper_is_only_looked_at() {
     let place = Place::new("no-install");
-    // Nothing is fetched or read for the helper before the install is allowed.
     let options = Options { allow_install: false, helper: &|_, _| Err("the helper was asked for".into()), ..place.options() };
     let (seen, on) = events();
     let err = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &on).err().expect("no connection");
@@ -637,7 +595,6 @@ fn without_permission_a_server_that_lacks_the_helper_is_only_looked_at() {
     assert!(matches!(seen.lock().unwrap().as_slice(), [Event::Connected { .. }]), "it never says the helper is there: {:?}", seen.lock().unwrap());
     assert!(!place.root.exists() && !place.home.join(".cache").exists(), "nothing was written on the server: {:?}", tree(&place.home));
     no_helper_left(&place.state);
-    // `connect` gives the message alone.
     let message = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).map_err(|e| e.message).err().expect("no connection");
     assert_eq!(message, err.message);
 }
@@ -650,7 +607,6 @@ fn a_runtime_recorded_and_alive_there_is_reported_without_the_helper() {
     let options = Options { allow_install: false, ..place.options() };
     let needs = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
     assert_eq!(needs.running, Some(Running::Process { pid, checked: true }));
-    // A record whose process is gone isn't reported.
     drop(runtime);
     wait_gone(pid);
     let needs = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
@@ -661,12 +617,10 @@ fn a_runtime_recorded_and_alive_there_is_reported_without_the_helper() {
 #[test]
 fn a_pid_that_is_not_a_runtime_is_not_reported_and_without_ps_it_is_only_recorded() {
     let place = Place::new("no-install-pid");
-    // This test's own process is alive, and is not a core.
     std::fs::write(place.state.join("runtime.json"), serde_json::json!({ "launcher": "process", "node": hostname(), "pid": std::process::id(), "token": "t" }).to_string()).unwrap();
     let options = Options { allow_install: false, ..place.options() };
     let needs = |transport: &Transport| connect(&Server::default(), transport, &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
     assert_eq!(needs(&looking(&place, None)).running, None);
-    // A shell whose `ps` takes no -p says nothing of the process, which is alive: recorded, not checked.
     let bin = place.home.join("no-ps");
     std::fs::create_dir_all(&bin).unwrap();
     for tool in std::fs::read_dir(place.home.join("bin")).unwrap().flatten().filter(|t| t.file_name() != "ps") {
@@ -695,7 +649,6 @@ fn a_slurm_job_recorded_in_the_cluster_folder_is_reported_as_slurm_says() {
     assert_eq!(needs(&cluster, &looking(&place, Some("1 4242 7"))).running, Some(Running::Job { id: "4242".into(), listed: true }));
     assert_eq!(needs(&cluster, &looking(&place, Some("1 7"))).running, None, "Slurm doesn't list it any more");
     assert_eq!(needs(&cluster, &looking(&place, None)).running, Some(Running::Job { id: "4242".into(), listed: false }), "no squeue to ask");
-    // A plain server's folder isn't looked at for jobs.
     assert_eq!(needs(&Server::default(), &looking(&place, Some("4242"))).running, None);
 }
 
@@ -722,8 +675,6 @@ fn the_default_state_folders_are_looked_in_when_none_is_given() {
     assert_eq!(needs(&Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() }).running, Some(Running::Job { id: "99".into(), listed: true }));
 }
 
-/// With no state folder given, a plain server's runtime that the app started in its older folder,
-/// `~/.cache/endeavor/state`, is the one reported while it is alive, as the helper would use it (#110).
 #[test]
 fn a_runtime_alive_in_the_apps_older_folder_is_reported_when_no_state_folder_is_given() {
     let place = Place::new("no-install-apps-old");
@@ -732,7 +683,6 @@ fn a_runtime_alive_in_the_apps_older_folder_is_reported_when_no_state_folder_is_
     let options = Options { allow_install: false, root: String::new(), state: String::new(), ..place.options() };
     let needs = || connect(&Server::default(), &looking(&place, None), &options, &Cancel::default(), &|_| {}).err().unwrap().needs.unwrap();
     let record = |pid: u32| std::fs::write(old.join("runtime.json"), serde_json::json!({ "launcher": "process", "node": hostname(), "pid": pid, "token": "t" }).to_string()).unwrap();
-    // A process alive under that pid that is no core of that folder (a reused pid) doesn't count.
     let other = core_like();
     record(other.0.id());
     assert_eq!(needs().running, None);
@@ -761,7 +711,6 @@ fn only_a_complete_helper_of_another_build_makes_it_an_update() {
         }
     };
     let build = endeavor_mcp::embedded::BUILD_VERSION;
-    // This build's own folder, half installed, and what an install that was cut short leaves.
     helper_in(build, false);
     helper_in(&format!("{build}.part.123"), true);
     helper_in("0.0.1-old.part.9", true);
@@ -781,7 +730,6 @@ fn with_permission_it_installs_as_before_and_a_helper_already_there_needs_none()
     assert!(place.installed().join("endeavor").exists());
     channel.detach();
     no_helper_left(&place.state);
-    // Without permission, with the helper there: it connects.
     let (seen, on) = events();
     let options = Options { allow_install: false, ..place.options() };
     let (channel, _) = connect(&Server::default(), &place.transport(), &options, &Cancel::default(), &on).expect("connects");
@@ -800,7 +748,6 @@ fn the_helper_gets_this_builds_name_after_the_probe_found_a_job() {
     let helper = |_: &str, _: &str| Ok(fake.clone());
     let options = Options { helper: &helper, ..place.options() };
     let cluster = Server { id: "hpc".into(), cluster: Some(Default::default()), ..Default::default() };
-    // The fake helper says nothing, so the connect fails; what matters is how it was started.
     let _ = connect(&cluster, &looking(&place, Some("4242")), &options, &Cancel::default(), &|_| {}).map_err(|e| e.message);
     let args: Vec<String> = std::fs::read_to_string(&record).expect("the installed helper was run").lines().map(str::to_owned).collect();
     let at = args.iter().position(|a| a == "--build").expect("--build is passed");
@@ -851,7 +798,6 @@ fn a_start_that_may_not_install_lists_what_it_needs_and_one_that_may_goes_on() {
     let said = err.message();
     assert!(said.contains(&items[0].name) && said.contains("MB"), "{said}");
     assert!(!place.home.join(".cache").exists(), "nothing was downloaded");
-    // The same helper, allowed to download, tries (there is neither curl nor wget here).
     let err = start(&channel, &listener, &StartOptions { install: true, ..StartOptions::default() }, &|_| {}, |_| {}).expect_err("no download tool");
     assert!(matches!(&err, StartError::Failed(message) if message.contains("neither curl nor wget")), "{err:?}");
     channel.detach();

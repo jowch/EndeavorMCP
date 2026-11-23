@@ -1,13 +1,3 @@
-//! The machine tools of `endeavor mcp` (the front), driven over stdio as an
-//! agent's harness drives it, against the helper with a local `sh` standing in
-//! for ssh (`ENDEAVOR_TEST_SHELL`), a stand-in Julia under the real core, and
-//! fake Slurm commands for a cluster. The front holds its connection to each
-//! machine itself; what the tests look at is the tools' results, the helper
-//! processes, the runtime and the machines and projects files. No sshd, Julia
-//! or Slurm is needed. Everything is under `target/tmp`: the front's HOME,
-//! state, config and cache folders, the helper's install and state folders,
-//! and the ssh config that `list_machines` reads (it finds it through HOME).
-
 #![cfg(unix)]
 
 mod common;
@@ -27,21 +17,15 @@ use wire::slurm::{Partition, Resources};
 
 const NOTEBOOK: &str = "aaaaaaaa-0000-0000-0000-000000000001";
 
-/// A machine called `lab` (or `hpc`, a cluster) whose helper and runtime live in a folder of the
-/// test's own, and the folders of a front on "this computer" with a runtime of its own.
 struct Place {
     dir: PathBuf,
-    /// The front's project folder.
     project: PathBuf,
-    /// The helper's state folder, where its runtime keeps `runtime.json`.
     state: PathBuf,
-    /// The runtime of "this computer".
     local_state: PathBuf,
     bridge: FakeBridge,
     local_bridge: FakeBridge,
     julia: PathBuf,
     local_julia: PathBuf,
-    /// What a front gets (it is given nothing else).
     env: Vec<(String, String)>,
 }
 
@@ -50,15 +34,12 @@ impl Place {
         Place::with(name, &[])
     }
 
-    /// With the helper installed on the machine already.
     fn with(name: &str, more: &[(&str, &str)]) -> Place {
         let place = Place::bare(name, more);
         common::install_helper(&place.dir.join("root"));
         place
     }
 
-    /// With more variables, or other values for those set here; `{dir}` is this place's folder.
-    /// The machine has no helper.
     fn bare(name: &str, more: &[(&str, &str)]) -> Place {
         common::require_debug_build();
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("machines-{name}"));
@@ -102,12 +83,10 @@ impl Place {
         MachinesFile::at(self.dir.join("config/endeavor/machines.json"))
     }
 
-    /// A plain server called `lab`.
     fn add_lab(&self) {
         self.machines().save(Server { id: "lab".into(), name: "lab".into(), ssh_host: "lab".into(), julia: Some(self.julia.display().to_string()), ..Default::default() }).unwrap();
     }
 
-    /// A cluster called `hpc`, with a default job of 8 CPUs, 32 GB and 8 hours.
     fn add_hpc(&self) {
         let resources = Resources { partition: None, cpus: 8, mem_gb: 32, minutes: 480, gres: None, extra: Vec::new() };
         let partitions = vec![Partition { name: "shared".into(), default: true, max_minutes: Some(1440), cpus: 32, mem_mb: 128 * 1024 }];
@@ -123,7 +102,6 @@ impl Place {
         recorded_pid(&self.state)
     }
 
-    /// The runtime's own port on the machine, as its record says.
     fn runtime_port(&self) -> u16 {
         read_json_port(&self.state)
     }
@@ -132,17 +110,14 @@ impl Place {
         recorded_pid(&self.local_state)
     }
 
-    /// The pids of the helper (`endeavor connect`) of this place's machine.
     fn helpers(&self) -> Vec<i32> {
         pids(&format!("connect --state-dir {}", self.state.display()))
     }
 
-    /// The pids of every helper of this place, whichever machine it is for.
     fn all_helpers(&self) -> Vec<i32> {
         pids(&format!("connect --state-dir {}/", self.dir.display()))
     }
 
-    /// A notebook file in the project, open in the machine's runtime.
     fn notebook(&self, name: &str) -> String {
         let path = self.project.join(name);
         std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
@@ -155,7 +130,6 @@ impl Place {
         start_front(self, &[])
     }
 
-    /// A front started with `--no-folder`, in the project folder.
     fn front_without_folder(&self) -> Front {
         spawn_front(self, &["--no-folder"], &[])
     }
@@ -193,7 +167,6 @@ fn pids(pattern: &str) -> Vec<i32> {
     String::from_utf8_lossy(&found.stdout).split_whitespace().filter_map(|p| p.parse().ok()).collect()
 }
 
-/// End what a test of `dir` started: the helpers its fronts left (by their pids), then its runtimes (a core, Julia and its workers are one process group).
 fn end_leftovers(dir: &Path) {
     let helpers: Vec<i32> = pids(&format!("connect --state-dir {}/", dir.display()));
     for &pid in &helpers {
@@ -203,7 +176,6 @@ fn end_leftovers(dir: &Path) {
     for pid in helpers {
         wait_for("the helper to end", || !pid_alive(pid));
     }
-    // The recorded runtimes, and any still starting (no record yet): the cores whose command line is `core --state-dir` and this test's own folders.
     let states: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|entry| entry.path()).filter(|path| path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("runtime-state") || n == "local-state")).collect();
     let mut groups: Vec<i32> = Vec::new();
     for state in &states {
@@ -218,7 +190,6 @@ fn end_leftovers(dir: &Path) {
             libc::kill(pid, libc::SIGTERM);
         }
     }
-    // Gone before the next test uses the folder: a dying core could write into it.
     let limit = Instant::now() + Duration::from_secs(5);
     while Instant::now() < limit && groups.iter().any(|&pid| pid_alive(pid) || unsafe { libc::kill(-pid, 0) } == 0) {
         std::thread::sleep(Duration::from_millis(50));
@@ -229,16 +200,12 @@ fn start_front(place: &Place, more: &[(&str, &str)]) -> Front {
     spawn_front(place, &["--folder", &place.project.display().to_string()], more)
 }
 
-/// A front with `folder_args` (`--folder DIR` or `--no-folder`), whose working folder is the project.
-/// Its runtime on this computer starts Julia as it starts, so that its stand-in Pluto, with the
-/// notebooks a test gives it, answers from the first call, and a slow Julia is a slow start.
 fn spawn_front(place: &Place, folder_args: &[&str], more: &[(&str, &str)]) -> Front {
     let mut command = julia_when_needed_front(place, folder_args, more);
     command.env("ENDEAVOR_TEST_JULIA_AT_START", "1");
     Front::spawn(command)
 }
 
-/// A front whose runtime on this computer starts Julia only when something needs it, as a real one does.
 fn lazy_front(place: &Place, more: &[(&str, &str)]) -> Front {
     Front::spawn(julia_when_needed_front(place, &["--folder", &place.project.display().to_string()], more))
 }
@@ -247,7 +214,6 @@ fn julia_when_needed_front(place: &Place, folder_args: &[&str], more: &[(&str, &
     front_command(place, folder_args, more, &place.local_julia)
 }
 
-/// The command for a front like `julia_when_needed_front`'s, whose runtime on this computer runs `julia`.
 fn front_command(place: &Place, folder_args: &[&str], more: &[(&str, &str)], julia: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
     command
@@ -266,7 +232,6 @@ fn front_command(place: &Place, folder_args: &[&str], more: &[(&str, &str)], jul
     command
 }
 
-/// One request to `port`: the status code and the body.
 fn http(port: u16, request: &str) -> (u16, String) {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
@@ -277,7 +242,6 @@ fn http(port: u16, request: &str) -> (u16, String) {
     (head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0), body.to_owned())
 }
 
-/// Another agent session's tool call, straight to a runtime's port. The tool's result.
 fn other_agent(port: u16, token: &str, session: &str, name: &str, arguments: Value) -> Value {
     let message = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": arguments } }).to_string();
     let request = format!(
@@ -291,7 +255,6 @@ fn other_agent(port: u16, token: &str, session: &str, name: &str, arguments: Val
     serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_owned()))
 }
 
-/// What a failed call said: the plain text of a call that couldn't reach a runtime, or the message of a tool's own error.
 fn text(said: &Value) -> &str {
     said.as_str().or_else(|| said["message"].as_str()).unwrap_or_else(|| panic!("no message in {said}"))
 }
@@ -300,7 +263,6 @@ fn this_host() -> String {
     String::from_utf8(Command::new("hostname").output().unwrap().stdout).unwrap().trim().to_owned()
 }
 
-/// The port in a `browser_url`.
 fn url_port(url: &Value) -> u16 {
     url.as_str().and_then(|u| u.strip_prefix("http://localhost:")).and_then(|u| u.split(['/', '?']).next()).and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("not a browser url: {url}"))
 }
@@ -321,7 +283,6 @@ fn the_tool_list_has_the_host_tools_and_the_four_machine_tools() {
     assert!(!names.contains(&"notebook_guide"), "the agent has the plugin's skills");
     let read_only = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].clone();
     assert_eq!([read_only("list_machines"), read_only("add_machine"), read_only("use_machine"), read_only("stop_machine"), read_only("run_shell")], [true, false, false, false, false]);
-    // On this computer the host tools refuse, as the runtime says.
     let (failed, refused) = front.call("list_folder", json!({ "path": "/" }));
     assert!(failed && refused["message"].as_str().unwrap().contains("only for sessions on a server"), "{refused}");
     assert!(place_none(&place), "the refusal started no runtime");
@@ -358,18 +319,15 @@ fn add_machine_reports_and_saves_a_cluster_and_list_machines_connects_to_nothing
     let cluster = saved.cluster.expect("a cluster, since Slurm is there");
     assert_eq!(cluster.partitions.len(), 1);
     assert_eq!((cluster.resources.cpus, cluster.resources.mem_gb, cluster.resources.minutes), (8, 7, 480), "a medium job, kept within the partition");
-    // It connected for Slurm jobs from the start, so the connection is kept for the next call.
     assert_eq!(place.helpers().len(), 1, "one helper");
 
     let listed = front.ok("list_machines", json!({}));
     assert_eq!(listed["machines"], json!([{ "name": "hpc", "host": "hpc", "cluster": true, "state": "connected", "this_session": false }]));
     assert_eq!(listed["ssh_hosts_not_added"], json!(["other"]));
 
-    // Adding it again updates it.
     let again = front.ok("add_machine", json!({ "host": "hpc" }));
     assert_eq!((again["updated"].clone(), again["partitions"].clone()), (json!(true), added["partitions"].clone()));
     assert_eq!(place.machines().load().unwrap().len(), 1);
-    // A name that isn't plain, and a host that ssh would take as an option, are refused before anything runs.
     let (failed, refused) = front.call("add_machine", json!({ "host": "-oProxyCommand=x" }));
     assert!(failed && refused["message"].as_str().unwrap().contains("isn't an SSH host name"), "{refused}");
     let (failed, refused) = front.call("add_machine", json!({ "host": "lab", "name": "local" }));
@@ -411,13 +369,11 @@ fn a_new_machine_with_slurm_tools_is_added_as_a_plain_server_when_slurm_is_false
     assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none(), "saved as a plain server");
     let helpers = place.helpers();
 
-    // Used, it starts Julia directly: no job is submitted, and the connection that added it is the one used.
     let used = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!((used["state"].as_str(), used["ready"].clone()), (Some("ready"), json!(true)), "{used}");
     assert_eq!(place.helpers(), helpers, "no second connection was needed");
     assert_eq!(slurm.read("sbatch.args"), "", "nothing was submitted");
 
-    // Adding it again with nothing said leaves it as it was; saying slurm true while Julia runs there is refused.
     let again = front.ok("add_machine", json!({ "host": "lab" }));
     assert_eq!(again["cluster"], false, "{again}");
     let (failed, said) = front.call("add_machine", json!({ "host": "lab", "slurm": true }));
@@ -425,7 +381,6 @@ fn a_new_machine_with_slurm_tools_is_added_as_a_plain_server_when_slurm_is_false
     assert!(place.machines().find_by_name("lab").unwrap().unwrap().cluster.is_none(), "unchanged");
     assert_eq!(front.ok("list_notebooks", json!({})), json!([]), "and the session still works");
 
-    // With nothing running, it can be changed to a cluster, and back.
     front.ok("stop_machine", json!({ "machine": "lab" }));
     let cluster = front.ok("add_machine", json!({ "host": "lab", "slurm": true }));
     assert_eq!((cluster["cluster"].clone(), cluster["updated"].clone()), (json!(true), json!(true)), "{cluster}");
@@ -447,7 +402,6 @@ fn a_failing_add_machine_leaves_no_record_and_no_connection() {
     assert!(!place.machines().path().exists(), "no record, no file");
     wait_for("the helper to go", || place.helpers().is_empty());
 
-    // A machine that was there before keeps its record as it was.
     place.machines().save(Server { id: "failadd".into(), name: "failadd".into(), ssh_host: "lab".into(), ..Default::default() }).unwrap();
     let before = place.machines().load().unwrap();
     let (failed, _) = front.call("add_machine", json!({ "host": "lab2", "name": "failadd" }));
@@ -458,8 +412,6 @@ fn a_failing_add_machine_leaves_no_record_and_no_connection() {
 
 #[test]
 fn a_server_that_asks_for_a_password_gets_it_from_a_page_in_the_browser() {
-    // The stand-in ssh asks its askpass as ssh does, and connects only with the right answer: the
-    // test's user types "install" on whatever page opens (`Front::click_pages`).
     let ask = r#"test -n "$SSH_ASKPASS" && test "$("$SSH_ASKPASS" "jc@lab's password: ")" = install"#;
     let place = Place::with("signin-page", &[("ENDEAVOR_TEST_ASK", ask)]);
     let opened = place.dir.join("opened.txt");
@@ -472,8 +424,6 @@ fn a_server_that_asks_for_a_password_gets_it_from_a_page_in_the_browser() {
     assert!(!added.to_string().contains(&pages[0]), "the agent never sees the page's link: {added}");
     front.finish();
 
-    // A page nobody answers in time ends as a sign-in nobody answered, which a reconnect tries again,
-    // not as a refused one; Cancel on the page is a refusal.
     let place = Place::with("signin-unanswered", &[("ENDEAVOR_TEST_ASK", ask), ("ENDEAVOR_TEST_SIGN_IN_WAIT_MS", "300")]);
     let mut front = start_front(&place, &[("ENDEAVOR_TEST_BROWSER", opened.to_str().unwrap())]);
     front.click_pages(None);
@@ -485,7 +435,6 @@ fn a_server_that_asks_for_a_password_gets_it_from_a_page_in_the_browser() {
     assert!(failed && !text(&said).contains("stopped waiting for the sign-in"), "{said}");
     front.finish();
 
-    // Without a browser to open, ssh runs in batch mode and has no askpass to ask.
     let place = Place::with("signin-no-browser", &[("ENDEAVOR_TEST_ASK", ask)]);
     let mut front = place.front();
     front.initialize();
@@ -549,14 +498,12 @@ fn a_tool_acts_on_the_saved_settings_when_an_add_for_others_never_connected() {
     let mut front = place.front();
     front.initialize();
     let julia = place.julia.display().to_string();
-    // The new host doesn't connect in time: it stays unsaved, and the connection for it waits for the next call.
     let other = front.ok("add_machine", json!({ "host": "labb", "name": "lab", "julia": julia }));
     assert_eq!((other["state"].as_str(), other["saved"].clone()), (Some("connecting"), json!(true)), "{other}");
     assert!(other["message"].as_str().unwrap().contains("stays as it was"), "{other}");
     assert_eq!(place.machines().find_by_name("lab").unwrap().unwrap().ssh_host, "lab", "the file still has the old settings");
     wait_for("the attempt for the other host", || attempts(&place) == 1);
 
-    // A tool asks for the saved record, and gets a connection made from it; the attempt for the other host is let go.
     std::fs::write(place.dir.join("go"), "").unwrap();
     let used = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!(used["state"], "ready", "{used}");
@@ -579,7 +526,6 @@ fn settings_that_changed_under_a_runtime_in_use_are_refused_in_plain_words() {
     assert!(!text(&said).contains("link"), "{said}");
     assert_eq!(place.helpers(), helpers, "the connection stays");
     assert_eq!(place.machines().find_by_name("lab").unwrap().unwrap().ssh_host, "lab");
-    // The file's record is the one the tools use, so they keep working.
     let status = front.ok("session_status", json!({}));
     assert_eq!((status["machine"].as_str(), url_port(&status["browser_url"])), (Some("lab"), url_port(&used["browser_url"])));
     front.finish();
@@ -680,10 +626,7 @@ fn fields_inside_a_cluster_survive_the_changes_the_front_makes() {
 
 #[test]
 fn a_cluster_job_is_submitted_without_asking_about_julia_that_no_notebook_needs_yet() {
-    // #80: an R-only user on a cluster isn't asked to download Julia on the login node. The job's
-    // core looks for Julia when a notebook needs one; the user's yes then gets it on the login node.
     let slurm = FakeSlurm::new("no-julia-yet");
-    // A login shell whose PATH has nothing on it (a runner may have /usr/bin/julia), and no Endeavor's own Julia in the place's home.
     let shell = slurm.dir.join("no-julia-shell");
     common::write_executable(&shell, "#!/bin/sh\n[ \"$1\" = -lc ] && shift && set -- -c \"$@\"\nPATH=/nonexistent exec /bin/sh \"$@\"\n");
     let place = Place::with("no-julia-yet", &[("PATH", &slurm.path()), ("FAKE_SLURM", &slurm.dir.display().to_string()), ("SHELL", shell.to_str().unwrap())]);
@@ -702,8 +645,6 @@ fn a_cluster_job_is_submitted_without_asking_about_julia_that_no_notebook_needs_
 
 #[test]
 fn a_cluster_jobs_core_without_julia_gets_the_login_nodes_on_the_users_yes() {
-    // #80: the job's node has no Julia (and maybe no internet). The user's yes has the login node find
-    // (or download) one, and the job's core is told where it is, so the next notebook call starts it.
     let slurm = FakeSlurm::new("julia-from-login");
     let no_julia = slurm.dir.join("no-julia-shell");
     common::write_executable(&no_julia, "#!/bin/sh\n[ \"$1\" = -lc ] && shift && set -- -c \"$@\"\nPATH=/nonexistent exec /bin/sh \"$@\"\n");
@@ -733,7 +674,6 @@ fn a_cluster_jobs_core_without_julia_gets_the_login_nodes_on_the_users_yes() {
     wait_for("the job's runtime", || front.ok("session_status", json!({})).get("browser_url").is_some());
     let notebook = place.project.join("a.jl");
     std::fs::write(&notebook, "### A Pluto.jl notebook ###\n").unwrap();
-    // A yes before any notebook needed Julia (to the helper, say) doesn't get one.
     let used = front.ok("use_machine", json!({ "machine": "hpc", "install": true }));
     assert_eq!(used["state"], "ready", "{used}");
     let (failed, said) = front.call("open_notebook", json!({ "path": notebook.display().to_string() }));
@@ -751,12 +691,10 @@ fn a_cluster_jobs_core_without_julia_gets_the_login_nodes_on_the_users_yes() {
     let _ = node.wait();
 }
 
-/// How many connections were tried (`slow_place`).
 fn attempts(place: &Place) -> usize {
     std::fs::read_to_string(place.dir.join("attempts")).map_or(0, |text| text.lines().count())
 }
 
-/// A place whose connections wait for the file `go` before they connect, with Slurm's commands on the PATH. Each attempt is noted in `attempts` and, while it waits, in `asking`.
 fn slow_place(name: &str, then: &str) -> (Place, FakeSlurm) {
     let slurm = FakeSlurm::new(name);
     let ask = format!("echo x >> {{dir}}/attempts; touch {{dir}}/asking; while [ ! -f {{dir}}/go ]; do sleep 0.1; done{then}");
@@ -781,13 +719,11 @@ fn an_add_machine_that_is_still_connecting_saves_nothing_until_a_second_call_has
     assert!(failed && said["error"] == "machine_not_found", "{said}");
     assert_eq!(place.projects(), Value::Null);
 
-    // Other settings while it is still connecting replace the connection, which was made for the first ones.
     let other = front.ok("add_machine", json!({ "host": "lab2", "name": "lab", "julia": julia }));
     assert_eq!((other["state"].as_str(), other["saved"].clone()), (Some("connecting"), json!(false)), "{other}");
     assert_eq!(attempts(&place), 2, "a new connection");
     assert!(!place.machines().path().exists());
 
-    // The next call finishes it, and treats it as new: Slurm is found, so it is a cluster.
     std::fs::write(place.dir.join("go"), "").unwrap();
     let done = front.ok("add_machine", json!({ "host": "lab2", "name": "lab", "julia": julia }));
     assert_eq!((done["state"].as_str(), done["updated"].clone(), done["cluster"].clone()), (Some("connected"), json!(false), json!(true)), "{done}");
@@ -810,7 +746,6 @@ fn an_add_machine_saying_slurm_false_after_one_still_connecting_connects_again_a
     let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
     assert_eq!(first["state"], "connecting", "{first}");
     std::fs::write(place.dir.join("go"), "").unwrap();
-    // That connection settles as Slurm (sinfo is on the PATH); the user says it isn't a cluster.
     let added = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "slurm": false }));
     assert_eq!((added["state"].as_str(), added["cluster"].clone(), added["runs_in"].clone()), (Some("connected"), json!(false), json!("directly")), "{added}");
     assert_eq!(attempts(&place), 2, "a new connection for the launcher asked for, not the one made for auto");
@@ -867,7 +802,6 @@ fn a_use_machine_that_fails_leaves_the_session_its_key_and_the_project_as_they_w
     assert!(place.helpers().is_empty(), "no connection was even made");
     assert_eq!(slurm.read("sbatch.args"), "");
 
-    // On a machine, the same.
     let path = place.notebook("machine.jl");
     front.ok("use_machine", json!({ "machine": "lab" }));
     front.ok("open_notebook", json!({ "path": path }));
@@ -900,7 +834,6 @@ fn use_machine_puts_the_session_on_the_machine_and_local_puts_it_back() {
     assert_eq!(used["browser_url"], format!("http://localhost:{port}/"), "no token: the agent is never given it");
     assert!(used["message"].as_str().unwrap().contains("no notebook on lab yet"));
 
-    // The agent's calls go to the machine's runtime, with its host and browser port.
     let listed = front.ok("list_notebooks", json!({}));
     assert_eq!(listed[0]["path"], machine_notebook, "the machine's notebooks, not this computer's: {listed}");
     let status = front.ok("session_status", json!({}));
@@ -914,7 +847,6 @@ fn use_machine_puts_the_session_on_the_machine_and_local_puts_it_back() {
     assert!(shell.to_string().contains(&place.dir.join("home/work").display().to_string()) && shell.to_string().contains("on-the-machine"), "the session's folder there: {shell}");
     assert_eq!(place.projects()[place.project.display().to_string()], json!({ "machine": "lab", "folder": place.dir.join("home/work").display().to_string() }));
 
-    // Back on this computer: its runtime, its notebooks, and the host tools refuse again.
     let back = front.ok("use_machine", json!({ "machine": "local" }));
     assert_eq!((back["machine"].as_str(), back["state"].as_str()), (Some("local"), Some("ready")), "{back}");
     let listed = front.ok("list_notebooks", json!({}));
@@ -928,7 +860,6 @@ fn use_machine_puts_the_session_on_the_machine_and_local_puts_it_back() {
     assert_eq!(place.projects().get(place.project.display().to_string()), None, "local clears what the project remembers");
     assert!(pid_alive(place.runtime().unwrap()), "leaving a machine doesn't stop its runtime");
 
-    // And to the machine again.
     let again = front.ok("use_machine", json!({ "machine": "LAB" }));
     assert_eq!((again["state"].as_str(), again["already_running"].clone()), (Some("ready"), json!(true)), "{again}");
     let (failed, unknown) = front.call("use_machine", json!({ "machine": "nowhere" }));
@@ -998,7 +929,6 @@ fn use_machine_makes_a_folder_whose_parent_is_there_and_refuses_one_whose_parent
         args
     };
 
-    // A folder whose parent is missing too, such as another computer's path: nothing is made and no job is asked for.
     let elsewhere = place.dir.join("Users/me/projects/study");
     let (failed, refused) = front.call("use_machine", ask(&elsewhere));
     let message = refused["message"].as_str().unwrap();
@@ -1007,7 +937,6 @@ fn use_machine_makes_a_folder_whose_parent_is_there_and_refuses_one_whose_parent
     assert_eq!(slurm.read("sbatch.args"), "", "no job was submitted");
     assert_eq!(place.projects(), Value::Null, "the project remembers nothing");
 
-    // A new folder whose parent is there is made, and the result says so.
     let study = place.dir.join("home/new-study");
     let queued = front.ok("use_machine", ask(&study));
     assert_eq!(queued["state"].as_str(), Some("queued"), "{queued}");
@@ -1029,7 +958,6 @@ fn a_remembered_folder_that_is_gone_is_named_as_the_projects_and_a_given_folder_
     first.finish();
     std::fs::remove_dir_all(place.dir.join("home/scratch")).unwrap();
 
-    // Leaving `folder` out brings the remembered folder back, so the error says it is the project's and asks for another.
     let mut second = place.front();
     second.initialize();
     let (failed, refused) = second.call("use_machine", json!({ "machine": "lab" }));
@@ -1107,7 +1035,6 @@ fn a_notebook_call_while_the_runtime_is_still_starting_returns_the_status_within
     assert_eq!((status["machine"].as_str(), status["state"].as_str(), status["ready"].clone()), (Some("lab"), Some("starting"), json!(false)), "{status}");
     assert!(status["step"].is_string());
 
-    // Julia is on its way, so it is not stopped without the user's word: others may be waiting for it.
     let refused = front.ok("stop_machine", json!({ "machine": "lab" }));
     assert_eq!((refused["stopped"].clone(), refused["state"].clone()), (json!(false), json!("starting")), "{refused}");
     assert!(refused["message"].as_str().unwrap().contains("Endeavor is starting on lab") && refused["message"].as_str().unwrap().contains("force true"), "{refused}");
@@ -1157,11 +1084,9 @@ fn stop_machine_refuses_when_another_session_was_active_and_stops_with_force() {
     let status = front.ok("session_status", json!({}));
     assert_eq!((status["machine"].as_str(), status["ready"].clone()), (Some("lab"), json!(false)), "{status}");
 
-    // Starting it again works, on the same port.
     let again = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!(url_port(&again["browser_url"]), port, "{again}");
     assert_ne!(place.runtime(), Some(runtime_pid));
-    // Nothing runs, so a stop says so.
     front.ok("stop_machine", json!({ "machine": "lab", "force": true }));
     let nothing = front.ok("stop_machine", json!({ "machine": "lab" }));
     assert_eq!(nothing["stopped"], false, "{nothing}");
@@ -1179,7 +1104,6 @@ fn stop_machine_works_on_this_computer_with_the_same_check() {
     front.ok("use_machine", json!({ "machine": "local" }));
     assert_eq!(front.ok("list_notebooks", json!({}))[0]["path"], path.display().to_string());
     let local = place.local_runtime().unwrap();
-    // Another session works there.
     let port = std::fs::read_to_string(place.local_state.join("runtime.json")).map(|t| serde_json::from_str::<Value>(&t).unwrap()).unwrap()["port"].as_u64().unwrap() as u16;
     other_agent(port, TOKEN, "someone-else", "open_notebook", json!({ "path": path.display().to_string() }));
 
@@ -1211,13 +1135,11 @@ fn a_session_keeps_its_key_across_machines_and_its_notebook_where_it_made_it() {
     assert_eq!(joined["already_open"], true, "{joined}");
     assert_eq!(front.ok("list_notebooks", json!({}))[0]["this_session"], true);
 
-    // On this computer the session has no notebook; back on the machine it still has the one it made there.
     front.ok("use_machine", json!({ "machine": "local" }));
     front.ok("use_machine", json!({ "machine": "lab" }));
     let listed = front.ok("list_notebooks", json!({}));
     assert_eq!(listed[0]["this_session"], true, "the same key, so the same binding: {listed}");
 
-    // The front's end tells the runtime nothing: it lets go of the machine and leaves the runtime.
     let runtime = place.runtime().unwrap();
     front.finish();
     assert!(pid_alive(runtime));
@@ -1262,7 +1184,6 @@ fn a_box_picture_asked_of_a_runtime_an_older_version_started_says_why_it_cant_be
     let notebook = first.ok("open_notebook", json!({ "path": path }))["notebook_id"].as_str().unwrap().to_owned();
     first.finish();
     wait_for("the connection to end", || place.helpers().is_empty());
-    // Kept while its notebook is open, as a runtime from before box pictures (interface 46).
     let mut record = read_record(&place.state);
     record["build"] = ANOTHER_BUILD.into();
     record["interface"] = 46.into();
@@ -1291,7 +1212,6 @@ fn a_machines_runtime_of_another_interface_is_kept_and_the_agent_is_told_once_an
     first.finish();
     wait_for("the connection to end", || place.helpers().is_empty());
 
-    // Another build, but this build's interface: used as it is, and nothing is said.
     let mut record = read_record(&place.state);
     assert_eq!(record["interface"], endeavor_mcp::CORE_INTERFACE, "the core records its interface");
     record["build"] = ANOTHER_BUILD.into();
@@ -1307,7 +1227,6 @@ fn a_machines_runtime_of_another_interface_is_kept_and_the_agent_is_told_once_an
     second.finish();
     wait_for("the connection to end", || place.helpers().is_empty());
 
-    // Another build from before the interface was recorded: kept, and the agent is told once, by use_machine.
     record.as_object_mut().unwrap().remove("interface");
     std::fs::write(place.state.join("runtime.json"), record.to_string()).unwrap();
     let mut third = place.front();
@@ -1318,12 +1237,10 @@ fn a_machines_runtime_of_another_interface_is_kept_and_the_agent_is_told_once_an
     assert!(!message.contains(ANOTHER_BUILD), "no build keys in what the agent passes on: {used}");
     let (_, said) = third.contents("list_notebooks", json!({}));
     assert_eq!(said.len(), 1, "said once: {said:?}");
-    // The status says it every time, for an agent that no longer has the notice, with the build in a field of its own.
     let status = third.ok("session_status", json!({}));
     let other = status["other_version"].as_str().unwrap_or_default();
     assert!(other.starts_with("Endeavor on lab was started by an older version") && !other.contains(ANOTHER_BUILD), "{status}");
     assert_eq!((status["runtime_build"].as_str(), status["machine"].as_str()), (Some(ANOTHER_BUILD), Some("lab")), "{status}");
-    // One whose interface is above this build's is a newer version.
     third.finish();
     wait_for("the connection to end", || place.helpers().is_empty());
     record["interface"] = (endeavor_mcp::CORE_INTERFACE + 1).into();
@@ -1348,7 +1265,6 @@ fn a_machines_runtime_too_old_to_ask_before_a_run_still_runs_the_plugins_code() 
     first.finish();
     wait_for("the connection to end", || place.helpers().is_empty());
 
-    // A record from before the core recorded its build or interface.
     let mut record = read_record(&place.state);
     record.as_object_mut().unwrap().remove("interface");
     record.as_object_mut().unwrap().remove("build");
@@ -1356,8 +1272,6 @@ fn a_machines_runtime_too_old_to_ask_before_a_run_still_runs_the_plugins_code() 
     let mut second = place.front();
     second.initialize();
     second.ok("use_machine", json!({ "machine": "lab" }));
-    // No runtime holds the plugin's runs for the user's answer (it sends no policy), so an old one is no
-    // worse, and refusing would only push the user to stop Julia, which on a cluster gives up the job.
     let (_, said) = second.call("execute_cell", json!({ "notebook_id": NOTEBOOK, "cell_id": "00000000-0000-0000-0000-000000000000" }));
     assert!(!said.to_string().contains("too old"), "{said}");
     assert_eq!(second.ok("list_notebooks", json!({}))[0]["path"], path);
@@ -1428,7 +1342,6 @@ fn one_front_uses_two_machines_each_with_its_own_connection_and_runtime() {
     let (r1, r2) = (recorded_pid(&state_of("lab")).unwrap(), recorded_pid(&second_state).unwrap());
     assert_ne!(r1, r2, "two runtimes");
 
-    // The session is on the second; both connections are up, and the first is still in use.
     assert!(front.ok("list_notebooks", json!({}))[0]["path"].as_str().unwrap().ends_with("lab2.jl"));
     let listed = front.ok("list_machines", json!({}));
     assert_eq!((listed["machines"][0]["state"].as_str(), listed["machines"][1]["state"].as_str()), (Some("ready"), Some("ready")), "{listed}");
@@ -1436,7 +1349,6 @@ fn one_front_uses_two_machines_each_with_its_own_connection_and_runtime() {
     assert_eq!((back["already_running"].clone(), url_port(&back["browser_url"])), (json!(true), one), "the first one's connection was kept: {back}");
     assert!(front.ok("list_notebooks", json!({}))[0]["path"].as_str().unwrap().ends_with("/lab.jl"));
     assert_eq!(url_port(&front.ok("session_status", json!({}))["browser_url"]), one);
-    // Stopping one leaves the other.
     assert_eq!(front.ok("stop_machine", json!({ "machine": "lab2", "force": true }))["stopped"], true);
     wait_for("the second runtime to end", || !pid_alive(r2));
     assert!(pid_alive(r1));
@@ -1446,7 +1358,6 @@ fn one_front_uses_two_machines_each_with_its_own_connection_and_runtime() {
     end_group(r1);
 }
 
-/// End a runtime of this test: its core, Julia and workers are one process group.
 fn end_group(pid: i32) {
     // SAFETY: plain syscalls, on a core this test started and the processes in its group.
     unsafe {
@@ -1469,7 +1380,6 @@ fn list_machines_connects_to_nothing_and_says_so() {
     std::thread::sleep(Duration::from_millis(500));
     assert!(place.helpers().is_empty(), "listing made no connection");
     assert!(place.runtime().is_none());
-    // A machine the session is connected to shows its state, and the others still show none.
     front.ok("use_machine", json!({ "machine": "lab" }));
     let listed = front.ok("list_machines", json!({}));
     assert_eq!((listed["machines"][0]["state"].as_str(), listed["machines"][1]["state"].as_str()), (Some("ready"), Some("not connected")), "{listed}");
@@ -1605,8 +1515,6 @@ fn a_status_query_after_the_runtime_it_used_has_exited_starts_none() {
 
 const ANOTHER_BUILD: &str = "0.0.1-0123456789abcdef";
 
-/// The local runtime's record says another build started it, as one that outlived an update would:
-/// one from before the interface was recorded.
 fn from_another_build(place: &Place) {
     let mut record = read_record(&place.local_state);
     record["build"] = ANOTHER_BUILD.into();
@@ -1629,7 +1537,6 @@ fn a_runtime_of_another_build_that_offers_this_builds_interface_is_used_as_it_is
     record["build"] = ANOTHER_BUILD.into();
     std::fs::write(place.local_state.join("runtime.json"), record.to_string()).unwrap();
 
-    // No notebook is open, and the call may start one: it is still used, and nothing is said.
     let mut second = place.front();
     second.initialize();
     let (failed, said) = second.contents("list_notebooks", json!({}));
@@ -1647,7 +1554,6 @@ fn a_runtime_of_another_build_with_no_notebook_open_is_replaced_by_the_first_cal
     std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
     let mut first = place.front();
     first.initialize();
-    // The stand-in has no such notebook to open, but the call starts the runtime.
     first.call("open_notebook", json!({ "path": path }));
     let old = place.local_runtime().expect("started by the call");
     first.finish();
@@ -1673,7 +1579,6 @@ fn a_runtime_whose_julia_was_removed_with_no_notebook_open_is_replaced_by_the_fi
     let place = Place::new("julia-removed-idle");
     let path = place.project.join("idle.jl").display().to_string();
     std::fs::write(&path, "### A Pluto.jl notebook ###").unwrap();
-    // Its Julia is a copy that juliaup removes once it runs (#347).
     let old_julia = place.dir.join("julia-1.12.5").join("bin").join("julia");
     std::fs::create_dir_all(old_julia.parent().unwrap()).unwrap();
     common::exec::copy_executable(&place.local_julia, &old_julia);
@@ -1742,14 +1647,12 @@ fn a_front_whose_network_settings_differ_from_the_runtimes_is_told_once_by_name_
     let (_, said) = first.contents("list_notebooks", json!({}));
     assert_eq!(said.len(), 1, "the session that started it is told nothing: {said:?}");
 
-    // Same settings: nothing to say.
     let mut same = start_front(&place, &starter);
     same.initialize();
     let (_, said) = same.contents("list_notebooks", json!({}));
     assert_eq!(said.len(), 1, "{said:?}");
     same.finish();
 
-    // Another proxy, and one more variable set: both named, once, and the values never.
     let mut other = start_front(&place, &[("HTTPS_PROXY", "http://127.0.0.1:41002"), ("NO_PROXY", "localhost"), ("SSL_CERT_FILE", "/etc/ca.pem")]);
     other.initialize();
     let (failed, said) = other.contents("list_notebooks", json!({}));
@@ -1792,7 +1695,6 @@ fn a_recorded_runtime_that_cannot_be_used_is_an_error_for_the_two_queries_and_st
         std::fs::write(place.local_state.join("runtime.json"), record.to_string()).unwrap();
     };
     let mut sleeper = Command::new("sleep").arg("600").spawn().unwrap();
-    // The status answers with the state and why; the listing fails with the same words.
     let why = |front: &mut Front, tool: &str| {
         let (failed, said) = front.call(tool, json!({}));
         assert_eq!(failed, tool == "list_notebooks", "{tool}: {said}");
@@ -1888,10 +1790,8 @@ fn a_first_notebook_call_during_a_slow_start_says_to_call_again_and_a_later_call
     front.finish();
 }
 
-/// Hold `dir/start.lock`, as a process in the middle of a start does.
 fn hold_start_lock(dir: &Path) -> std::fs::File {
     let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("start.lock")).unwrap();
-    // The front holds the lock for a moment around each look, so one try can meet it.
     wait_for("the start lock to be free", || {
         // SAFETY: plain syscall on a file we hold open.
         unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX | libc::LOCK_NB) == 0 }
@@ -1956,7 +1856,6 @@ fn a_forced_stop_cancels_a_start_another_process_began_and_the_next_call_starts_
     assert_eq!(again["stopped"], false, "{again}");
     assert!(again["message"].as_str().unwrap().contains("isn't running"), "{again}");
 
-    // Asked to start again, it starts a new runtime.
     std::fs::remove_file(place.local_state.join("hold")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -1992,7 +1891,6 @@ fn a_forced_stop_cancels_the_start_this_session_began_and_it_is_not_left_as_a_fa
     wait_for("the core to end", || !pid_alive(started[0]));
     let status = front.ok("session_status", json!({}));
     assert_eq!(status["state"], "stopped", "{status}");
-    // Read without a call that asks to try again: the start it cancelled is not a failure kept for every call.
     assert!(status.get("error").is_none(), "no failure is kept and told to every call: {status}");
     let used = front.ok("use_machine", json!({ "machine": "local" }));
     assert_ne!(used["state"], "failed", "the start it cancelled is not held against the next one: {used}");
@@ -2016,7 +1914,6 @@ fn a_forced_stop_after_a_failed_start_here_reaches_a_start_another_process_has_u
     front.initialize();
     let (failed, said) = front.call("open_notebook", json!({ "path": path }));
     assert!(!failed && text(&said).contains("Endeavor is starting on this computer"), "{said}");
-    // Its start fails: the core is killed under it.
     let first = core_of(&place);
     assert_eq!(first.len(), 1, "{first:?}");
     // SAFETY: plain syscall, on the core this test's front started and what it started.
@@ -2025,7 +1922,6 @@ fn a_forced_stop_after_a_failed_start_here_reaches_a_start_another_process_has_u
         let (failed, said) = front.call("open_notebook", json!({ "path": path }));
         failed && text(&said).contains("stopped while starting")
     });
-    // Another process begins a start of its own.
     let mut other = start_front(&place, &short);
     other.initialize();
     let (failed, said) = other.call("open_notebook", json!({ "path": path }));
@@ -2056,7 +1952,6 @@ fn a_start_goes_on_when_the_front_that_asked_for_it_has_gone_and_the_next_front_
     first.finish();
     assert!(pid_alive(started[0]) && place.local_runtime().is_none(), "the start goes on without the front");
 
-    // A front that comes while the start is still under way waits for it and starts none.
     let mut second = start_front(&place, &short);
     second.initialize();
     let status = second.ok("session_status", json!({}));
@@ -2092,7 +1987,6 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     let mut front = place.front();
     front.initialize();
 
-    // No job and no resources: nothing is submitted, and the defaults come back to be confirmed.
     let asked = front.ok("use_machine", json!({ "machine": "hpc" }));
     assert_eq!((asked["state"].as_str(), asked["needs_job"].clone(), asked["ready"].clone()), (Some("needs_job"), json!(true), json!(false)), "{asked}");
     assert_eq!((asked["defaults"]["cpus"].clone(), asked["defaults"]["memory_gb"].clone(), asked["defaults"]["hours"].clone()), (json!(8), json!(32), json!(8.0)));
@@ -2106,7 +2000,6 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     let (failed, plain) = front.call("use_machine", json!({ "machine": "lab", "cpus": 4 }));
     assert!(failed && plain["message"].as_str().unwrap().contains("There is no machine"), "{plain}");
 
-    // With resources: the job is submitted, and the queue shows through session_status.
     let queued = front.ok("use_machine", json!({ "machine": "hpc", "cpus": 4, "memory_gb": 16, "hours": 2, "partition": "shared", "account": "lab" }));
     assert_eq!((queued["state"].as_str(), queued["ready"].clone()), (Some("queued"), json!(false)), "{queued}");
     assert_eq!((queued["job"]["id"].as_str(), queued["queue"]["state"].as_str(), queued["queue"]["reason"].as_str()), (Some("42"), Some("PENDING"), Some("Priority")), "{queued}");
@@ -2124,7 +2017,6 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     let (failed, said) = front.call("list_notebooks", json!({}));
     assert!(!failed && text(&said).contains("Slurm job 42 on hpc is waiting in the queue"), "{said}");
 
-    // The job runs: its node starts the runtime, and the session gets to it.
     slurm.set("node", &this_host());
     slurm.set("left", "29:30");
     slurm.set("state", "RUNNING");
@@ -2156,7 +2048,6 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     assert_eq!(front.ok("list_notebooks", json!({})), json!([]));
     assert_eq!(slurm.read("sbatch.args").lines().count(), 1, "one job");
 
-    // A later session finds the job running, and takes it with no use_machine and no new job.
     front.finish();
     let mut second = place.front();
     second.initialize();
@@ -2165,7 +2056,6 @@ fn a_cluster_gets_no_job_without_resources_then_queues_runs_and_stops() {
     assert_eq!((used["state"].as_str(), used["already_running"].clone(), used["job"]["id"].as_str()), (Some("ready"), json!(true), Some("42")), "{used}");
     assert!(used["message"].as_str().unwrap().contains("The job ends in"), "{used}");
 
-    // Stopping cancels the job. The first session only asked for the status, so it holds nothing up.
     let stopped = second.ok("stop_machine", json!({ "machine": "hpc" }));
     assert_eq!(stopped["stopped"], true, "{stopped}");
     assert_eq!(slurm.read("scancel.log").trim(), "42");
@@ -2184,7 +2074,6 @@ fn a_remembered_cluster_with_no_job_is_not_submitted_for_but_told_what_to_ask() 
     first.ok("use_machine", json!({ "machine": "hpc" }));
     assert_eq!(place.projects(), Value::Null, "not remembered while no job was asked for");
     first.finish();
-    // A project that remembers the cluster from when a job ran there.
     let remembered = json!({ place.project.display().to_string(): { "machine": "hpc", "folder": null } });
     std::fs::create_dir_all(place.dir.join("state-home/endeavor")).unwrap();
     std::fs::write(place.dir.join("state-home/endeavor/projects.json"), remembered.to_string()).unwrap();
@@ -2221,8 +2110,6 @@ fn a_queued_job_is_cancelled_only_when_the_user_agreed() {
     assert_eq!(slurm.read("scancel.log").trim(), "42");
 }
 
-/// Slurm's commands as scripts over files in `target/tmp/machines-NAME-slurm`: the test moves a job
-/// through the queue by writing its state.
 struct FakeSlurm {
     dir: PathBuf,
     bin: PathBuf,
@@ -2243,7 +2130,6 @@ impl FakeSlurm {
             ),
             (
                 "scancel",
-                // Slurm ends the job's processes: the one the test started as its node.
                 "echo \"$@\" >> \"$FAKE_SLURM/scancel.log\"\necho CANCELLED > \"$FAKE_SLURM/state\"\nif [ -f \"$FAKE_SLURM/node.pid\" ]; then p=$(cat \"$FAKE_SLURM/node.pid\"); kill -TERM -- \"-$p\" 2>/dev/null; kill -TERM \"$p\" 2>/dev/null; fi\nexit 0\n",
             ),
             ("sacct", "cat \"$FAKE_SLURM/sacct\" 2>/dev/null\nexit 0\n"),
@@ -2260,7 +2146,6 @@ impl FakeSlurm {
         FakeSlurm { dir, bin }
     }
 
-    /// A PATH with these commands first.
     fn path(&self) -> String {
         format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap())
     }
@@ -2274,7 +2159,6 @@ impl FakeSlurm {
     }
 }
 
-/// A stand-in process that is ended when it is dropped, whatever a test did before.
 struct KillOnDrop(std::process::Child);
 
 impl Drop for KillOnDrop {
@@ -2287,7 +2171,6 @@ impl Drop for KillOnDrop {
 #[test]
 fn add_machine_only_looks_until_told_to_install() {
     let place = Place::bare("needs-install", &[]);
-    // A runtime that a helper of an earlier install left: the look reports it.
     let core = KillOnDrop(common::core_like_child());
     let core_pid = core.0.id();
     std::fs::write(place.state.join("runtime.json"), json!({ "launcher": "process", "node": "n", "pid": core_pid, "token": "t" }).to_string()).unwrap();
@@ -2304,19 +2187,16 @@ fn add_machine_only_looks_until_told_to_install() {
     assert!(message.contains(&place.dir.join("root").display().to_string()), "where it would go: {message}");
     assert!(!place.dir.join("root").exists(), "nothing was installed");
     assert!(place.helpers().is_empty());
-    // Nothing is saved: the second call has the same arguments.
     assert!(!place.machines().path().exists());
     assert_eq!(front.ok("list_machines", json!({}))["machines"], json!([]));
     let (failed, said) = front.call("use_machine", json!({ "machine": "lab" }));
     assert!(failed && said["error"] == "machine_not_found", "{said}");
     assert!(!place.dir.join("root").exists());
 
-    // Asking again without the agreement looks again and changes nothing.
     let again = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
     assert_eq!(again["state"], "needs_install", "{again}");
     assert!(!place.dir.join("root").exists());
 
-    // With the agreement it installs and adds the machine.
     std::fs::remove_file(place.state.join("runtime.json")).unwrap();
     drop(core);
     let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
@@ -2350,22 +2230,17 @@ fn use_machine_installs_the_helper_only_when_told_to() {
 
 #[test]
 fn where_the_client_can_show_a_dialog_the_user_says_yes_to_an_install_there() {
-    // Haiku 4.5 called add_machine with `install: true` straight after `needs_install`, before the
-    // user had answered (#378): where the client can show a form, Endeavor asks the user itself.
     let place = Place::bare("dialog-install", &[]);
     let julia = place.julia.display().to_string();
     let mut front = place.front();
     front.dialog = Some("decline");
     front.initialize();
-    // The tools say Endeavor asks, so the agent doesn't ask in the chat too.
     let listed = front.request("tools/list", json!({}));
     for tool in listed["result"]["tools"].as_array().unwrap().iter().filter(|t| t["inputSchema"]["properties"]["install"].is_object()) {
         let (description, install) = (tool["description"].as_str().unwrap(), tool["inputSchema"]["properties"]["install"]["description"].as_str().unwrap());
         assert!(install.contains("Endeavor asks the user in a dialog") && !install.contains("never on a first call"), "{}: {install}", tool["name"]);
         assert!(description.contains("before the call, write one line telling the user that Endeavor may ask for their OK in a dialog") && !description.contains("ask the user, and"), "{}: {description}", tool["name"]);
     }
-    // A call that needs an install asks the user at once, whether or not the agent set `install`:
-    // agents told to call again often didn't (#380's smoke runs). A no installs nothing and saves nothing.
     let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia }));
     assert!(failed && said["error"] == "install_declined", "{said}");
     assert_eq!(front.asked.len(), 1);
@@ -2377,20 +2252,16 @@ fn where_the_client_can_show_a_dialog_the_user_says_yes_to_an_install_there() {
     assert!(failed && said["error"] == "install_declined", "{said}");
     assert_eq!(front.asked.len(), 2, "`install: true` alone is no yes either");
 
-    // A yes installs it and adds the machine.
     front.dialog = Some("accept");
     let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
     assert_eq!((done["state"].as_str(), done["saved"].clone()), (Some("connected"), json!(true)), "{done}");
     assert_eq!(front.asked.len(), 3);
     assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
 
-    // With nothing left to install, `install: true` asks nothing.
     let again = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
     assert_eq!(again["state"], "connected", "{again}");
     assert_eq!(front.asked.len(), 3, "nothing to install, nothing asked");
 
-    // On a runtime that runs, `install: true` is leave to download Julia when a notebook needs it:
-    // that is asked too, and a no leaves the session on the machine without it.
     let used = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!(used["state"], "ready", "{used}");
     front.dialog = Some("decline");
@@ -2407,39 +2278,32 @@ fn where_the_client_can_show_a_dialog_the_user_says_yes_to_an_install_there() {
 
 #[test]
 fn where_the_client_cant_show_a_dialog_the_user_says_yes_on_a_page_in_their_browser() {
-    // Without a dialog, the agent's `install: true` was the user's yes, and Haiku 4.5 gave it in the
-    // same turn (#378, #381). The yes now comes from a page the front opens in the user's browser.
     let place = Place::bare("page-install", &[("ENDEAVOR_TEST_PAGE_WAIT_MS", "1500")]);
     let julia = place.julia.display().to_string();
     let mut front = place.front();
     front.click_pages(None);
     front.initialize();
-    // The tools say Endeavor asks on a page, so the agent doesn't ask in the chat too.
     let listed = front.request("tools/list", json!({}));
     for tool in listed["result"]["tools"].as_array().unwrap().iter().filter(|t| t["inputSchema"]["properties"]["install"].is_object()) {
         let (description, install) = (tool["description"].as_str().unwrap(), tool["inputSchema"]["properties"]["install"]["description"].as_str().unwrap());
         assert!(install.contains("on a page in their browser") && !install.contains("never on a first call"), "{}: {install}", tool["name"]);
         assert!(description.contains("click Install there; first write one line telling the user that Endeavor is asking for their OK on a page") && !description.contains("ask the user, and"), "{}: {description}", tool["name"]);
     }
-    // A look opens no page.
     let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
     assert_eq!(first["state"], "needs_install", "{first}");
     assert!(front.pages.lock().unwrap().is_empty(), "a look asks nothing");
 
-    // `install: true` opens the page, and with no click in the time the call waits, nothing is installed.
     let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
     assert!(failed && said["error"] == "install_not_answered" && text(&said).contains("haven't answered yet"), "{said}");
     let page = front.pages.lock().unwrap()[0].clone();
     assert!(!text(&said).contains(&page) && !text(&said).contains("http://"), "the link never reaches the agent: {said}");
     assert!(!place.dir.join("root").exists(), "nothing was installed");
     assert!(!place.machines().path().exists(), "nothing was saved");
-    // Asked again at once, the same page stands: no second tab.
     let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
     assert!(failed && said["error"] == "install_not_answered", "{said}");
     assert_eq!(front.pages.lock().unwrap().len(), 1);
     assert!(!place.dir.join("root").exists());
 
-    // A yes, clicked after the call stopped waiting: the next call installs without asking again.
     let (status, shown) = common::front::click(&page, "install");
     assert!(status == 200 && shown.contains("You said yes"), "{status}: {shown}");
     let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
@@ -2447,7 +2311,6 @@ fn where_the_client_cant_show_a_dialog_the_user_says_yes_on_a_page_in_their_brow
     assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
     assert_eq!(front.pages.lock().unwrap().len(), 1);
 
-    // On a runtime that runs, `install: true` is leave to download Julia later: asked about on a page too.
     let used = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!(used["state"], "ready", "{used}");
     front.click_pages(Some("decline"));
@@ -2455,36 +2318,29 @@ fn where_the_client_cant_show_a_dialog_the_user_says_yes_on_a_page_in_their_brow
     assert_eq!((declined["state"].as_str(), declined["install_declined"].clone()), (Some("ready"), json!(true)), "{declined}");
     assert!(text(&declined).contains("clicked Don't install") && text(&declined).contains("10 minutes") && text(&declined).contains("(not a dialog)") && text(&declined).contains("don't say how to get it later") && !text(&declined).contains("Changed your mind"), "{declined}");
     assert_eq!(front.pages.lock().unwrap().len(), 2);
-    // An agent that asks again at once gets the same no, and the user gets no new page.
     front.click_pages(Some("install"));
     let again = front.ok("use_machine", json!({ "machine": "lab", "install": true }));
     assert_eq!(again["install_declined"], true, "{again}");
-    // Asked again, the user wants it now: the answer names the page's own button, the one way.
     assert!(text(&again).contains("already clicked Don't install") && text(&again).contains("\"Changed your mind?\""), "{again}");
     assert_eq!(front.pages.lock().unwrap().len(), 2, "no new page after a no");
 }
 
 #[test]
 fn a_client_that_says_it_shows_dialogs_and_doesnt_gets_the_page() {
-    // A client can say it shows forms and answer the front's dialog with an error, or close it at
-    // once, without showing it (#381). The front asks on the page from then on.
     let place = Place::bare("no-dialog-shown", &[("ENDEAVOR_TEST_PAGE_WAIT_MS", "1500")]);
     let julia = place.julia.display().to_string();
     let mut front = place.front();
     front.dialog = Some("error");
     front.click_pages(Some("install"));
     front.initialize();
-    // The first look tries the dialog, gets the error, and opens no page: the agent hasn't set `install`.
     let first = front.ok("add_machine", json!({ "host": "lab", "julia": julia }));
     assert_eq!(first["state"], "needs_install", "{first}");
     assert_eq!(front.asked.len(), 1);
     assert!(front.pages.lock().unwrap().is_empty(), "a look opens no page");
     assert!(text(&first).contains("on a page that it opens in their browser"), "the agent hears where the user is asked now: {first}");
-    // The tools say so too.
     let listed = front.request("tools/list", json!({}));
     let add = listed["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "add_machine").unwrap().clone();
     assert!(add["inputSchema"]["properties"]["install"]["description"].as_str().unwrap().contains("on a page in their browser"), "{add}");
-    // `install: true` asks on the page, never in the dialog again, and the click installs it.
     let done = front.ok("add_machine", json!({ "host": "lab", "julia": julia, "install": true }));
     assert_eq!((done["state"].as_str(), done["saved"].clone()), (Some("connected"), json!(true)), "{done}");
     assert_eq!(front.asked.len(), 1, "no second dialog");
@@ -2494,9 +2350,6 @@ fn a_client_that_says_it_shows_dialogs_and_doesnt_gets_the_page() {
 
 #[test]
 fn a_dialog_that_goes_unanswered_gets_the_page_too() {
-    // Claude Code's `-p` takes the dialog and never answers it (#396's smoke runs). After a while
-    // the page asks as well, even for a look, since the user is being asked already; the click
-    // installs it, and the dialog is taken down.
     let place = Place::bare("silent-dialog", &[("ENDEAVOR_TEST_DIALOG_SILENT_MS", "300")]);
     let julia = place.julia.display().to_string();
     let mut front = place.front();
@@ -2508,10 +2361,8 @@ fn a_dialog_that_goes_unanswered_gets_the_page_too() {
     assert_eq!(front.asked.len(), 1);
     assert_eq!(front.pages.lock().unwrap().len(), 1);
     assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
-    // The page answered first, so the dialog is taken down.
     let dialog = front.asked[0]["id"].clone();
     assert!(front.notes.iter().any(|n| n["method"] == "notifications/cancelled" && n["params"]["requestId"] == dialog), "{:?}", front.notes);
-    // Silence isn't the end of dialogs: the tools still say Endeavor asks in one.
     let listed = front.request("tools/list", json!({}));
     let add = listed["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "add_machine").unwrap().clone();
     assert!(add["inputSchema"]["properties"]["install"]["description"].as_str().unwrap().contains("Endeavor asks the user in a dialog"), "{add}");
@@ -2519,9 +2370,6 @@ fn a_dialog_that_goes_unanswered_gets_the_page_too() {
 
 #[test]
 fn a_no_on_the_page_holds_without_a_new_dialog() {
-    // The #396 smoke runs: after a no on the page, the agent's retry got a new dialog before the
-    // held no, though the no says Endeavor won't ask again for 10 minutes. A dialog that shows
-    // would ask the user again what they just said.
     let place = Place::bare("held-no", &[("ENDEAVOR_TEST_DIALOG_SILENT_MS", "300")]);
     let julia = place.julia.display().to_string();
     let mut front = place.front();
@@ -2541,11 +2389,9 @@ fn a_no_on_the_page_holds_without_a_new_dialog() {
 fn without_a_dialog_or_a_browser_nothing_is_installed() {
     let place = Place::bare("no-browser-install", &[]);
     let mut command = julia_when_needed_front(&place, &["--folder", &place.project.display().to_string()], &[]);
-    // A test front always has its pages file; this one has none, and opens no browser.
     command.env("ENDEAVOR_TEST_INSTALL_PAGES", "");
     let mut front = common::front::Front::spawn(command);
     front.initialize();
-    // The agent hears before it asks the user for a yes that couldn't be used.
     let listed = front.request("tools/list", json!({}));
     for tool in listed["result"]["tools"].as_array().unwrap().iter().filter(|t| t["inputSchema"]["properties"]["install"].is_object()) {
         let install = tool["inputSchema"]["properties"]["install"]["description"].as_str().unwrap();
@@ -2595,7 +2441,6 @@ fn a_remembered_project_never_installs() {
     front.finish();
 }
 
-/// A `PATH` of fake `curl` and `wget` that only note they were run (and fail), then the system's own.
 fn no_julia_path(place_dir: &Path) -> String {
     let bin = place_dir.join("fake-bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -2614,13 +2459,11 @@ fn julia_is_downloaded_on_the_machine_only_when_the_user_agreed() {
     let place = Place::with("julia-download", &[("PATH", &no_julia_path(&dir)), ("SHELL", "/bin/sh")]);
     let tried = place.dir.join("download-tried");
     let _ = std::fs::remove_file(&tried);
-    // A server that Julia is not on, as far as a login shell can tell.
     let find = Command::new("/bin/sh").args(["-lc", "command -v julia"]).env("HOME", place.dir.join("home")).env("PATH", no_julia_path(&place.dir)).output().unwrap();
     if find.status.success() {
         eprintln!("skipped: a login shell finds julia at {}", String::from_utf8_lossy(&find.stdout).trim());
         return;
     }
-    // No `julia` in the machine's record, so Endeavor looks for it itself.
     place.machines().save(Server { id: "lab".into(), name: "lab".into(), ssh_host: "lab".into(), ..Default::default() }).unwrap();
     let mut front = place.front();
     front.initialize();
@@ -2632,7 +2475,6 @@ fn julia_is_downloaded_on_the_machine_only_when_the_user_agreed() {
     assert_eq!(place.projects(), Value::Null);
     assert_eq!(front.ok("session_status", json!({})).get("machine"), None, "the session stays where it was");
 
-    // With the agreement the download is tried (the fake curl fails), on the same connection.
     let (failed, said) = front.call("use_machine", json!({ "machine": "lab", "install": true }));
     assert!(failed && text(&said).contains("Couldn't download Julia"), "{said}");
     assert!(tried.exists(), "the download was tried");
@@ -2641,8 +2483,6 @@ fn julia_is_downloaded_on_the_machine_only_when_the_user_agreed() {
 
 #[test]
 fn add_machine_with_install_looks_once_and_installs_once() {
-    // The agent's `install: true` isn't the user's yes (#381): the front looks first, without it, to
-    // ask the user about what it names, and connects with the install allowed only on their yes.
     let place = Place::bare("install-once", &[("ENDEAVOR_TEST_ASK", "echo connect >> {dir}/connects")]);
     let mut front = place.front();
     front.initialize();
@@ -2669,13 +2509,11 @@ fn the_agreement_to_the_helper_from_add_machine_is_not_one_to_install_what_a_sta
     }
     let mut front = place.front();
     front.initialize();
-    // The helper is agreed to through add_machine, which says nothing of Julia.
     let added = front.ok("add_machine", json!({ "host": "lab", "install": true, "slurm": false }));
     assert_eq!(added["state"], "connected", "{added}");
     assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists());
     let tries = || std::fs::read_to_string(&tried).unwrap_or_default().lines().count();
 
-    // A use_machine without `install` doesn't download Julia, though the helper was agreed to.
     let first = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!((first["state"].as_str(), first["install"]["items"][0]["kind"].as_str()), (Some("needs_install"), Some("runtime")), "{first}");
     let message = text(&first);
@@ -2683,17 +2521,14 @@ fn the_agreement_to_the_helper_from_add_machine_is_not_one_to_install_what_a_sta
     assert_eq!(tries(), 0, "nothing was downloaded");
     assert_eq!(place.projects(), Value::Null, "the project doesn't remember it");
 
-    // With `install: true` the download is taken (the fake curl fails).
     let (failed, said) = front.call("use_machine", json!({ "machine": "lab", "install": true }));
     assert!(failed && text(&said).contains("Couldn't download Julia"), "{said}");
     assert_eq!(tries(), 1, "the download was tried");
 
-    // That agreement was for that call: the next one without it asks again and downloads nothing.
     let again = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!((again["state"].as_str(), again["install"]["items"][0]["kind"].as_str()), (Some("needs_install"), Some("runtime")), "{again}");
     assert_eq!(tries(), 1, "no second try");
 
-    // A project that remembers the machine doesn't download either.
     std::fs::create_dir_all(place.dir.join("state-home/endeavor")).unwrap();
     let remembered = json!({ place.project.display().to_string(): { "machine": "lab", "folder": null } });
     std::fs::write(place.dir.join("state-home/endeavor/projects.json"), remembered.to_string()).unwrap();
@@ -2723,13 +2558,11 @@ fn one_yes_to_use_machine_covers_the_helper_and_the_runtime_in_one_start() {
     place.machines().save(Server { id: "lab".into(), name: "lab".into(), ssh_host: "lab".into(), ..Default::default() }).unwrap();
     let mut front = place.front();
     front.initialize();
-    // Neither is on the machine: the question names the helper, and says the yes goes on to what the start needs.
     let first = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!(first["install"]["items"].as_array().map(|items| items.iter().map(|i| i["kind"].clone()).collect::<Vec<_>>()), Some(vec![json!("helper")]), "{first}");
     assert!(text(&first).contains("The same yes covers what this start needs after it"), "{first}");
     assert!(!place.dir.join("root").exists() && !tried.exists(), "nothing was installed");
 
-    // One call with `install: true` installs the helper and goes on to the runtime's install (the fake curl fails).
     let (failed, said) = front.call("use_machine", json!({ "machine": "lab", "install": true }));
     assert!(place.dir.join("root").join(endeavor_mcp::embedded::BUILD_VERSION).join("endeavor").exists(), "the helper was installed");
     assert!(failed && text(&said).contains("Couldn't download Julia"), "{said}");
@@ -2746,7 +2579,6 @@ fn stop_machine_asks_before_installing_the_helper_it_needs() {
     let used = front.ok("use_machine", json!({ "machine": "lab" }));
     assert_eq!(used["state"], "ready", "{used}");
     let runtime = place.runtime().expect("a runtime");
-    // The front ends, the runtime goes on, and the machine has only a helper of an older build.
     front.finish();
     wait_for("the helper to end", || place.helpers().is_empty());
     let root = place.dir.join("root");
@@ -2811,7 +2643,6 @@ fn a_runtime_in_use_through_settings_that_changed_can_still_be_stopped_from_this
     front.initialize();
     assert_eq!(front.ok("use_machine", json!({ "machine": "lab" }))["state"], "ready");
     let runtime = place.runtime().unwrap();
-    // The same Julia by another path: other settings, as far as the connection goes.
     let link = place.dir.join("julia-link");
     std::os::unix::fs::symlink(&place.julia, &link).unwrap();
     let mut record = place.machines().find_by_name("lab").unwrap().unwrap();
@@ -2835,7 +2666,6 @@ fn a_stop_that_takes_longer_than_the_call_is_marked_only_when_it_succeeds_and_un
     front.ok("open_notebook", json!({ "path": path }));
     let runtime = place.local_runtime().unwrap();
 
-    // The stop waits for the start lock longer than it will, and fails after the call has answered.
     let held = hold_start_lock(&place.local_state);
     let slow = front.ok("stop_machine", json!({ "machine": "local", "force": true }));
     assert_eq!((slow["stopped"].clone(), slow["message"].as_str().unwrap().contains("taking a while")), (json!(false), true), "{slow}");
@@ -2845,7 +2675,6 @@ fn a_stop_that_takes_longer_than_the_call_is_marked_only_when_it_succeeds_and_un
     assert!(pid_alive(runtime), "Julia runs, and the session can use it again");
     drop(held);
 
-    // The stop gets the lock after the call has answered, and succeeds.
     let held = hold_start_lock(&place.local_state);
     let slow = front.ok("stop_machine", json!({ "machine": "local", "force": true }));
     assert_eq!(slow["stopped"], false, "{slow}");
@@ -2886,7 +2715,6 @@ fn an_update_of_a_saved_machine_that_is_still_connecting_is_not_used_by_anything
     assert_eq!(attempts(&place), 1);
     let listed = front.ok("list_machines", json!({}));
     assert_eq!(listed["machines"][0]["state"], "not connected", "the attempt with other settings is not the saved machine's connection: {listed}");
-    // The session's own machine is reached with its saved settings, by a connection of its own.
     let status = front.ok("session_status", json!({}));
     assert_eq!(status["machine"], "lab", "{status}");
     assert_eq!(attempts(&place), 2, "a new connection, not the one being tried");
@@ -2896,7 +2724,6 @@ fn an_update_of_a_saved_machine_that_is_still_connecting_is_not_used_by_anything
 
 const NO_FOLDER: &str = "Give an absolute path: this server was not told the project folder.";
 
-/// What the local engine was asked, by method and parameters.
 fn local_engine_calls(place: &Place) -> Vec<(String, Value)> {
     let calls = place.local_bridge.seen().into_iter().filter(|s| s.line.starts_with("POST /adapter"));
     calls.map(|s| serde_json::from_slice::<Value>(&s.body).unwrap()).map(|c| (c["method"].as_str().unwrap().to_owned(), c["params"].clone())).collect()
@@ -2921,7 +2748,6 @@ fn a_front_without_a_folder_refuses_relative_paths_before_it_starts_a_runtime_or
     assert!(place_none(&place), "a refused call started a runtime: {:?}", core_of(&place));
     assert!(project_files(&place).is_empty(), "{:?}", project_files(&place));
 
-    // An absolute path starts the runtime and reaches the engine as given.
     let made = place.project.join("made.jl").display().to_string();
     front.call("new_notebook", json!({ "path": made }));
     assert_eq!(local_engine_calls(&place).into_iter().find(|(method, _)| method == "new").map(|(_, params)| params), Some(json!({ "path": made })));
@@ -2930,8 +2756,6 @@ fn a_front_without_a_folder_refuses_relative_paths_before_it_starts_a_runtime_or
     assert_eq!(joined["already_open"], true, "{joined}");
     assert!(place.local_runtime().is_some_and(pid_alive));
 
-    // The running runtime refuses a relative path too, for this session. It works in the home folder, not the project's,
-    // and a session that says nothing about a folder is not refused: its relative paths start there.
     let (failed, said) = front.call("open_notebook", json!({ "path": "a.jl" }));
     assert!(failed && said["message"] == NO_FOLDER, "{said}");
     let home = place.env.iter().find(|(name, _)| name == "HOME").unwrap().1.clone();
@@ -2943,13 +2767,11 @@ fn a_front_without_a_folder_refuses_relative_paths_before_it_starts_a_runtime_or
     let relative: Vec<_> = local_engine_calls(&place).into_iter().filter(|(method, params)| matches!(method.as_str(), "open" | "new") && !params["path"].as_str().is_some_and(|path| path.starts_with('/'))).collect();
     assert!(relative.is_empty(), "the engine was asked to use a relative path: {relative:?}");
 
-    // The tool list asks for absolute paths in the two descriptions that take one.
     let tools = front.request("tools/list", json!({}));
     let described = |name: &str| tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["inputSchema"]["properties"]["path"]["description"].as_str().unwrap().to_owned();
     assert!(described("open_notebook").starts_with("The notebook file, as an absolute path: this server was not told the project folder."), "{}", described("open_notebook"));
     assert!(described("new_notebook").starts_with("Where to create it: an absolute path ending in `.jl` for a Julia notebook"), "{}", described("new_notebook"));
 
-    // The status names no project folder.
     let status = front.ok("session_status", json!({}));
     assert!(status.get("folder").is_none(), "{status}");
     let said = Command::new(env!("CARGO_BIN_EXE_endeavor")).args(["status", "--json", "--state-dir"]).arg(&place.local_state).env_clear().envs(place.env.iter().map(|(k, v)| (k, v))).output().unwrap();
@@ -2973,7 +2795,6 @@ fn a_front_without_a_folder_remembers_no_project_and_a_machine_resolves_relative
     assert_eq!(place.projects(), Value::Null, "nothing is remembered for a session without a folder");
     assert!(place_none(&place), "this computer's runtime was not started");
 
-    // Back on this computer the session has no folder again.
     first.ok("use_machine", json!({ "machine": "local" }));
     let (failed, said) = first.call("open_notebook", json!({ "path": "machine.jl" }));
     assert!(failed && said["message"] == NO_FOLDER, "{said}");
@@ -2982,7 +2803,6 @@ fn a_front_without_a_folder_remembers_no_project_and_a_machine_resolves_relative
     assert_eq!(first.ok("open_notebook", json!({ "path": "machine.jl" }))["already_open"], true, "and the machine's folder is the one it was told");
     first.finish();
 
-    // A second front without a folder does not come up on the machine.
     let mut second = place.front_without_folder();
     second.initialize();
     let status = second.ok("session_status", json!({}));
@@ -3027,14 +2847,11 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     }
     assert!(!front.said().iter().any(|line| line.contains(TOKEN)), "nor what it writes to the agent's MCP log: {:?}", front.said());
 
-    // `endeavor open` prints the link only to a terminal: an agent's shell gets no token.
     let out = Command::new(env!("CARGO_BIN_EXE_endeavor")).args(["open", "--state-dir"]).arg(&place.local_state).env_clear().envs(place.env.iter().map(|(k, v)| (k, v))).output().unwrap();
     let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(!out.status.success() && !stdout.contains(TOKEN) && !stderr.contains(TOKEN) && stderr.contains("in your own terminal"), "{stdout} {stderr}");
     front.finish();
 
-    // A client that draws views gets the notebook beside the chat, and no tab; one that draws no
-    // card after all (Claude's desktop app, Chat tab, #311) asks for the browser with `in_browser`.
     std::fs::remove_file(&opened).unwrap();
     let mut front = start_front(&place, &[("ENDEAVOR_TEST_BROWSER", opened.to_str().unwrap())]);
     front.request("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": { "extensions": { "io.modelcontextprotocol/ui": { "mimeTypes": ["text/html;profile=mcp-app"] } } }, "clientInfo": { "name": "Viewer", "version": "0" } }));
@@ -3044,7 +2861,6 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     let tab = front.ok("open_notebook", json!({ "path": path, "in_browser": true }));
     assert_eq!((tab.get("shown_beside_chat"), tab["opened_in_browser"].clone()), (None, json!(true)), "{tab}");
     assert_eq!(std::fs::read_to_string(&opened).unwrap().lines().count(), 1, "in_browser opens the tab");
-    // Its connection serves every conversation (Claude's desktop app), so a second notebook isn't refused.
     let other = place.project.join("other.jl").display().to_string();
     std::fs::write(&other, "### A Pluto.jl notebook ###").unwrap();
     place.local_bridge.set_notebooks(vec![notebook_json(NOTEBOOK, &path), notebook_json("aaaaaaaa-0000-0000-0000-000000000002", &other)]);
@@ -3052,8 +2868,6 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     assert_eq!(second["path"].as_str(), Some(other.as_str()), "{second}");
     front.finish();
 
-    // Where no browser can be opened, the agent is told so, and gives the link, with the port forward
-    // for when it doesn't load: over ssh, the user's browser is on another computer.
     let mut front = start_front(&place, &[("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")]);
     front.initialize();
     let shut = front.ok("open_notebook", json!({ "path": path }));
@@ -3065,8 +2879,6 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     assert!(!shut.to_string().contains(TOKEN) && !shut.to_string().contains(&pages), "{shut}");
     front.finish();
 
-    // A browser that should open and doesn't (the opener fails: here the stand-in can't write its
-    // file) gets the same note, not a bare link (#299).
     let mut front = start_front(&place, &[("ENDEAVOR_TEST_BROWSER", place.dir.to_str().unwrap())]);
     front.initialize();
     let failed = front.ok("open_notebook", json!({ "path": path }));

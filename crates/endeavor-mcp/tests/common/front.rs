@@ -1,5 +1,3 @@
-//! An `endeavor mcp` as a harness runs it: JSON-RPC lines on its stdin and stdout.
-
 #![allow(dead_code)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -19,30 +17,19 @@ pub struct Front {
     replies: Receiver<String>,
     stderr: Arc<Mutex<Vec<String>>>,
     id: u64,
-    /// How the client answers a dialog the front shows (MCP elicitation): "accept", "decline" or
-    /// "cancel", "error" for a client that says it can show one and answers with an error (#381), or
-    /// "silent" for one that never answers.
-    /// None: the client can't show one.
     pub dialog: Option<&'static str>,
-    /// The dialogs the front asked for, in order.
     pub asked: Vec<Value>,
-    /// The notifications the front sent, in order (`notifications/cancelled` takes a dialog down).
     pub notes: Vec<Value>,
-    /// What the user clicks on an install page the front opens in the browser, where the client
-    /// can't show a dialog: "install" (the default, as a user who agreed) or "decline"; None clicks nothing.
     pub page: Arc<Mutex<Option<&'static str>>>,
-    /// The install pages the front opened, in order.
     pub pages: Arc<Mutex<Vec<String>>>,
     done: Arc<AtomicBool>,
 }
 
-/// The file of install pages of a front that no test gave one, so that they can be clicked.
 fn browser_file() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     std::env::temp_dir().join(format!("endeavor-test-browser-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst)))
 }
 
-/// Click `answer` on the install page at `url`, as the user's browser does.
 pub fn click(url: &str, answer: &str) -> (u16, String) {
     let rest = url.strip_prefix("http://127.0.0.1:").unwrap_or_else(|| panic!("not an install page: {url}"));
     let (port, path) = rest.split_once('/').unwrap();
@@ -57,10 +44,8 @@ pub fn click(url: &str, answer: &str) -> (u16, String) {
 }
 
 impl Front {
-    /// Run `command` (an `endeavor mcp …`, with its environment as the test wants it) with its stdio piped.
     pub fn spawn(mut command: Command) -> Front {
         command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        // Where the front "opens" its install pages, unless the test chose the file.
         let browser = match command.get_envs().find(|(name, _)| *name == "ENDEAVOR_TEST_INSTALL_PAGES").and_then(|(_, value)| value) {
             Some(file) => PathBuf::from(file),
             None => {
@@ -89,7 +74,6 @@ impl Front {
         });
         let stdin = child.stdin.take();
         let (page, pages, done) = (Arc::new(Mutex::new(Some("install"))), Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicBool::new(false)));
-        // The user, at the browser: each install page the front opens is clicked as `page` says.
         {
             let (page, pages, done) = (page.clone(), pages.clone(), done.clone());
             std::thread::spawn(move || {
@@ -111,7 +95,6 @@ impl Front {
         Front { child: Some(child), stdin, replies, stderr, id: 0, dialog: None, asked: Vec::new(), notes: Vec::new(), page, pages, done }
     }
 
-    /// Set what the user clicks on the install pages from now on.
     pub fn click_pages(&self, answer: Option<&'static str>) {
         *self.page.lock().unwrap() = answer;
     }
@@ -120,7 +103,6 @@ impl Front {
         writeln!(self.stdin.as_mut().unwrap(), "{message}").unwrap();
     }
 
-    /// A request and its reply, whatever else arrives meanwhile.
     pub fn request(&mut self, method: &str, params: Value) -> Value {
         self.id += 1;
         let id = self.id;
@@ -132,7 +114,6 @@ impl Front {
                 self.asked.push(reply.clone());
                 let action = self.dialog.expect("a dialog from a front told the client can't show one");
                 if action == "silent" {
-                    // Takes it and never answers, as Claude Code's `-p` does.
                 } else if action == "error" {
                     self.send(json!({ "jsonrpc": "2.0", "id": reply["id"], "error": { "code": -32601, "message": "Method not found" } }));
                 } else {
@@ -157,13 +138,11 @@ impl Front {
         reply
     }
 
-    /// A tool call: whether it failed, and the text of its first content as JSON (else as a string).
     pub fn call(&mut self, name: &str, arguments: Value) -> (bool, Value) {
         let (failed, content) = self.contents(name, arguments);
         (failed, content[0].clone())
     }
 
-    /// A tool call: whether it failed, and each content's text as JSON (else as a string).
     pub fn contents(&mut self, name: &str, arguments: Value) -> (bool, Vec<Value>) {
         let reply = self.request("tools/call", json!({ "name": name, "arguments": arguments }));
         let content = reply["result"]["content"].as_array().unwrap_or_else(|| panic!("{name}: {reply}"));
@@ -177,7 +156,6 @@ impl Front {
         result
     }
 
-    /// Close its input, as a harness does when the session ends, and wait for it to exit.
     pub fn finish(mut self) {
         drop(self.stdin.take());
         let status = self.child.take().unwrap().wait().unwrap();

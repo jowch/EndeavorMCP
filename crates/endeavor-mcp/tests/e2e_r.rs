@@ -1,19 +1,3 @@
-//! An R notebook end to end, with real R and no Julia: `endeavor serve`, then
-//! an agent opens an Ember notebook, which starts R's adapter with Ember in it;
-//! it reads, edits and runs a cell, and the browser reaches Ember's page at
-//! `/ember/` through the runtime's port.
-//!
-//! Julia is given as a path that doesn't exist, so the test fails if anything
-//! tries to start it: an R user needs no Julia.
-//!
-//! Ignored by default, like e2e_julia; R is `Rscript` on the PATH. The first run installs Ember's latest build into
-//! ~/.cache/endeavor/r/ember, which needs Ember's r-universe repository, and CRAN for any package R lacks
-//! (a debug build installs from `ENDEAVOR_TEST_EMBER_REPOSITORY` instead when it's set). A second test
-//! runs `runtime/r/install.R` against stand-in builds: an update, a build that doesn't load, and offline.
-//! A third runs `runtime/r/test/unit.R`, the adapter's pure functions on hand-made values.
-//!
-//!     cargo test -p endeavor-mcp --test e2e_r -- --ignored --nocapture
-
 #![cfg(unix)]
 
 mod common;
@@ -39,8 +23,6 @@ fn recorded_pid(state: &Path) -> Option<i32> {
     serde_json::from_str::<Value>(&text).ok()?["pid"].as_i64().map(|p| p as i32).filter(|&p| p > 1)
 }
 
-/// Whatever happens, no Julia stays behind. A failed test prints the runtime's
-/// log first, as the next run starts a fresh one (#236).
 struct Cleanup {
     state: PathBuf,
     children: Vec<Child>,
@@ -63,7 +45,6 @@ impl Drop for Cleanup {
     }
 }
 
-/// `endeavor ARGS` with the test's own state, cache, depot and julia.
 fn command(args: &[&str], work: &Path, julia: &Path, depot: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
     command
@@ -80,7 +61,6 @@ fn command(args: &[&str], work: &Path, julia: &Path, depot: &str) -> Command {
     command
 }
 
-/// Lines of a child's stream as they come.
 fn lines(stream: impl Read + Send + 'static) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -93,9 +73,6 @@ fn lines(stream: impl Read + Send + 'static) -> mpsc::Receiver<String> {
     rx
 }
 
-/// POST a JSON-RPC message to `/mcp` with the bearer token and, once it has
-/// one, the session id, as an agent configured from serve's output does: the
-/// response's head and body.
 fn post(port: u16, token: &str, session: Option<&str>, message: &Value) -> (String, String) {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
@@ -128,7 +105,6 @@ struct Agent {
     port: u16,
     token: String,
     id: u64,
-    /// The `Mcp-Session-Id` from `initialize`, sent back on every request after.
     session: Option<String>,
 }
 
@@ -164,8 +140,6 @@ impl Agent {
     }
 }
 
-/// Tomorrow in UTC as YYYY-MM-DD: a day Package Manager hasn't published (days to a civil date,
-/// after Howard Hinnant's `civil_from_days`).
 fn tomorrow() -> String {
     let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 / 86400 + 1;
     let z = days + 719468;
@@ -179,7 +153,6 @@ fn tomorrow() -> String {
     format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
 }
 
-/// A MessagePack map of string fields and an empty `body`: Pluto's message shape, which Ember's is.
 fn msgpack(fields: &[(&str, &str)]) -> Vec<u8> {
     let mut out = vec![0x80 | (fields.len() as u8 + 1)];
     let string = |out: &mut Vec<u8>, s: &str| {
@@ -211,7 +184,6 @@ fn step<T>(name: &str, f: impl FnOnce() -> T) -> T {
 const A: &str = "0b7d0000-0000-4000-8000-000000000001";
 const B: &str = "0b7d0000-0000-4000-8000-000000000002";
 
-/// The app's `/endeavor/events` stream.
 fn events(port: u16, token: &str) -> BufReader<TcpStream> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
@@ -219,7 +191,6 @@ fn events(port: u16, token: &str) -> BufReader<TcpStream> {
     BufReader::new(stream)
 }
 
-/// The first event on `events` that `done` holds for.
 fn next_event(events: &mut BufReader<TcpStream>, done: impl Fn(&Value) -> bool) -> Value {
     let mut line = String::new();
     loop {
@@ -256,8 +227,6 @@ fn an_r_notebook_through_the_runtime() {
     )
     .unwrap();
 
-    // R comes from a shell line, as `module load R` would give it: the line puts a folder on the PATH whose
-    // Rscript says it ran and then runs R's own.
     let real = String::from_utf8(Command::new("sh").args(["-c", "command -v Rscript"]).output().unwrap().stdout).unwrap().trim().to_owned();
     let module = fresh(work.join("module r"));
     let ran = module.join("ran");
@@ -290,7 +259,6 @@ fn an_r_notebook_through_the_runtime() {
     agent.initialize();
 
     let notebook = step("opening an R notebook starts R and Ember, in safe preview", || {
-        // The first time, Ember installs in the background into a library of Endeavor's own.
         assert_eq!(app_call(port, &token, "endeavor/r_status")["result"], json!({ "state": "not_started" }), "asking starts nothing");
         let deadline = Instant::now() + Duration::from_secs(1200);
         let opened = loop {
@@ -298,11 +266,8 @@ fn an_r_notebook_through_the_runtime() {
             if !failed && opened.get("error").is_none() {
                 break opened;
             }
-            // Still installing is a normal result, not a failure. The app sees the same step, whoever waits.
             assert!(!failed && matches!(opened["error"].as_str(), Some("r_installing" | "notebook_opening")) && Instant::now() < deadline, "{opened}");
             let status = app_call(port, &token, "endeavor/r_status")["result"].clone();
-            // It may have moved on since the call answered: R started, or the install finished with no
-            // call waiting, which reads `not_started` until the next call (#148).
             if opened["error"] == "r_installing" {
                 let step = status["step"].as_str().unwrap_or_default();
                 let starting = status["state"] == "starting" && ["Installing Ember for R notebooks", "Starting R"].contains(&step);
@@ -310,14 +275,10 @@ fn an_r_notebook_through_the_runtime() {
             }
             std::thread::sleep(Duration::from_secs(5));
         };
-        // R runs. A newer Ember published since the last run may still be installing for the next
-        // start, which r_status says with `updating` (#206).
         let mut status = app_call(port, &token, "endeavor/r_status")["result"].clone();
-        // It says which R runs, so the app needn't work that out.
         let r = status.as_object_mut().unwrap().remove("r").unwrap_or_default();
         assert!(r["rscript"].as_str().is_some_and(|p| !p.is_empty()) && r["endeavors"] == false, "{r}");
         assert!(status == json!({ "state": "ready" }) || status == json!({ "state": "ready", "updating": true }), "{status}");
-        // A warning here is `ember_previous`: Ember's newest build didn't work, which the daily run is for.
         assert_eq!(opened.get("warnings"), None, "{opened}");
         let notebook = opened["notebook_id"].as_str().unwrap().to_owned();
         assert_eq!((&opened["path"], &opened["execution_allowed"]), (&json!(folder.join("growth.R").display().to_string()), &json!(false)), "{opened}");
@@ -353,8 +314,6 @@ fn an_r_notebook_through_the_runtime() {
             assert_eq!(reply["result"]["isError"], false, "{name}: {reply}");
             reply["result"]["structuredContent"].clone()
         };
-        // R's adapter answers `page_bundle` with Ember's `view_page()`; the core splits it as it does
-        // Pluto's, and refuses a page that loads scripts from outside.
         let (mut text, mut offset) = (String::new(), 0);
         loop {
             let part = view("notebook_page", json!({ "notebook_id": notebook, "offset": offset, "size": 1_000_000 }));
@@ -397,16 +356,12 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 50" }));
         let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
-        // The result says the notebook is lazy and names its stale cells (#196).
         assert_eq!(ran["stale_cells"], json!([B]), "{ran}");
         assert!(ran["warnings"].to_string().contains("lazy_mode::"), "{ran}");
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": B }));
-        // growth.R is in Ember's lazy mode, so a run leaves its dependents stale; in autorun Ember would
-        // rerun B on its own and the flag would clear a moment later. B still shows its result from x = 41.
         assert!(read["stale"] == true && read["output"].as_str().unwrap().contains("42"), "{read}");
         let code = agent.ok("read_notebook_code", json!({ "notebook_id": notebook }));
         assert_eq!(code["stale_cell_ids"], json!([B]), "{code}");
-        // Back as it was, run, for the steps after.
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": A, "wait_for_completion": true }));
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
@@ -425,7 +380,6 @@ fn an_r_notebook_through_the_runtime() {
             app_call_with(port, &token, "endeavor/restore_cells", json!({ "notebook_id": notebook, "cells": cells }))["result"].clone()
         };
         assert_eq!(restore("x <- 8"), json!({ "restored": [], "changed": [A] }), "A isn't as the turn left it");
-        // As the agent wrote it, with the trailing newline Ember doesn't keep.
         assert_eq!(restore("x <- 7\n"), json!({ "restored": [A, c], "changed": [] }));
         let order = agent.ok("get_cell_order", json!({ "notebook_id": notebook }));
         assert_eq!(order["cell_ids"], json!([A, B]), "{order}");
@@ -441,13 +395,11 @@ fn an_r_notebook_through_the_runtime() {
         let changed: Vec<&Value> = ran["outputs"]["changed"].as_array().unwrap().iter().map(|c| &c["cell_id"]).collect();
         assert_eq!(changed, [&json!(A), &json!(B)], "{ran}");
         assert!(ran["outputs"]["changed"][1]["output_summary"].as_str().unwrap().contains('6'), "{ran}");
-        // Back as it was, for the steps after.
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));
         let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
         assert_eq!(ran["affected_cells"], json!([A, B]), "{ran}");
         assert_eq!(ran["warnings"], json!([format!("also_ran::Also ran {A}: cells this run needs that were edited or stale since they last ran.")]), "{ran}");
 
-        // A stale ancestor, its code unchanged: Ember runs it first too, and the receipt says so.
         let c = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "w <- x * 2", "after_cell_id": B }))["cell_id"].as_str().unwrap().to_owned();
         let d = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "w + 1", "after_cell_id": c }))["cell_id"].as_str().unwrap().to_owned();
         let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": d, "wait_for_completion": true }));
@@ -457,10 +409,8 @@ fn an_r_notebook_through_the_runtime() {
         let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": d, "wait_for_completion": true }));
         assert_eq!((&ran["affected_cells"], &ran["pending_run"]), (&json!([c, d]), &json!([])), "{ran}");
         assert_eq!(ran["warnings"][0], json!(format!("also_ran::Also ran {c}: cells this run needs that were edited or stale since they last ran.")), "{ran}");
-        // B is still stale from the run of A, and the notebook is lazy (#196).
         assert_eq!(ran["stale_cells"], json!([B]), "{ran}");
         assert!(ran["outputs"]["changed"][1]["output_summary"].as_str().unwrap().contains("15"), "{ran}");
-        // Back as it was: x is 41 and B ran with it; C and D gone.
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": A, "code": "x <- 41" }));
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": B, "wait_for_completion": true }));
         agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": d }));
@@ -519,7 +469,6 @@ fn an_r_notebook_through_the_runtime() {
         let ran = agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": picks, "wait_for_completion": true }));
         let waiting = &ran["waiting_for_input"];
         assert_eq!((&waiting["cell_id"], &waiting["prompt"], &waiting["choices"]), (&picks, &json!("Selection: "), &json!(["red", "blue"])), "{ran}");
-        // A wrong choice: menu() asks again, with a new prompt, so the first one's id is refused.
         agent.ok("answer_prompt", json!({ "notebook_id": notebook, "cell_id": picks, "text": "green", "prompt_id": waiting["prompt_id"], "wait_for_completion": true }));
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": picks }));
         assert!(read["waiting_for_input"]["prompt_id"].is_number() && read["waiting_for_input"]["prompt_id"] != waiting["prompt_id"], "{read}");
@@ -537,10 +486,6 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!((&stopped["stopped"], &stopped["still_running"]), (&json!([asks]), &json!([])), "{stopped}");
         let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": asks }));
         assert!(read["errored"] == true && read.get("waiting_for_input").is_none(), "{read}");
-        // Asked again after that error: the cell reads as this run, with what it printed before the
-        // question, not as the interrupted run (trial 20).
-        // A cell after it that failed on its last run waits in the queue with that error, which
-        // isn't this run's: the run is still running.
         let after = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "said <- stop(\"not yet\")", "after_cell_id": asks }))["cell_id"].clone();
         agent.ok("execute_cell", json!({ "notebook_id": notebook, "cell_id": after, "wait_for_completion": true }));
         agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": after, "code": "said <- nchar(who)" }));
@@ -575,7 +520,6 @@ fn an_r_notebook_through_the_runtime() {
     });
 
     step("new_notebook makes an R notebook from an .R path; a warning reads as one", || {
-        // A session works on one notebook, so another session makes this one.
         let mut agent = Agent::new(port, &token);
         agent.initialize();
         let made = agent.ok("new_notebook", json!({ "path": "fresh.R" }));
@@ -622,7 +566,6 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
         let output = |agent: &mut Agent| agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": down }));
         assert!(output(&mut agent)["output"].as_str().unwrap().contains('2'), "the first run");
-        // Only the upstream cell is run; Ember queues the dependent as its result comes in.
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 2" }));
         agent.ok("submit_changes", json!({ "notebook_id": id }));
         let read = output(&mut agent);
@@ -630,29 +573,23 @@ fn an_r_notebook_through_the_runtime() {
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 3" }));
         agent.ok("submit_changes", json!({ "notebook_id": id }));
         let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
-        // The cells that ran while it waited: the dependent, and `up` too if it was still running then.
         let ran = |waited: &Value| waited["affected_cells"].as_array().unwrap().contains(&down);
         assert!(waited["execution"]["status"] == "completed" && ran(&waited), "{waited}");
         let read = output(&mut agent);
         assert!(read["running"] == false && read["output"].as_str().unwrap().contains('4'), "the waited submit with nothing staged waited for it: {read}");
-        // And says when the dependent failed (#171).
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 4" }));
         agent.ok("submit_changes", json!({ "notebook_id": id }));
         let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
         assert!(waited["execution"]["status"] == "errored" && ran(&waited), "{waited}");
         let failed = waited["outputs"]["changed"].as_array().unwrap().iter().find(|c| c["cell_id"] == down).cloned();
         assert!(failed.is_some_and(|c| c["output_summary"].as_str().unwrap().contains("boom")), "{waited}");
-        // A waited run of the edit reports the dependent that reran with it, and its error (#192).
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 5" }));
         let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
         assert!(waited["execution"]["status"] == "errored" && waited["affected_cells"] == json!([up, down]), "{waited}");
-        // A run not waited for names it as what will follow.
         let edited = agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1", "run_after": true }));
         assert_eq!(edited["execution"]["will_run"], json!([down]), "{edited}");
         let read = output(&mut agent);
         assert!(read["running"] == false && read["output"].as_str().unwrap().contains('2'), "{read}");
-        // A rename: the graph no longer links the dependent to `up`, but Ember reruns it, as it
-        // read the name `up` dropped, and it fails. The run goes on until it has, and reports it (#228).
         let gone = |read: &Value| read["running"] == false && read["errored"] == true && read["output"].as_str().unwrap().contains("object 'a' not found");
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "b <- 1" }));
         let waited = agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
@@ -666,8 +603,6 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(edited["execution"]["will_run"], json!([down]), "{edited}");
         let read = output(&mut agent);
         assert!(gone(&read), "the read waited for the old name's reader: {read}");
-        // A rename into a name another cell defines: Ember queues the reader with the run's
-        // cells, and the waited run reports it too.
         agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": up, "code": "a <- 1" }));
         agent.ok("add_cell", json!({ "notebook_id": id, "code": "z <- 5", "after_cell_id": down }));
         agent.ok("submit_changes", json!({ "notebook_id": id, "wait_for_completion": true }));
@@ -740,17 +675,13 @@ fn an_r_notebook_through_the_runtime() {
         let (refused, said) = agent.call("apply_package_update", json!({ "notebook_id": id, "date": "2026-06-02" }));
         assert!(refused && said.to_string().contains("no_preview"), "{said}");
 
-        // At its own date nothing would change, and the notebook is seen to have packages (#269).
         let same = preview(&mut agent, Some("2026-06-01"));
         assert!(same["status"] == "ready" && same["message"].as_str().unwrap().starts_with("Nothing would change: every package"), "{same}");
 
-        // Two years back, jsonlite was older: the preview says so, and nothing changes.
         let old = preview(&mut agent, Some("2024-06-03"));
         assert_eq!(old["status"], "ready", "{old}");
         assert!(old["changes"].as_array().unwrap().iter().any(|c| c["name"] == "jsonlite" && c["to"] != c["from"]), "{old}");
         assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "a preview changes nothing");
-        // A package added since the preview: the apply would change more than it showed, so it's
-        // refused, and a new preview shows the package too.
         agent.ok("read_notebook_code", json!({ "notebook_id": id }));
         agent.ok("add_cell", json!({ "notebook_id": id, "code": "library(base64enc)", "after_cell_id": lib }));
         let (refused, said) = agent.call("apply_package_update", json!({ "notebook_id": id, "date": "2024-06-03" }));
@@ -759,9 +690,6 @@ fn an_r_notebook_through_the_runtime() {
         assert!(again["changes"].as_array().unwrap().iter().any(|c| c["name"] == "base64enc"), "{again}");
         assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "the refused apply moved nothing");
 
-        // One package pinned to an older version (#266): Ember finds the date, the last day jsonlite
-        // 1.8.8 was current, and nothing changes yet. A version CRAN never released has no date,
-        // and a package that isn't in the notebook is refused.
         let pin = |agent: &mut Agent, version: Option<&str>| {
             let mut args = json!({ "notebook_id": id, "package": "jsonlite" });
             if let Some(version) = version {
@@ -782,13 +710,10 @@ fn an_r_notebook_through_the_runtime() {
         assert!(("2023-12-04".."2024-10-01").contains(&day), "jsonlite 1.8.8 was current then: {pinned}");
         assert!(pinned["changes"].as_array().unwrap().iter().any(|c| c["name"] == "jsonlite" && c["to"] == "1.8.8"), "{pinned}");
         assert!(pinned["message"].as_str().unwrap().contains("moves every package"), "{pinned}");
-        // No version is CRAN's newest, not the pin just previewed: the notebook already has it.
         let newest = pin(&mut agent, None);
         assert!(newest["status"] == "failed" && newest["reason"].as_str().unwrap().contains("already at"), "{newest}");
         let never = pin(&mut agent, Some("0.0.1"));
         assert_eq!(never["status"], "failed", "{never}");
-        // A package a cell has just added isn't in the lock until Ember resolves it: the preview
-        // waits for that rather than calling it not the notebook's (#267).
         agent.ok("read_notebook_code", json!({ "notebook_id": id }));
         agent.ok("add_cell", json!({ "notebook_id": id, "code": "library(mime)", "after_cell_id": lib }));
         let args = json!({ "notebook_id": id, "package": "mime", "version": "0.12" });
@@ -805,14 +730,12 @@ fn an_r_notebook_through_the_runtime() {
         assert!(refused && said.to_string().contains("not_updatable"), "{said}");
         assert_eq!(agent.ok("list_notebooks", json!({})).as_array().unwrap().iter().find(|nb| nb["notebook_id"] == id.as_str()).unwrap()["package_date"], "2026-06-01", "a package's preview changes nothing");
 
-        // A day not published yet is previewed at the newest one that is (#247). Tomorrow never is.
         let ahead = tomorrow();
         let unpublished = preview(&mut agent, Some(&ahead));
         assert_eq!(unpublished["status"], "ready", "{unpublished}");
         assert!(unpublished["date"].as_str().unwrap() < ahead.as_str(), "{unpublished}");
         assert!(unpublished["message"].as_str().unwrap().contains("isn't published yet"), "{unpublished}");
 
-        // Updating is today's date: applied, the file's date moves and the cell sees the version the preview named.
         let today = preview(&mut agent, None);
         assert_eq!(today["status"], "ready", "{today}");
         let date = today["date"].as_str().unwrap().to_owned();
@@ -848,8 +771,6 @@ fn an_r_notebook_through_the_runtime() {
         assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "E" })).get("notes"), None);
     });
 
-    // `library(emberui)` alone installs emberui from the jowch r-universe: Ember writes the
-    // `[sources]` entry itself (Ember #518), so this step needs an Ember build with that.
     step("set_input sets an input, as moving its widget does: its readers rerun, its own cell doesn't (#36)", || {
         std::fs::write(
             folder.join("inputs.R"),
@@ -867,11 +788,9 @@ fn an_r_notebook_through_the_runtime() {
             if agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "N" }))["output"].as_str().is_some_and(|o| o.contains("10")) {
                 break;
             }
-            // emberui installs first, which can outlast one call's wait.
             assert!(started.elapsed() < Duration::from_secs(600), "the notebook never ran: {ran}");
             agent.ok("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }));
         }
-        // Only m, on the cell's last line, can be moved on the page (EndeavorMCP #280).
         const UNMOVABLE: &str = " Not movable on the page: only the input on the cell's last line is. Give it its own cell, or group the cell's inputs with input_list().";
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "I" }));
         assert_eq!(read["inputs"], json!([format!("n: slider 1 to 10, value 5{UNMOVABLE}"), "m: select of A = 1, B = 2, value 1"]), "{read}");
@@ -880,13 +799,11 @@ fn an_r_notebook_through_the_runtime() {
         let set = agent.ok("set_input", json!({ "notebook_id": id, "name": "n", "value": 7, "wait_for_completion": true }));
         assert_eq!((&set["affected_cells"], &set["execution"]["status"]), (&json!(["N"]), &json!("completed")), "{set}");
         assert!(set["outputs"]["changed"][0]["output_summary"].as_str().unwrap().contains("14"), "{set}");
-        // JSON's 2 is the choice 2.
         let set = agent.ok("set_input", json!({ "notebook_id": id, "name": "m", "value": 2, "wait_for_completion": true }));
         assert!(set["outputs"]["changed"][0]["output_summary"].as_str().unwrap().contains("102"), "{set}");
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "I" }));
         assert_eq!(read["inputs"], json!([format!("n: slider 1 to 10, value 7 (default 5){UNMOVABLE}"), "m: select of A = 1, B = 2, value 2 (default 1)"]), "{read}");
         assert_eq!(read["output"], output, "the input's own cell didn't rerun: {read}");
-        // The readers say their result used a moved value; the input's own cell has its default instead.
         assert!(read.get("notes").is_none_or(|n| n == &json!([])), "{read}");
         let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": "N" }));
         assert_eq!(read["notes"], json!(["uses_moved_input::This result used n = 7, set on the page or with set_input. The file's default is 5, so a rerun of the file gives other results."]), "{read}");
@@ -976,7 +893,6 @@ fn an_r_notebook_through_the_runtime() {
         // SAFETY: plain syscall.
         unsafe { libc::kill(r_pid as i32, libc::SIGKILL) };
         common::wait_for("R's notebook to leave the list", || agent.ok("list_notebooks", json!({})) == json!([]));
-        // The agent, on its next call on the notebook, and the app hear that R ended, and why.
         let (failed, read) = agent.call("read_cell", json!({ "notebook_id": notebook, "cell_id": A }));
         let message = read["message"].as_str().unwrap_or_default();
         assert!(failed && read["error"] == "notebook_closed" && message.starts_with(&format!("{growth} closed because R ended (signal: 9")), "{read}");
@@ -989,7 +905,6 @@ fn an_r_notebook_through_the_runtime() {
         let now = next_event(&mut events(port, &token), |_| true);
         let left: Vec<&str> = now["engine_ended"].as_array().unwrap().iter().filter_map(|e| e["path"].as_str()).collect();
         assert!(!left.contains(&growth.as_str()), "opened again: {now}");
-        // The app's Stop notebook on one the user leaves closed lets it go.
         assert!(!left.is_empty(), "the other R notebooks closed too: {now}");
         for path in left {
             assert_eq!(app_call_with(port, &token, "endeavor/stop_notebook", json!({ "path": path }))["result"]["stopped"], true);
@@ -1020,15 +935,10 @@ fn an_r_notebook_through_the_runtime() {
     });
 }
 
-/// A repository like Ember's r-universe one, with one build of a stand-in `ember` whose
-/// `ember::build()` says `label`; a broken build doesn't load. The index lists the file's SHA256, or
-/// `listed` instead when given. The name install.R gives the build: the first 12 characters of the
-/// listed SHA256.
 fn stand_in_repository(repository: &Path, label: &str, broken: bool, listed: Option<&str>) -> String {
     stand_in_importing(repository, label, broken, listed, "jsonlite")
 }
 
-/// The same, with a stand-in that imports `imports`.
 fn stand_in_importing(repository: &Path, label: &str, broken: bool, listed: Option<&str>, imports: &str) -> String {
     let source = fresh(repository.with_extension("source")).join("ember");
     std::fs::create_dir_all(source.join("R")).unwrap();
@@ -1045,8 +955,6 @@ fn stand_in_importing(repository: &Path, label: &str, broken: bool, listed: Opti
     sha[..12].to_owned()
 }
 
-/// A package `name` at `version` that imports `imports` (in its NAMESPACE too, so loading it loads
-/// them), built into the CRAN-like repository `cran`, whose index is written again.
 fn cran_package(cran: &Path, name: &str, version: &str, imports: &str) {
     let source = fresh(cran.with_extension("source")).join(name);
     std::fs::create_dir_all(source.join("R")).unwrap();
@@ -1061,10 +969,6 @@ fn cran_package(cran: &Path, name: &str, version: &str, imports: &str) {
     assert!(Command::new("Rscript").args(["-e", "tools::write_PACKAGES('.')"]).current_dir(&contrib).status().unwrap().success());
 }
 
-/// A dependency R can load but that is older than Ember needs is installed into `deps`, where it
-/// shadows the old copy, and Ember installs (#90). Before, it was left as it was, Ember failed to load,
-/// and with no Ember installed every start tried again. (A package from CRAN that needs a newer one is
-/// already fine: `install.packages` brings the newer one along.)
 #[test]
 #[ignore = "starts real R: cargo test -p endeavor-mcp --test e2e_r -- --ignored"]
 fn a_dependency_too_old_for_ember_is_installed_beside_it() {
@@ -1074,7 +978,6 @@ fn a_dependency_too_old_for_ember_is_installed_beside_it() {
     }
     let work = fresh(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-r-old-dependency"));
     let (repository, folder, cran, site) = (work.join("repository"), work.join("ember"), work.join("cran"), fresh(work.join("site")));
-    // CRAN has 2.0; the user's library has 1.0, which loads.
     cran_package(&cran, "endeavorlow", "1.0", "");
     let old = cran.join("src/contrib/endeavorlow_1.0.tar.gz");
     assert!(Command::new("R").args(["CMD", "INSTALL", "--no-test-load", "-l"]).arg(&site).arg(&old).stdout(Stdio::null()).status().unwrap().success());
@@ -1095,11 +998,6 @@ fn a_dependency_too_old_for_ember_is_installed_beside_it() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "a 2.0", "{}", String::from_utf8_lossy(&out.stderr));
 }
 
-/// A package install.R installs into `deps` loads there although an older copy of what it needs was
-/// loaded by the checks before the install (#216). `endeavormid`, already installed, loads the user's
-/// `endeavorlow` 1.0; `endeavortop` needs 2.0, which goes into `deps` with it. Checked in the same R,
-/// `endeavortop` failed on the loaded 1.0 and the start ended with "Couldn't install"; the next start
-/// worked.
 #[test]
 #[ignore = "starts real R: cargo test -p endeavor-mcp --test e2e_r -- --ignored"]
 fn a_package_needing_a_newer_copy_than_one_already_loaded_installs() {
@@ -1133,8 +1031,6 @@ fn a_package_needing_a_newer_copy_than_one_already_loaded_installs() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "a 1.0 2.0", "{}", String::from_utf8_lossy(&out.stderr));
 }
 
-/// The adapter's pure functions (the install status, the errors' fixes), checked by
-/// `runtime/r/test/unit.R` on hand-made values: no Ember, no server.
 #[test]
 #[ignore = "starts real R: cargo test -p endeavor-mcp --test e2e_r -- --ignored"]
 fn the_adapters_pure_functions() {
@@ -1158,7 +1054,6 @@ fn ember_updates_from_its_repository_and_keeps_the_build_before() {
     let url = format!("file://{}", repository.display());
     let install = |url: &str| {
         let status = Command::new("Rscript").args(["--vanilla", concat!(env!("CARGO_MANIFEST_DIR"), "/../../runtime/r/install.R")]).arg(&folder).arg(url).status().unwrap();
-        // As R writes it: an empty field has no space after its colon.
         let state = std::fs::read_to_string(folder.join("ember.dcf")).unwrap_or_default();
         (status.code(), state.lines().map(str::trim_end).collect::<Vec<_>>().join(" | "))
     };
@@ -1211,12 +1106,10 @@ fn ember_updates_from_its_repository_and_keeps_the_build_before() {
     });
 }
 
-/// What a call to the core's `/endeavor/call` answers, as the app and `use_machine` make them.
 fn app_call(port: u16, token: &str, method: &str) -> Value {
     app_call_with(port, token, method, json!({}))
 }
 
-/// The same, with `params`.
 fn app_call_with(port: u16, token: &str, method: &str, params: Value) -> Value {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string();
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -1226,14 +1119,6 @@ fn app_call_with(port: u16, token: &str, method: &str, params: Value) -> Value {
     serde_json::from_str(reply.split_once("\r\n\r\n").unwrap().1).unwrap()
 }
 
-/// On a Mac with no R, opening an R notebook offers Endeavor's own R and installs nothing; after the
-/// user's yes it installs R from CRAN into Endeavor's folder, and the notebook runs on that R, loading
-/// nothing from the user's R library. No shell startup file is written or changed, here or in the real home folder.
-///
-/// It runs with a scratch home folder and a login shell whose PATH has no R, so the R the Mac has, if
-/// any, isn't found. It downloads R (about 105 MB) and installs Ember, which needs a compiler:
-///
-///     cargo test -p endeavor-mcp --test e2e_r endeavors_own_r -- --ignored --nocapture
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "downloads and installs R: cargo test -p endeavor-mcp --test e2e_r endeavors_own_r -- --ignored"]
@@ -1254,12 +1139,9 @@ fn endeavors_own_r_on_a_mac() {
     let folder = fresh(work.join("project"));
     let home = fresh(work.join("home"));
     let mut cleanup = Cleanup { state: state.clone(), children: Vec::new() };
-    // Which R runs the cell, and whether any library it loads from is the user's own R's. (Ember gives each
-    // notebook a library of its own, so that is what R_LIBS_USER is inside the cell.)
     let users_library = real_home.join("Library/R");
     let cell = format!("paste(R.version$major, R.version$minor, R.home(), any(startsWith(.libPaths(), \"{}\")))", users_library.display());
     std::fs::write(folder.join("which.R"), format!("### An Ember notebook ###\n\n# %% id={A}\n{cell}\n\n# /// cell order\n# {A}\n# ///\n")).unwrap();
-    // A login shell whose PATH has no R.
     let shell = work.join("shell without r");
     common::write_executable(&shell, "#!/bin/sh\nshift\nPATH=/usr/bin:/bin exec /bin/sh -c \"$1\"\n");
 

@@ -1,11 +1,3 @@
-//! `scripts/endeavor-mcp.sh`, the plugin's MCP command, run as an agent runs
-//! it, against a release that is a folder under `target/tmp`
-//! (`ENDEAVOR_RELEASE_URL=file://…`), with `HOME` and the XDG variables there
-//! too. The "binary" is a script that prints its arguments and a JSON line.
-//! `ENDEAVOR_TEST_SH` names the shell that runs the scripts (default `sh`).
-//! Because `ENDEAVOR_RELEASE_URL` is set, the launcher keeps its binaries in
-//! `bin-from/<checksum of the URL>/`, which `Place::data` names.
-
 #![cfg(unix)]
 
 #[path = "common/exec.rs"]
@@ -48,7 +40,6 @@ struct Run {
 }
 
 impl Place {
-    /// A release with nothing on it, and a plugin folder holding the scripts, unpinned.
     fn new(name: &str) -> Place {
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("launcher-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -62,7 +53,6 @@ impl Place {
         Place { dir }
     }
 
-    /// Publish `bin` as build `key` for `platform`, and `LATEST` as `latest`.
     fn publish(&self, key: &str, platform: &str, suffix: &str, bin: &[u8], sum: &str) {
         let name = format!("endeavor-{key}-{platform}{suffix}");
         std::fs::write(self.dir.join(format!("release/endeavor-{key}.sha256")), format!("{}  endeavor-{key}-other\n{sum}  {name}\n", sha(b"other"))).unwrap();
@@ -89,7 +79,6 @@ impl Place {
         share.join("endeavor/bin-from").join(String::from_utf8(out.stdout).unwrap().trim().replace(' ', "-"))
     }
 
-    /// The folder a start with no `ENDEAVOR_RELEASE_URL` uses.
     fn default_data(&self) -> PathBuf {
         self.dir.join("home/.local/share/endeavor/bin")
     }
@@ -137,7 +126,6 @@ impl Place {
         self.finish(command.stdin(Stdio::null()).output().unwrap())
     }
 
-    /// The same release, with a `curl` that fails ahead of the real one.
     fn offline(&self, args: &[&str]) -> Run {
         let down = self.dir.join("offline");
         std::fs::create_dir_all(&down).unwrap();
@@ -155,7 +143,6 @@ impl Place {
         Run { ok: out.status.success(), stdout: String::from_utf8_lossy(&out.stdout).into_owned(), stderr: String::from_utf8_lossy(&out.stderr).into_owned() }
     }
 
-    /// A `curl` that logs its arguments to fake/curl.log, then runs the real one.
     fn logging_curl(&self, before: &str) {
         let real = std::env::var("PATH").unwrap().split(':').map(|d| Path::new(d).join("curl")).find(|p| p.exists()).expect("curl");
         self.fake("curl", &format!("#!/bin/sh\necho \"$*\" >> '{}'\n{before}\nexec {} \"$@\"\n", self.dir.join("fake/curl.log").display(), real.display()));
@@ -214,7 +201,6 @@ fn a_pinned_key_is_fetched_whatever_latest_says_and_never_replaced() {
 
 #[test]
 fn a_pinned_build_is_checked_against_the_pins_checksums_not_the_releases() {
-    // The release was tampered with: its binary and its checksum file agree, but the pin's checksum is the real build's.
     let place = Place::new("pinned-sums");
     let tampered: &[u8] = b"#!/bin/sh\necho tampered\n";
     place.publish(OTHER, &platform(), "", tampered, &sha(tampered));
@@ -225,14 +211,12 @@ fn a_pinned_build_is_checked_against_the_pins_checksums_not_the_releases() {
     assert!(run.stderr.contains("doesn't match the checksum the plugin pins") && run.stderr.contains("nothing was installed"), "{}", run.stderr);
     assert!(!place.data().join(OTHER).join("endeavor").exists());
 
-    // The real build, and the release's checksum file gone: the pin's checksum is all it needs.
     place.publish(OTHER, &platform(), "", BIN, &sha(b"not read"));
     std::fs::remove_file(place.dir.join(format!("release/endeavor-{OTHER}.sha256"))).unwrap();
     let run = place.launch(&[]);
     assert!(run.ok, "{}", run.stderr);
     assert_eq!(std::fs::read(place.data().join(OTHER).join("endeavor")).unwrap(), BIN);
 
-    // A pin whose checksums leave out this platform fails plainly, and a pin from before checksums (the key alone) still works.
     let place = Place::new("pinned-sums-other");
     place.publish(OTHER, &platform(), "", BIN, &sha(BIN));
     std::fs::write(place.dir.join("plugin/launch/release-key"), format!("{OTHER}\n{}  endeavor-{OTHER}-other\n", sha(b"other"))).unwrap();
@@ -241,7 +225,6 @@ fn a_pinned_build_is_checked_against_the_pins_checksums_not_the_releases() {
     place.pin(OTHER);
     assert!(place.launch(&[]).ok);
 
-    // A Windows checkout can give release-key CRLF line ends.
     let place = Place::new("pinned-sums-crlf");
     place.publish(OTHER, &platform(), "", BIN, &sha(b"not read"));
     std::fs::write(place.dir.join("plugin/launch/release-key"), format!("{OTHER}\r\n{}  endeavor-{OTHER}-{}\r\n", sha(BIN), platform())).unwrap();
@@ -258,7 +241,6 @@ fn a_pinned_build_the_release_doesnt_hold_says_to_wait_or_update() {
     let said = last();
     assert!(said.starts_with(&format!("endeavor: the release doesn't hold build {OTHER} for this computer. If the plugin was just updated, reconnect in a few minutes. Otherwise this build is old and was removed: update the plugin.")), "{said}");
     assert!(said.ends_with("Update it the way you installed it."), "{said}");
-    // Each agent's copy says how to update in that agent, told apart by its manifest.
     std::fs::write(place.dir.join("plugin/mcp.json"), "{}").unwrap();
     assert!(last().ends_with("In Codex, run `codex plugin marketplace upgrade endeavor`, then start Codex again."));
     std::fs::write(place.dir.join("plugin/mcp_config.json"), "{}").unwrap();
@@ -269,8 +251,6 @@ fn a_pinned_build_the_release_doesnt_hold_says_to_wait_or_update() {
 
 #[test]
 fn a_pinned_build_whose_binary_was_removed_says_to_wait_or_update_too() {
-    // prune-helpers.sh keeps a build's checksum file and Linux files after its
-    // macOS and Windows files are gone.
     let place = Place::new("binary-removed");
     place.release(KEY);
     place.publish(OTHER, &platform(), "", BIN, &sha(BIN));
@@ -281,7 +261,6 @@ fn a_pinned_build_whose_binary_was_removed_says_to_wait_or_update_too() {
     let last = run.stderr.lines().last().unwrap();
     assert!(last.starts_with(&format!("endeavor: the release doesn't hold build {OTHER}")) && last.contains("update the plugin"), "{}", run.stderr);
 
-    // The same with the checksum pinned, which never asks for the release's checksum file.
     std::fs::write(place.dir.join("plugin/launch/release-key"), format!("{OTHER}\n{}  endeavor-{OTHER}-{}\n", sha(BIN), platform())).unwrap();
     let run = place.launch(&[]);
     assert!(!run.ok && run.stdout.is_empty());
@@ -302,7 +281,6 @@ fn unpinned_it_runs_the_newest_it_has_and_fetch_only_looks_for_a_newer_one() {
     assert!(fetched.ok && fetched.stdout.is_empty() && fetched.stderr.is_empty(), "{fetched:?}", fetched = (fetched.stdout, fetched.stderr));
     assert!(place.data().join(OTHER).join("endeavor").exists());
     assert_eq!(std::fs::read_to_string(place.data().join(".newest")).unwrap().trim(), OTHER);
-    // Network down: fetch-only keeps what it has.
     assert!(place.offline(&["--fetch-only"]).ok);
     assert_eq!(place.launch(&[]).stdout, expected(""));
 }
@@ -349,7 +327,6 @@ fn two_starts_at_once_download_once_and_both_run_a_complete_binary() {
 fn a_download_cut_short_leaves_no_binary_and_the_next_start_gets_it_cleanly() {
     let place = Place::new("cut");
     place.release(KEY);
-    // The asset's download writes half a file, and the install script dies.
     place.logging_curl(&format!("case \"$*\" in *{}-{}*) head -c 10 '{}/release/endeavor-{KEY}-{}' > \"$(echo \"$*\" | sed 's/.*-o \\([^ ]*\\) .*/\\1/')\"; kill -9 $PPID;; esac", KEY, platform(), place.dir.display(), platform()));
     let run = place.launch(&[]);
     assert!(!run.ok && run.stdout.is_empty());
@@ -394,7 +371,6 @@ fn fetch_only_gets_the_binary_and_runs_nothing() {
 #[test]
 fn the_hook_runs_only_a_binary_already_here_prints_nothing_and_never_fails() {
     let place = Place::new("hook");
-    // Like a build from before the hook: it answers `hook` with an error.
     let log = place.dir.join("hook.log");
     let bin = format!("#!/bin/sh\necho \"args: $*\" >> '{}'\ncat >> '{}'\necho printed\nexit 2\n", log.display(), log.display());
     place.publish(KEY, &platform(), "", bin.as_bytes(), &sha(bin.as_bytes()));
@@ -413,7 +389,6 @@ fn the_hook_runs_only_a_binary_already_here_prints_nothing_and_never_fails() {
     let ran = hook(r#"{"session_id":"s","permission_mode":"auto"}"#);
     assert!(ran.ok && ran.stdout.is_empty(), "{} {}", ran.stdout, ran.stderr);
     assert_eq!(std::fs::read_to_string(&log).unwrap(), "args: hook\n{\"session_id\":\"s\",\"permission_mode\":\"auto\"}");
-    // With HOME unset there is nowhere to look: still no failure.
     let mut command = place.command("endeavor-mcp.sh", &["--hook"], &place.url());
     let lost = place.finish(command.env_remove("HOME").env_remove("XDG_DATA_HOME").stdin(Stdio::null()).output().unwrap());
     assert!(lost.ok && lost.stdout.is_empty(), "{}", lost.stderr);
@@ -489,9 +464,6 @@ fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
 }
 
 fn alive(pid: &str) -> bool {
-    // An ended process whose parent is gone stays a zombie until PID 1 reaps
-    // it, and `kill -0` still finds a zombie. Containers whose PID 1 doesn't
-    // reap (the cloud VMs' doesn't) keep them, so on Linux a zombie is dead.
     if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
         && stat.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z'))
     {
@@ -505,7 +477,6 @@ impl Place {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    /// A folder of links to the tools the scripts use, without `without`, and a PATH of it.
     fn path_without(&self, without: &[&str]) -> String {
         let dir = self.dir.join("tools");
         std::fs::create_dir_all(&dir).unwrap();
@@ -520,7 +491,6 @@ impl Place {
         format!("{}:{}", self.dir.join("fake").display(), dir.display())
     }
 
-    /// A `wget` that serves `file://` URLs, for `install.sh` when there is no `curl`.
     fn fake_wget(&self, slow: &str) {
         self.fake(
             "wget",
@@ -573,9 +543,6 @@ fn starts_that_find_one_stale_lock_download_once_and_all_run() {
     assert!(left.is_empty(), "{left:?}");
 }
 
-/// The order that left a lock with no pid (#44): start B finds the stale lock and reads its dead pid; start A
-/// removes it and takes the lock; only then does B act on what it read, while A has yet to write its pid.
-/// Fakes of `cat`, `mkdir` and `mv` hold each start at its step, so the order is the same every run.
 #[test]
 fn a_start_that_read_a_stale_lock_late_leaves_a_lock_just_taken_alone() {
     let place = Place::new("stalelate");
@@ -589,13 +556,10 @@ fn a_start_that_read_a_stale_lock_late_leaves_a_lock_just_taken_alone() {
     let sig = place.dir.join("fake/sig");
     std::fs::create_dir_all(&sig).unwrap();
     let wait = |file: &str| format!("i=0; while [ ! -e '{sig}/{file}' ] && [ $i -lt 30 ]; do '{sleep}' 0.1; i=$((i + 1)); done; [ -e '{sig}/{file}' ] || : >'{sig}/timed-out'", sig = sig.display(), sleep = real("sleep").display());
-    // B, once: having read the dead pid, waits until A has taken the lock.
     place.fake("cat", &format!(
         "#!/bin/sh\n'{cat}' \"$@\" || exit $?\nif [ \"${{ROLE:-}}\" = b ] && [ \"$1\" = '{lock}/pid' ] && [ ! -e '{sig}/b-read' ] && [ \"$('{cat}' \"$1\" 2>/dev/null)\" = {dead} ]; then : >'{sig}/b-read'; {wait}; fi\n",
         cat = real("cat").display(), lock = lock.display(), sig = sig.display(), wait = wait("a-locked"),
     ));
-    // A, once: having taken the lock, waits (up to 3 s) until B acts on what it read, by starting to remove
-    // the lock (`mkdir .lock.take`), or as the launcher once did, by moving it aside (`mv .lock`).
     place.fake("mkdir", &format!(
         "#!/bin/sh\n'{mkdir}' \"$@\" || exit $?\nif [ \"${{ROLE:-}}\" = b ] && [ \"$1\" = '{lock}.take' ]; then : >'{sig}/b-acted'; fi\nif [ \"${{ROLE:-}}\" = a ] && [ \"$1\" = '{lock}' ] && [ ! -e '{sig}/a-locked' ]; then : >'{sig}/a-locked'; {wait}; fi\n",
         mkdir = real("mkdir").display(), lock = lock.display(), sig = sig.display(), wait = wait("b-acted"),
@@ -650,7 +614,6 @@ fn a_start_stopped_while_removing_a_stale_lock_lets_go_of_the_takeover() {
     let lock = place.data().join(".lock");
     std::fs::create_dir_all(&lock).unwrap();
     std::fs::write(lock.join("pid"), format!("{dead}\n")).unwrap();
-    // The start is stopped while it removes the stale lock.
     place.fake("rm", &format!("#!/bin/sh\nif [ \"$2\" = '{lock}' ]; then kill -TERM $PPID; fi\nexec '{rm}' \"$@\"\n", lock = lock.display(), rm = real("rm").display()));
     let run = place.launch(&[]);
     assert!(!run.ok, "{}", run.stderr);
@@ -688,11 +651,9 @@ fn a_release_set_by_the_variable_never_uses_or_changes_the_default_folder() {
     assert!(place.data().join(KEY).join("endeavor").exists());
     assert_eq!(std::fs::read_dir(&default).unwrap().count(), before);
     assert_eq!(std::fs::read_to_string(default.join(".newest")).unwrap().trim(), OTHER);
-    // The same override with the network down finds nothing in the default folder.
     let other = place.launch_with(&[], &[("ENDEAVOR_RELEASE_URL", "file:///nowhere")]);
     assert!(!other.ok && other.stdout.is_empty());
 
-    // Without the variable the default folder is what runs, and nothing is asked of the network.
     let mut command = place.command("endeavor-mcp.sh", &[], "unused");
     let out = command.env_remove("ENDEAVOR_RELEASE_URL").stdin(Stdio::null()).output().unwrap();
     assert!(out.status.success() && out.stdout == b"default build\n", "{}", String::from_utf8_lossy(&out.stderr));
@@ -761,8 +722,6 @@ fn the_launcher_keeps_its_binaries_where_the_paths_module_says() {
 fn nothing_but_the_binary_reaches_stdout_even_when_the_tools_print() {
     let place = Place::new("noise");
     place.release(KEY);
-    // uname, head, tr, cut, cat, cksum, mktemp, sha256sum and dirname are left alone: the
-    // scripts read their output. curl prints only when it saves to a file.
     for tool in ["find", "mkdir", "mv", "rm", "touch", "sleep", "chmod", "cp"] {
         place.fake(tool, &format!("#!/bin/sh\necho noise-{tool}\nexec {} \"$@\"\n", real(tool).display()));
     }
@@ -793,7 +752,6 @@ fn spaces_in_home_the_data_folder_and_the_plugin_folder_are_fine() {
     assert!(run.ok && run.stdout == expected("--folder my project"), "{}", run.stderr);
     let data = place.data_under(&share);
     assert!(data.join(KEY).join("endeavor").exists());
-    // A stale lock in it is taken over, and the default place under HOME works too.
     let mut child = Command::new("true").spawn().unwrap();
     let dead = child.id();
     child.wait().unwrap();
@@ -817,12 +775,10 @@ fn unpinned_it_looks_for_a_newer_build_in_the_background_once_a_day() {
     std::fs::write(place.dir.join("release/LATEST"), format!("{OTHER}\n")).unwrap();
     let newest = || std::fs::read_to_string(place.data().join(".newest")).unwrap_or_default().trim().to_owned();
 
-    // Checked today: nothing is asked.
     assert!(place.launch(&[]).ok);
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(newest(), KEY);
 
-    // A day later the start isn't delayed by the check, and the next start uses what it found.
     std::fs::remove_file(place.data().join(".checked")).unwrap();
     place.logging_curl("sleep 2");
     let started = Instant::now();
@@ -833,7 +789,6 @@ fn unpinned_it_looks_for_a_newer_build_in_the_background_once_a_day() {
     assert!(place.data().join(OTHER).join("endeavor").exists() && place.data().join(".checked").exists());
     assert_eq!(place.launch(&[]).stdout, expected(""));
 
-    // Pinned, it never looks.
     let pinned = Place::new("background-pinned");
     pinned.release(KEY);
     pinned.pin(KEY);
@@ -847,7 +802,6 @@ fn wget_without_timeout_is_ended_by_a_watchdog_that_leaves_nothing_behind() {
     place.release(KEY);
     let dir = place.dir.join("bin");
     let path = place.path_without(&["curl", "timeout", "wget"]);
-    // The watchdog's 900 seconds are 1 here; every sleep is logged.
     place.fake("sleep", &format!("#!/bin/sh\necho $$ >> '{}'\n[ \"$1\" = 900 ] && set -- 1\nexec {} \"$@\"\n", place.dir.join("fake/sleep.pids").display(), real("sleep").display()));
     place.fake_wget("*endeavor-0123456789ab-linux*|*endeavor-0123456789ab-darwin*");
     let url = place.url();
@@ -894,7 +848,6 @@ fn under_wget_a_download_redirected_away_from_https_is_thrown_away() {
     let path = place.path_without(&["curl", "wget"]);
     let dir = place.dir.join("bin");
     let exe = dir.join(if cfg!(windows) { "endeavor.exe" } else { "endeavor" });
-    // A wget that serves file:// URLs, and prints headers (its -S) saying the binary came through a redirect to `to`.
     let fake = |to: &str| {
         let _ = std::fs::remove_file(place.dir.join("fake/wget"));
         place.fake(
@@ -921,7 +874,6 @@ fn wget2_which_prints_no_headers_is_told_to_keep_to_https() {
     let path = place.path_without(&["curl", "wget"]);
     let dir = place.dir.join("bin");
     let log = place.dir.join("fake/wget.log");
-    // A Wget2 that serves https://release.example/<file> from the release folder and notes its arguments.
     let fake = |version: &str| {
         let _ = std::fs::remove_file(place.dir.join("fake/wget"));
         let _ = std::fs::remove_file(&log);
@@ -940,7 +892,6 @@ fn wget2_which_prints_no_headers_is_told_to_keep_to_https() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(calls.lines().count() >= 2 && calls.lines().all(|l| l.contains("--https-enforce=hard")), "{calls}");
-    // GNU Wget 1.x refuses the switch, and its headers are read instead.
     fake("GNU Wget 1.21.4 built on linux-gnu.");
     let out = install(&dir.join("1"));
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));

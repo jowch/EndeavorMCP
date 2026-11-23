@@ -1,6 +1,3 @@
-//! A running `endeavor connect`, driven over its stdin and stdout as
-//! the app drives it: control messages both ways, and relayed connections.
-
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -12,7 +9,6 @@ use std::time::{Duration, Instant};
 use wire::relay::Mux;
 use wire::{ToApp, ToHelper};
 
-/// A running `endeavor connect`, and the app's end of its channel.
 pub struct Helper {
     pub process: Child,
     pub stdin: Stdin,
@@ -21,7 +17,6 @@ pub struct Helper {
     ids: AtomicU32,
 }
 
-/// The helper's stdin, which a test can close while the mux still holds it.
 #[derive(Clone)]
 pub struct Stdin(pub Arc<Mutex<Option<ChildStdin>>>);
 
@@ -36,7 +31,6 @@ impl Write for Stdin {
 }
 
 impl Helper {
-    /// Run `command` (an `endeavor connect …`) with its stdin and stdout as the channel.
     pub fn spawn(mut command: Command) -> Helper {
         let mut process = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         let stdin = Stdin(Arc::new(Mutex::new(process.stdin.take())));
@@ -64,7 +58,6 @@ impl Helper {
         hello
     }
 
-    /// The next message after any lines of the runtime's log.
     pub fn after_progress(&self) -> ToApp {
         loop {
             match self.next() {
@@ -74,33 +67,28 @@ impl Helper {
         }
     }
 
-    /// Hello, then ask for the runtime: its answer.
     pub fn start_runtime(&self) -> ToApp {
         self.hello();
         self.request_start(None, true);
         self.next()
     }
 
-    /// Ask for the runtime: the request's id.
     pub fn request_start(&self, job: Option<wire::slurm::JobRequest>, install: bool) -> u32 {
         let id = self.ids.fetch_add(1, Ordering::Relaxed);
         self.send(ToHelper::StartRuntime { id, job, engine: wire::ENGINE_PLUTO.into(), install, attach_only: false });
         id
     }
 
-    /// Ask for the runtime that runs or is starting, and never to start one.
     pub fn request_attach(&self) -> u32 {
         let id = self.ids.fetch_add(1, Ordering::Relaxed);
         self.send(ToHelper::StartRuntime { id, job: None, engine: wire::ENGINE_PLUTO.into(), install: false, attach_only: true });
         id
     }
 
-    /// Ask for a stop: the request's id.
     pub fn request_stop(&self) -> u32 {
         self.request_stop_as(false)
     }
 
-    /// Ask for a stop, forced or not: the request's id.
     pub fn request_stop_as(&self, force: bool) -> u32 {
         let id = self.ids.fetch_add(1, Ordering::Relaxed);
         self.send(ToHelper::Stop { id, force, unless_shared: false });
@@ -119,7 +107,6 @@ impl Helper {
         }
     }
 
-    /// A local connection relayed to the runtime's port.
     pub fn connect(&self) -> TcpStream {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();

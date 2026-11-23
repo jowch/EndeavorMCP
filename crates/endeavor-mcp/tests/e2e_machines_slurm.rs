@@ -1,24 +1,3 @@
-//! The machine tools of `endeavor mcp` over real ssh, real Slurm and real Julia:
-//! an agent's harness (stdio) adds a cluster, is asked for resources before any
-//! job is submitted, then gets one small job and works in a notebook inside it;
-//! further sessions in the same project attach to the same job with no
-//! `use_machine`; and a stop with `force` ends the job. It's ignored by default
-//! and runs only when `ENDEAVOR_TEST_SSH_HOST` names a host this user can `ssh`
-//! to with a key and that has Slurm (`localhost` on a single-node cluster is
-//! one):
-//!
-//!     ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines_slurm -- --ignored --nocapture
-//!
-//! It submits one job of 1 CPU, 2 GB and 15 minutes to partition `LocalQ`
-//! (`ENDEAVOR_TEST_SLURM_PARTITION` names another), and cancels it by its id if a
-//! step fails. Julia is found as in `e2e_machines`, and the depot is
-//! `e2e_client`'s, so run that test first or expect several minutes. The
-//! fronts' state, config and cache folders, the machines file,
-//! and the helper's install and state folders are under
-//! `target/tmp/e2e-machines-slurm`, which the host has to see at the same path.
-//! `HOME` stays the user's, where `ssh` finds its keys. The fronts' own local
-//! runtime is pointed at a Julia that doesn't exist, so none is started here.
-
 #![cfg(unix)]
 
 mod common;
@@ -38,7 +17,6 @@ fn user() -> String {
     std::env::var("USER").unwrap_or_else(|_| String::from_utf8_lossy(&Command::new("id").arg("-un").output().unwrap().stdout).trim().to_owned())
 }
 
-/// This user's jobs named `endeavor`, as `id|state|node|partition|time left`.
 fn squeue(args: &[&str]) -> Vec<String> {
     let output = Command::new("squeue").args(["-h", "-u", &user(), "-n", "endeavor", "-o", "%i|%T|%N|%P|%L"]).args(args).output().expect("squeue runs");
     String::from_utf8_lossy(&output.stdout).lines().map(str::to_owned).collect()
@@ -53,7 +31,6 @@ fn json_field(path: &Path, field: &str) -> Option<String> {
     v[field].as_str().filter(|s| !s.is_empty()).map(str::to_owned)
 }
 
-/// A failed step leaves no Julia and no job behind: cancels the jobs this test recorded, and ends the runtime it started.
 struct Ends {
     state: PathBuf,
     jobs: Arc<Mutex<Vec<String>>>,
@@ -74,7 +51,6 @@ impl Drop for Ends {
     }
 }
 
-/// One GET to `port`: the status line, the head and the body.
 fn get(port: u16, target: &str, headers: &str) -> (String, String, String) {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
@@ -90,12 +66,8 @@ fn machine<'a>(listed: &'a Value, name: &str) -> &'a Value {
     listed["machines"].as_array().and_then(|m| m.iter().find(|m| m["name"] == name)).unwrap_or_else(|| panic!("{name} is listed: {listed}"))
 }
 
-/// Held by each test for its whole run. Both submit jobs as the same user, and the first counts the user's
-/// `endeavor` jobs before and after its steps, so run at once it took the other's job for one it had
-/// submitted (#60).
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
-/// The turn of a test that submits jobs; one that failed before it let go doesn't hold up the next.
 fn my_turn() -> std::sync::MutexGuard<'static, ()> {
     ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -122,7 +94,6 @@ fn the_machine_tools_over_real_slurm() {
     let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-machines-slurm");
     let depot = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-client/depot");
     let jobs = Arc::new(Mutex::new(Vec::new()));
-    // A job an earlier run left is this test's own to cancel: it is recorded in the test's own folder.
     drop(Ends { state: work.join("state"), jobs: jobs.clone() });
     let _ = std::fs::remove_dir_all(&work);
     for folder in ["root", "state", "notebooks", "project", "config", "state-home", "cache"] {
@@ -164,7 +135,6 @@ fn the_machine_tools_over_real_slurm() {
     };
     let mut one = front();
 
-    // Adding the cluster: Slurm is found, the partitions come with their limits, and the host's name for it is saved.
     let added = one.ok("add_machine", json!({ "host": host, "name": "e2e-slurm", "julia": julia.display().to_string(), "slurm": true, "install": true }));
     eprintln!("[{:?}] add_machine: {added}", started.elapsed());
     assert_eq!((added["state"].as_str(), added["saved"].clone(), added["slurm"].clone(), added["cluster"].clone(), added["runs_in"].clone()), (Some("connected"), json!(true), json!(true), json!(true), json!("slurm_jobs")), "{added}");
@@ -172,12 +142,10 @@ fn the_machine_tools_over_real_slurm() {
     let ours = partitions.iter().find(|p| p["name"] == json!(partition)).unwrap_or_else(|| panic!("partition {partition} is listed: {added}"));
     assert!(ours["cpus"].as_u64().is_some_and(|c| c >= 1) && ours["memory_gb"].as_u64().is_some_and(|m| m >= 2), "{ours}");
     assert!(added["message"].as_str().unwrap().contains("Slurm"), "{added}");
-    // The connection add_machine made is kept for the job (it connected as Slurm).
     let listing = one.ok("list_machines", json!({}));
     let entry = machine(&listing, "e2e-slurm");
     assert_eq!((entry["cluster"].clone(), entry["state"].as_str(), entry["this_session"].clone()), (json!(true), Some("connected"), json!(false)), "{listing}");
 
-    // No resources: asked for, nothing submitted, the session where it was.
     let asked = one.ok("use_machine", json!({ "machine": "e2e-slurm", "folder": notebooks.display().to_string() }));
     eprintln!("[{:?}] use_machine without resources: {asked}", started.elapsed());
     assert_eq!((asked["state"].as_str(), asked["needs_job"].clone(), asked["ready"].clone()), (Some("needs_job"), json!(true), json!(false)), "{asked}");
@@ -187,7 +155,6 @@ fn the_machine_tools_over_real_slurm() {
     let listing = one.ok("list_machines", json!({}));
     assert_eq!((machine(&listing, "e2e-slurm")["this_session"].clone(), listing["this_session"]["machine"].clone()), (json!(false), json!("local")), "the session has not moved: {listing}");
 
-    // The job: 1 CPU, 2 GB, 15 minutes.
     let asked_at = Instant::now();
     let used = one.ok("use_machine", json!({ "machine": "e2e-slurm", "folder": notebooks.display().to_string(), "partition": partition, "cpus": 1, "memory_gb": 2, "hours": 0.25 }));
     eprintln!("[{:?}] use_machine: {used}", started.elapsed());
@@ -239,7 +206,6 @@ fn the_machine_tools_over_real_slurm() {
     let page = ready["browser_url"].as_str().unwrap().to_owned();
     let port: u16 = page.strip_prefix("http://localhost:").and_then(|rest| rest.strip_suffix('/')).unwrap_or_else(|| panic!("a page without the token: {page}")).parse().unwrap();
 
-    // The notebook runs inside the job.
     let created = one.ok("new_notebook", json!({ "path": "slurm.jl" }));
     let notebook = created["notebook_id"].as_str().expect("a notebook").to_owned();
     let notebook_path = notebooks.join("slurm.jl").display().to_string();
@@ -264,7 +230,6 @@ fn the_machine_tools_over_real_slurm() {
     assert!(body.contains("Pluto"));
     eprintln!("[{:?}] the notebook ran in job {job} on {node}, and the page answers", started.elapsed());
 
-    // Each front connects for itself, so its first status may still say it is connecting: ask until the runtime is there.
     let up = |front: &mut Front| {
         let deadline = Instant::now() + Duration::from_secs(180);
         loop {
@@ -277,7 +242,6 @@ fn the_machine_tools_over_real_slurm() {
         }
     };
 
-    // A second session in the project attaches to the same job with no `use_machine`, and sees the first one's notebook.
     let mut two = front();
     let attached = up(&mut two);
     eprintln!("[{:?}] second front's session_status: {attached}", started.elapsed());
@@ -294,7 +258,6 @@ fn the_machine_tools_over_real_slurm() {
     two.finish();
     assert_eq!(listed(&job).len(), 1, "the job runs on");
 
-    // A third session while the first is still there, then the first goes: nothing detached the job.
     let mut three = front();
     let attached = up(&mut three);
     assert_eq!((attached["machine"].as_str(), attached["job"]["id"].as_str()), (Some("e2e-slurm"), Some(job.as_str())), "{attached}");
@@ -306,7 +269,6 @@ fn the_machine_tools_over_real_slurm() {
     let reading = three.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": cell }));
     assert_eq!(reading["output"].as_str().map(|o| o.trim_matches('"')), Some(job.as_str()), "{reading}");
 
-    // A stop is refused while another session was active, and with `force` ends the job.
     let mut four = front();
     four.ok("open_notebook", json!({ "path": notebook_path }));
     let refused = three.ok("stop_machine", json!({ "machine": "e2e-slurm" }));
@@ -338,17 +300,12 @@ fn the_machine_tools_over_real_slurm() {
     assert_eq!(entry["state"].as_str(), Some("connected"), "{listing}");
     three.finish();
 
-    // Nothing is left: the front's end took its connection with it.
     wait_for("the helper to go", || Command::new("pgrep").arg("-f").arg("--").arg(format!("connect --state-dir {}", state.display())).output().unwrap().stdout.is_empty());
     assert!(!state.join("runtime.json").exists() && !state.join("job.json").exists());
     assert_eq!(squeue(&[]), before, "no job of this test is left");
     eprintln!("[{:?}] stopped; nothing left", started.elapsed());
 }
 
-/// A job held in the queue (`--begin=now+90`, reason BeginTime) gives a real queue on a cluster whose queue is
-/// empty: what `use_machine` and `session_status` say while it waits, also from a session that attaches
-/// to the queued job afterwards, then while it starts. A forced stop ends it. Same setup as above, in
-/// `target/tmp/e2e-machines-slurm-held`.
 #[test]
 #[ignore = "needs ENDEAVOR_TEST_SSH_HOST and Slurm, submits one small real job held for 90 s: ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines_slurm -- --ignored"]
 fn a_held_job_is_queued_with_its_id_and_a_session_that_attaches_to_it_knows_the_id() {
@@ -411,7 +368,6 @@ fn a_held_job_is_queued_with_its_id_and_a_session_that_attaches_to_it_knows_the_
     let added = one.ok("add_machine", json!({ "host": host, "name": "e2e-held", "julia": julia.display().to_string(), "slurm": true, "install": true }));
     assert_eq!(added["state"].as_str(), Some("connected"), "{added}");
 
-    // Held: queued, with the job's id and BeginTime, in use_machine's answer and the status.
     let resources = json!({ "machine": "e2e-held", "folder": notebooks.display().to_string(), "partition": partition, "cpus": 1, "memory_gb": 2, "hours": 0.25, "extra_sbatch_flags": ["--begin=now+90"] });
     let used = one.ok("use_machine", resources);
     eprintln!("[{:?}] use_machine: {used}", started.elapsed());
@@ -425,7 +381,6 @@ fn a_held_job_is_queued_with_its_id_and_a_session_that_attaches_to_it_knows_the_
     one.finish();
     assert_eq!(listed(&job).len(), 1, "the job waits on after the session is gone");
 
-    // A session that comes to the queued job afterwards: queued, with the id.
     let mut two = front();
     let deadline = Instant::now() + Duration::from_secs(60);
     let attached = loop {
@@ -442,7 +397,6 @@ fn a_held_job_is_queued_with_its_id_and_a_session_that_attaches_to_it_knows_the_
     eprintln!("[{:?}] use_machine after attaching: {again}", started.elapsed());
     assert_eq!((again["state"].as_str(), again["job"]["id"].as_str()), (Some("queued"), Some(job.as_str())), "{again}");
 
-    // Its time comes: starting, then ready, with the id throughout.
     let mut seen = Vec::new();
     let ready = loop {
         let status = two.ok("session_status", json!({}));

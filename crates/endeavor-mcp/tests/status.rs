@@ -1,6 +1,3 @@
-//! `endeavor status` as a user runs it: the built binary, with `HOME` and the four XDG variables in
-//! a scratch folder. It reports and changes nothing, and never prints the runtime's token.
-
 #![cfg(unix)]
 
 use std::fs::File;
@@ -14,7 +11,6 @@ use serde_json::{Value, json};
 
 const TOKEN: &str = "tok-4f9a1c7e2b8d0a63";
 
-/// A scratch `HOME` and XDG folders, all empty, and a working folder.
 struct Home {
     root: PathBuf,
 }
@@ -50,7 +46,6 @@ impl Home {
         output
     }
 
-    /// The plain output, and the JSON output parsed. Neither holds the token.
     fn both(&self, args: &[&str]) -> (String, Value) {
         let text = String::from_utf8(self.run(args).stdout).unwrap();
         let json_out = String::from_utf8(self.run(&[args, &["--json"]].concat()).stdout).unwrap();
@@ -60,7 +55,6 @@ impl Home {
         (text, serde_json::from_str(&json_out).unwrap())
     }
 
-    /// The folders of `HOME` and the XDG variables hold nothing.
     fn assert_untouched(&self) {
         for folder in ["home", "state", "cache", "config", "data", "cwd"] {
             let found: Vec<_> = std::fs::read_dir(self.path(folder)).unwrap().flatten().map(|e| e.path()).collect();
@@ -80,7 +74,6 @@ fn hostname() -> String {
     String::from_utf8_lossy(&uname.stdout).trim_end().to_owned()
 }
 
-/// A `runtime.json` in `dir` for a runtime of this computer.
 fn record(dir: &Path, fields: Value) {
     std::fs::create_dir_all(dir).unwrap();
     let mut state = json!({ "launcher": "process", "node": hostname(), "token": TOKEN });
@@ -90,7 +83,6 @@ fn record(dir: &Path, fields: Value) {
     std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
 }
 
-/// A port that answers every call with 200, for as long as the test runs.
 fn answering() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -190,7 +182,6 @@ fn a_machines_file_from_a_newer_schema_or_not_json_lists_nothing() {
 fn a_running_runtime_is_described_without_its_token() {
     let home = Home::new("running");
     let dir = home.path("state").join("elsewhere");
-    // This test's own process is the live one the record names.
     let me = std::process::id();
     record(&dir, json!({ "pid": me, "port": answering(), "build": "0.1.0-aaaa", "folder": "/work/notebooks", "exits_when_idle": true }));
     let dir_arg = dir.to_str().unwrap();
@@ -235,28 +226,23 @@ fn a_start_under_way_is_reported_beside_whatever_is_recorded() {
 
     assert_eq!(runtime(&json_out)["starting_pid"], Value::Null, "no process is named in the file");
 
-    // A core names itself in the file it holds.
     let core = std::process::id();
     let names = |pid: u32, node: &str| std::fs::write(dir.join("starting.lock"), json!({ "pid": pid, "started": null, "boot": null, "node": node }).to_string()).unwrap();
     names(core, &hostname());
     let (text, json_out) = home.both(&["--state-dir", dir_arg]);
     assert!(text.contains(&format!("Start under way: yes (pid {core} holds starting.lock")), "{text}");
     assert_eq!(runtime(&json_out)["starting_pid"], json!(core));
-    // A pid that is no process is not named.
     names(i32::MAX as u32, &hostname());
     assert_eq!(runtime(&home.both(&["--state-dir", dir_arg]).1)["starting_pid"], Value::Null);
-    // A pid of another computer is not named either.
     names(core, "another-computer");
     assert_eq!(runtime(&home.both(&["--state-dir", dir_arg]).1)["starting_pid"], Value::Null);
 
-    // A record whose process is gone is still named stale; the start is separate.
     record(&dir, json!({ "pid": i32::MAX, "port": 4321 }));
     let (text, json_out) = home.both(&["--state-dir", dir_arg]);
     assert!(text.contains("Recorded, but its process is gone (pid 2147483647)") && text.contains("Start under way: yes"), "{text}");
     let r = runtime(&json_out);
     assert_eq!((&r["state"], &r["starting"], &r["pid"], &r["port"]), (&json!("stale"), &json!(true), &json!(i32::MAX), &Value::Null));
 
-    // A runtime that is alive and silent, and another computer's record.
     record(&dir, json!({ "pid": std::process::id(), "port": closed_port() }));
     let (text, json_out) = home.both(&["--state-dir", dir_arg]);
     assert!(text.contains("Answers: no") && text.contains("Start under way: yes"), "{text}");
@@ -268,7 +254,6 @@ fn a_start_under_way_is_reported_beside_whatever_is_recorded() {
     assert!(text.contains("Recorded by another-computer") && text.contains("Start under way: yes"), "{text}");
     let r = runtime(&json_out);
     assert_eq!((&r["state"], &r["starting"], &r["pid"], &r["port"], &r["node"]), (&json!("other_computer"), &json!(true), &Value::Null, &Value::Null, &json!("another-computer")));
-    // Unlocked first: a child another test spawns now keeps a copy of the descriptor, and the lock, until it execs (#212).
     lock.unlock().unwrap();
     drop(lock);
 
