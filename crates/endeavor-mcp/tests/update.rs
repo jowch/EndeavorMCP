@@ -1,8 +1,3 @@
-//! `endeavor update`, run as a user runs it, against a release served on
-//! 127.0.0.1 (`ENDEAVOR_RELEASE_URL`). The full update needs a platform the
-//! release has binaries for; elsewhere it says to use cargo install.
-
-// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
 #![allow(clippy::disallowed_methods)]
 
 #![cfg(unix)]
@@ -30,7 +25,6 @@ fn platform() -> Option<&'static str> {
     }
 }
 
-/// Serves LATEST, the checksums and this platform's NEW, `sum` being the checksum file's claim.
 fn release(sum: String) -> String {
     let name = format!("endeavor-{KEY}-{}", platform().unwrap_or("linux-x86_64"));
     let files = [("LATEST".to_owned(), format!("{KEY}\n").into_bytes()), (format!("endeavor-{KEY}.sha256"), format!("{sum}  {name}\n").into_bytes()), (name, NEW.to_vec())];
@@ -56,7 +50,6 @@ fn release(sum: String) -> String {
     url
 }
 
-/// A copy of the built binary in a scratch folder of its own, as if downloaded there.
 fn copy(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("endeavor-update-cli-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -111,9 +104,6 @@ fn update_with_a_bad_checksum_leaves_the_binary() {
     let _ = std::fs::remove_dir_all(exe.parent().unwrap());
 }
 
-/// A `PATH` with no curl, whose `wget` serves `<release URL>/<file>` from a folder holding
-/// this platform's NEW: it says it is `version`, notes its arguments in `wget.log`, and
-/// for the binary prints headers (its -S) saying it came through a redirect to `to`.
 fn wget_only(dir: &std::path::Path, version: &str, to: &str) -> String {
     let (bin, files) = (dir.join("path"), dir.join("files"));
     std::fs::create_dir_all(&bin).unwrap();
@@ -158,7 +148,6 @@ fn under_wget_an_update_redirected_away_from_https_leaves_the_binary_and_wget2_k
     assert!(!ok && stderr.contains("was redirected to http://mirror.example/endeavor, which isn't https"), "{stderr}");
     assert_eq!(std::fs::read(&exe).unwrap(), before);
     assert_eq!(std::fs::read_dir(exe.parent().unwrap()).unwrap().filter(|e| e.as_ref().unwrap().file_name() != "home").count(), 1, "nothing left beside it");
-    // Wget2 prints no headers under -q, so it is told to keep to https instead.
     let _ = std::fs::remove_file(tools.join("wget.log"));
     let (ok, stderr) = run(&exe, &wget_only(&tools, "GNU Wget2 2.1.0 - multithreaded metalink/file/website downloader", "https://release-assets.example/x"));
     assert!(ok, "{stderr}");

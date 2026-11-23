@@ -1,14 +1,7 @@
-//! Endeavor's skills (`plugin/skills`) for agents that don't load the
-//! Claude Code plugin: the `notebook_guide` tool serves them, and the server's
-//! MCP `instructions` say to call it first. A session whose agent loads the
-//! plugin says so with `X-Endeavor-Skills: plugin`, gets no guide, and is told
-//! to load the skill instead.
-
 use serde_json::{Value, json};
 
 pub const TOOL: &str = "notebook_guide";
 
-/// Each skill file by its path under `plugin/skills`.
 const FILES: [(&str, &str); 8] = [
     (NOTEBOOKS, include_str!("../../../plugin/skills/endeavor-notebooks/SKILL.md")),
     (PLUTO, include_str!("../../../plugin/skills/endeavor-notebooks/reference/pluto.md")),
@@ -20,40 +13,24 @@ const FILES: [(&str, &str); 8] = [
     ("endeavor-machines/reference/machine-tools.md", include_str!("../../../plugin/skills/endeavor-machines/reference/machine-tools.md")),
 ];
 
-/// The skill the guide is, when asked for no topic.
 const NOTEBOOKS: &str = "endeavor-notebooks/SKILL.md";
 
-/// The engine reference the guide includes: Julia's, the default engine; R's is a topic.
 const PLUTO: &str = "endeavor-notebooks/reference/pluto.md";
 
-/// Points an agent without the plugin's skills to the guide.
 const READ_GUIDE: &str = "Before your first notebook tool call in a session, call `notebook_guide` once with no arguments and follow what it says: \
 how to find this session's notebook, the read-edit-run loop, and the rules for a cell.";
 
-/// Points an agent with the plugin's skills to the notebooks skill. Its
-/// description alone isn't enough: Haiku 4.5 starts on the tools without it,
-/// and then splits a cell's code wrongly and skips looking at plots (#242).
-/// With the skill but not the reference it still defines a name in two cells.
 pub const LOAD_SKILL: &str = "Before your first notebook tool call in a session, load the `endeavor-notebooks` skill, read the engine reference it names (`pluto.md` for Julia, `ember.md` for R, `marimo.md` for Python) before you write a cell, and follow them: \
 the read-edit-run loop, the rules for what one cell may hold and for names defined in two cells, and looking at a plot with `view_cell_output` before you say it is right.";
 
-/// Where the guide keeps what only the app needs, for an agent in the app without the skills.
 const APP_GUIDE: &str = "The rules for runs the user must approve are in the topic `endeavor-notebooks/reference/app.md`.";
 
-/// What a runtime with the app tells every agent, with the skills or without:
-/// how to point to a cell in a reply and name one. `app.md` says it too, but
-/// agents read it for approvals and didn't link cells, so it lives here, in
-/// what is always in their context.
 const APP_REPLIES: &str = "In your replies, link each cell you talk about the first time it comes up, as `[a few words](notebook://pluto/{notebook_id}/cell/{cell_id})` \
 (`notebook://ember/...` in R), with the cell's real id: the user clicks it to scroll the notebook to that cell. \
 Start a code cell that defines no name, such as a plot or a check, with a `# ` comment of at most 28 characters, in words with no code, saying what it does; the app names the cell by it.";
 
-/// What a runtime with the app tells an agent without the skills.
 const APP: &str = "These tools edit and run a live notebook, in Julia (Pluto) or R (Ember), that the user sees in Endeavor, next to this chat.";
 
-/// What a runtime without the app (`endeavor serve` or `mcp`) tells every
-/// agent: the skill keeps what holds only in the app apart, and this says
-/// which side the agent is on.
 pub const STANDALONE: &str = "These tools edit and run live notebooks, in Julia (Pluto), R (Ember) or Python (marimo), without the Endeavor app: \
 the user watches them in a web browser, on the notebook's own page, and there is no notebook pane next to this chat. \
 A new notebook is in Julia unless the user asks for R or Python or their project is in R or Python. \
@@ -62,17 +39,12 @@ When the user asks to open, show or look at a `.jl`, `.R` or `.py` file, call `o
 Endeavor's skills (or `notebook_guide`) and these tools' descriptions say where something holds only in the Endeavor app, \
 such as the reference `app.md`: skip those parts.";
 
-/// What `endeavor mcp` adds to what it tells every agent: it has the machine tools.
 pub const MACHINES: &str = "This server also has `list_machines`, `add_machine`, `use_machine` and `stop_machine`, which put this session's notebooks on a server or a Slurm cluster \
 that the user reaches over ssh. `list_machines` only reads and is fine any time; call the other three only when the user asks.";
 
-/// What an agent without the skills is told about the machine tools on top of `MACHINES`.
 const MACHINES_GUIDE: &str = "Before your first `add_machine`, `use_machine` or `stop_machine` call, \
 call `notebook_guide` with `topic` set to `endeavor-machines/SKILL.md` and follow it.";
 
-/// The server's MCP `instructions` for an agent with the plugin's skills or
-/// without (`has_skills`), on a runtime with the app or without (`standalone`);
-/// `machines`: from `endeavor mcp`, which has the machine tools.
 pub fn instructions(standalone: bool, has_skills: bool, machines: bool, views: bool) -> Option<String> {
     let machines_text = match (machines, has_skills) {
         (false, _) => String::new(),
@@ -88,13 +60,11 @@ pub fn instructions(standalone: bool, has_skills: bool, machines: bool, views: b
     }
 }
 
-/// Said to a client that draws the notebook view (`views`), after `STANDALONE`.
 const VIEWS: &str = "In this client, `new_notebook` and `open_notebook` show the notebook in the chat instead of a browser tab (`shown_beside_chat`): \
 say that it should open beside the chat or full screen, by itself or with one click on its card, and don't give the address. \
 Some parts of this client show no card: if the user says they don't see the notebook, call `open_notebook` again with `in_browser` true, \
 which opens it in their browser.";
 
-/// `tools/list`'s entry for the guide.
 pub fn schema() -> Value {
     json!({
         "name": TOOL,
@@ -109,7 +79,6 @@ It names further topics (paths ending in .md): call it again with `topic` set to
     })
 }
 
-/// The guide, or one of its topics.
 pub fn read(arguments: &Value) -> Result<String, String> {
     let topic = arguments["topic"].as_str().map(str::trim).filter(|t| !t.is_empty());
     let Some(topic) = topic else { return Ok(whole()) };
@@ -124,7 +93,6 @@ pub fn read(arguments: &Value) -> Result<String, String> {
     }
 }
 
-/// The notebook skill and the Julia reference, and how to ask for what they and the machine tools point to.
 fn whole() -> String {
     let file = |wanted: &str| {
         let (path, text) = FILES.iter().find(|(p, _)| *p == wanted).expect("the file is in FILES");
@@ -142,7 +110,6 @@ fn whole() -> String {
     )
 }
 
-/// A skill file without its front matter, with its links rewritten as topics.
 fn served(path: &str, text: &str) -> String {
     let body = text
         .strip_prefix("---\n")
@@ -164,8 +131,6 @@ fn served(path: &str, text: &str) -> String {
     out
 }
 
-/// A link's target, relative to the folder of the file it's in, as a topic:
-/// a path under `plugin/skills`, or just the skill's name for its SKILL.md.
 fn topic(dir: &str, target: &str) -> String {
     let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
     for part in target.split('/') {
@@ -197,7 +162,6 @@ mod tests {
                     folders.push(path);
                 } else if path.extension().is_some_and(|e| e == "md") {
                     let parts: Vec<String> = path.strip_prefix(root).unwrap().components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-                    // Only useful when this server isn't running, so it isn't served.
                     if parts[0] != "endeavor-setup" {
                         on_disk.push(parts.join("/"));
                     }

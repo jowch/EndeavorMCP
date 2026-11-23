@@ -1,11 +1,3 @@
-//! A stand-in for Julia under `endeavor core` on Windows, where the tests' `#!/bin/sh` one
-//! (`tests/common/mod.rs`, `serving_julia`) can't run. The Windows tests (`tests/windows.rs`) copy
-//! it to `julia.exe`. Like the shell one, it says it's 1.12, records its arguments, the token it was
-//! given and its pid in `STAND_IN_DIR`, writes the state boot.jl would, naming the test's stand-in
-//! bridge and Pluto (`STAND_IN_MCP_PORT`, `STAND_IN_PLUTO_PORT`), and stays up. It waits first while
-//! the file `hold` is in `STAND_IN_DIR`. Asked for `Sys.BINDIR` (`-e`), it names its own folder, so the
-//! core's look for the real julia.exe behind a launcher finds this one. Not part of any build that ships.
-
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;

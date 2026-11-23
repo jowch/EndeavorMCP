@@ -1,15 +1,9 @@
-//! The askpass mode over loopback TCP, as ssh runs it: the `endeavor` binary
-//! with the prompt as its only argument, `ENDEAVOR_ASKPASS_ADDRESS` and
-//! `ENDEAVOR_ASKPASS_TOKEN` set, answered by `client::Asker`. Every platform:
-//! it is the only way on Windows.
-
 use std::path::Path;
 use std::process::{Command, Output};
 
 use endeavor_mcp::client::{Asker, Reply, SIGN_IN_GAVE_UP};
 use wire::askpass::{ADDRESS_ENV, SOCKET_ENV, TOKEN_ENV};
 
-/// The binary as ssh runs it, with `env` and nothing else of askpass's.
 fn askpass(prompt: &str, env: &[(String, String)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_endeavor"))
         .arg(prompt)

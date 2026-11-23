@@ -1,12 +1,3 @@
-//! `endeavor serve` and `mcp` end to end, with real Julia, as a user
-//! without the app runs them: serve in a terminal, the agent over HTTP with
-//! the printed token, the browser through the printed link, then Ctrl-C; and
-//! the stdio form for an agent on the same machine, then `stop`.
-//!
-//! Ignored by default, like e2e_julia (which says where Julia comes from):
-//!
-//!     cargo test -p endeavor-mcp --test e2e_serve -- --ignored --nocapture
-
 #![cfg(unix)]
 
 mod common;
@@ -32,7 +23,6 @@ fn recorded_pid(state: &Path) -> Option<i32> {
     serde_json::from_str::<Value>(&text).ok()?["pid"].as_i64().map(|p| p as i32).filter(|&p| p > 1)
 }
 
-/// Whatever happens, no Julia stays behind.
 struct Cleanup {
     state: PathBuf,
     children: Vec<Child>,
@@ -51,7 +41,6 @@ impl Drop for Cleanup {
     }
 }
 
-/// `endeavor ARGS` with the test's own state, cache, depot and julia.
 fn command(args: &[&str], work: &Path, julia: &Path, depot: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
     command
@@ -68,7 +57,6 @@ fn command(args: &[&str], work: &Path, julia: &Path, depot: &str) -> Command {
     command
 }
 
-/// Lines of a child's stream as they come.
 fn lines(stream: impl Read + Send + 'static) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -81,9 +69,6 @@ fn lines(stream: impl Read + Send + 'static) -> mpsc::Receiver<String> {
     rx
 }
 
-/// POST a JSON-RPC message to `/mcp` with the bearer token and, once it has
-/// one, the session id, as an agent configured from serve's output does: the
-/// response's head and body.
 fn post(port: u16, token: &str, session: Option<&str>, message: &Value) -> (String, String) {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
@@ -116,7 +101,6 @@ struct Agent {
     port: u16,
     token: String,
     id: u64,
-    /// The `Mcp-Session-Id` from `initialize`, sent back on every request after.
     session: Option<String>,
 }
 
@@ -151,7 +135,6 @@ impl Agent {
         result
     }
 
-    /// Each open notebook's file name, and whether it's this session's.
     fn this_session(&mut self) -> Vec<(String, bool)> {
         let listed = self.ok("list_notebooks", json!({}));
         let name = |nb: &Value| Path::new(nb["path"].as_str().unwrap()).file_name().unwrap().to_string_lossy().into_owned();
@@ -238,12 +221,10 @@ fn serve_and_mcp_without_the_app() {
     });
 
     let notebook = step("new notebook in serve's folder, run a cell, read its output", || {
-        // Julia starts with the first Julia notebook; until it's ready the call says so.
         assert!(!state.join("julia.json").exists(), "Julia started before a Julia notebook was wanted");
         let started = Instant::now();
         let created = loop {
             match agent.call("new_notebook", json!({ "path": "analysis.jl" })) {
-                // Still starting, or still opening, is a normal result that says to call again.
                 (false, result) if matches!(result["error"].as_str(), Some("julia_starting" | "notebook_opening")) && started.elapsed() < Duration::from_secs(900) => std::thread::sleep(Duration::from_secs(2)),
                 (false, result) if result.get("error").is_none() => break result,
                 (_, result) => panic!("new_notebook: {result}"),
@@ -308,7 +289,6 @@ fn serve_and_mcp_without_the_app() {
         assert_eq!(opened["execution_allowed"], false, "safe preview: {opened}");
         assert_eq!(opened["this_session"], false, "the user's, from the browser: {opened}");
 
-        // What the endeavor-notebooks skill says of an open notebook the user names.
         let id = opened["notebook_id"].clone();
         let mut fresh = Agent::new(port, &token);
         fresh.initialize();
@@ -332,7 +312,6 @@ fn serve_and_mcp_without_the_app() {
         let said: Vec<String> = err.try_iter().collect();
         assert!(said.ends_with(&["Stopping Endeavor…".to_owned(), "Stopped.".to_owned()]), "{said:?}");
         assert!(!pid_alive(core), "the core is gone");
-        // Julia and its workers: nothing of the group runs (what is left may be zombies).
         assert!(!group_alive(core), "Julia's process group is gone");
         assert!(!state.join("runtime.json").exists());
     });
@@ -389,7 +368,6 @@ fn serve_and_mcp_without_the_app() {
         assert!(mcp.wait().unwrap().success());
         assert!(pid_alive(core), "still running after the agent went");
 
-        // Another agent, in another project, uses the same runtime with its own folder.
         let other = fresh(work.join("other"));
         let mut mcp = command(&["mcp", "--folder", other.to_str().unwrap()], &work, &julia, &depot)
             .stdin(Stdio::piped())
@@ -399,7 +377,6 @@ fn serve_and_mcp_without_the_app() {
             .unwrap();
         let replies = lines(mcp.stdout.take().unwrap());
         let mut stdin = mcp.stdin.take().unwrap();
-        // Julia starts again for it, so its first notebook may still be opening when the call ends: the same call again gets it.
         let mut id = 0;
         let (reply, created) = loop {
             id += 1;

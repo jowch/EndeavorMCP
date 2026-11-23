@@ -1,22 +1,3 @@
-//! The agent's MCP connection, MCP over Streamable HTTP (spec 2025-06-18):
-//! `POST /mcp` carries one JSON-RPC message; a request gets its reply in the
-//! same response, a notification or a response from the client gets `202
-//! Accepted` with no body. A call that waits on the user gets its reply as an
-//! event stream instead (see `Held`). Each of the app's agent sessions
-//! sends `X-Endeavor-Session` (its key) and, on a server, `X-Endeavor-Host`;
-//! so does the stdio relay (`standalone`). A client without that header gets
-//! an `Mcp-Session-Id` from `initialize`, and that is its key: one agent
-//! connection, one session, as in the app. The app's sessions get no
-//! `Mcp-Session-Id`, since they have a key. The notebook tools are
-//! `notebooks`'; host tools are `host_tools`'; the guide to both is `guide`'s.
-//!
-//! Each session has a run policy the app sets ("plan" | "ask" | "auto"). In
-//! "plan" its notebook writes and runs are refused. In "ask", when the app
-//! says it answers runs (`asks`), a call that runs code waits for the user's
-//! answer (see `asks`); "auto" runs it. In Manual the app also says `edits`:
-//! then a call that changes the notebook waits for the user's answer too,
-//! whatever the policy says about runs.
-
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{self, BufReader, Write};
@@ -35,50 +16,28 @@ use crate::http::{self, Head};
 use crate::notebooks::{self, Folder, IDLE_HOURS, Julia, Notebooks, Reply};
 use crate::results::Results;
 
-/// Protocol versions this server understands, most recent first: `initialize`
-/// echoes the client's requested version when it's one of these, else answers
-/// the first (standard negotiation); `MCP-Protocol-Version` may name any of
-/// these (a client that hasn't negotiated yet, before `initialize`, sends no
-/// header).
 const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// The notebook tools' schemas, for `tools/list`.
 pub const NOTEBOOK_TOOLS_JSON: &str = include_str!("notebook_tools.json");
 static NOTEBOOK_TOOLS: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(NOTEBOOK_TOOLS_JSON).expect("notebook_tools.json"));
 
-/// The machine tools' schemas: `endeavor mcp` answers them itself (`standalone::machines`).
 pub const MACHINE_TOOLS_JSON: &str = include_str!("machine_tools.json");
 static MACHINE_TOOLS: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(MACHINE_TOOLS_JSON).expect("machine_tools.json"));
 
-/// The machine tools, which `endeavor mcp` answers and a runtime doesn't have.
 pub const MACHINE_NAMES: [&str; 4] = ["list_machines", "add_machine", "use_machine", "stop_machine"];
 
-/// Tools that were renamed, as (old name, name now). `tools/list` shows only the name now, so an
-/// agent sees one tool and calls it by that name. A call by the old name still runs for one release:
-/// one an agent took from text written before the rename (an older skill copy, an app from before
-/// its pin, the user's own notes). Drop the old names in the release after. None now:
-/// `pluto_session_status` (now `session_status`) was dropped after its release.
 const RENAMED_TOOLS: [(&str, &str); 0] = [];
 
-/// The name tool `name` has now: the new name of a renamed tool, else `name` itself.
 pub(crate) fn current_name(name: &str) -> &str {
     RENAMED_TOOLS.iter().find(|(old, _)| *old == name).map_or(name, |(_, now)| now)
 }
 
-/// `/call` methods the core answers (core.rs, `julia_call`): Pluto's folder for new notebooks, ending
-/// the runtime, allowing Endeavor's own Julia to be downloaded when the runtime finds none as Julia
-/// is first needed, or its own R to be installed on a Mac when no R is found, where Julia is,
-/// starting it now (the app's Retry), and where R notebooks' setup is.
 const JULIA_CALLS: [&str; 12] = ["endeavor/set_folder", "endeavor/shutdown", "endeavor/allow_julia_install", "endeavor/use_julia", "endeavor/allow_r_install", "endeavor/allow_uv_install", "endeavor/julia_status", "endeavor/start_julia", "endeavor/r_status", "endeavor/leave_to_plugin", "endeavor/keep_for_app", "endeavor/end_when_idle"];
 
-/// Whether a runtime offers a tool by this name, to some session, the old name of a renamed tool
-/// included (a past session's calls use it). The machine tools are the front's.
 pub fn is_tool(name: &str) -> bool {
     known_tool(current_name(name), false).is_some()
 }
 
-/// Tools that change the notebook or run code, here or on the server. `interrupt_notebook` only
-/// stops a run, so no mode asks first, but plan mode refuses it and it stays in the session's notebook.
 pub const WRITE_TOOLS: [&str; 19] = [
     "edit_cell", "edit_cells", "add_cell", "delete_cell", "move_cell", "fold_cell", "new_notebook",
     "execute_cell", "submit_changes", "run_all_cells", "allow_execution", "run_shell", "interrupt_notebook",
@@ -86,56 +45,34 @@ pub const WRITE_TOOLS: [&str; 19] = [
     "apply_package_update", "approve_install", "set_input",
 ];
 
-/// Whether a call to `tool` with `arguments` runs code: the calls Ask to run
-/// asks about first.
 pub fn runs_code(tool: &str, arguments: &Value) -> bool {
     match tool {
-        // delete_cell re-runs the deleted cell's dependents (and can't be undone).
         "execute_cell" | "submit_changes" | "run_all_cells" | "allow_execution" | "delete_cell" => true,
-        // A restart clears every value, and a Julia notebook's runs every cell.
         "restart_notebook" => true,
-        // Closing ends the notebook's process, and every value with it.
         "close_notebook" => true,
-        // Moving the package date installs packages, and can restart R.
         "apply_package_update" => true,
-        // A new input value reruns the cells that read it.
         "set_input" => true,
-        // The OK for a large download installs packages and runs the cells waiting on them.
         "approve_install" => true,
-        // A shell command on a session's server.
         "run_shell" => true,
-        // An answer lets a waiting cell go on, and may say yes to a download or an overwrite.
         "answer_prompt" => true,
         "add_cell" | "edit_cell" => arguments["run_after"].as_bool() == Some(true),
-        // Opening a notebook runs nothing unless asked to.
         "open_notebook" => arguments["run_notebook"].as_bool() == Some(true),
         _ => false,
     }
 }
 
-/// Whether a call to `tool` with `arguments` makes or opens an R notebook, by its path.
 pub(crate) fn names_r_notebook(tool: &str, arguments: &Value) -> bool {
     matches!(tool, "new_notebook" | "open_notebook") && arguments["path"].as_str().is_some_and(|path| crate::notebooks::engines::of_path(path) == wire::backend::Backend::Ember)
 }
 
-/// Whether `result`, a runtime's answer to the agent's call to `tool` with `arguments`, is a core from
-/// before R notebooks refusing an R notebook's path. Such a core takes only `.jl` paths and says so
-/// ("must end in .jl") without a word about R, so the agent can't tell why (#226). A core with R
-/// notebooks never answers an R path that way: it hands the path to R, which says what is missing.
-/// That rests on the order in `new_notebook` (`tools.rs`): a current core on Windows also says "must
-/// end in .jl" with no "or .R", but only for a path R doesn't claim, since R paths go to R first. The
-/// callers also check that the runtime is another build's where they can tell.
 pub(crate) fn refuses_r_for_want_of_it(tool: &str, arguments: &Value, result: &Value) -> bool {
     names_r_notebook(tool, arguments)
         && result["isError"] == true
         && result["content"].as_array().is_some_and(|content| content.iter().any(|c| c["text"].as_str().is_some_and(|text| text.contains("must end in .jl") && !text.contains("or .R"))))
 }
 
-/// What the app's sessions get for a Python notebook, which the app can't show yet.
 pub(crate) const PYTHON_NOT_IN_APP: &str = "ArgumentError: unsupported::Python notebooks work with the Endeavor plugin on this computer (`endeavor serve` or `endeavor mcp`), not yet in the Endeavor app";
 
-/// Whether `tool` with `arguments` opens or makes a Python notebook: by its path, else (a new
-/// notebook with none) by the session's kind.
 fn opens_python(tool: &str, arguments: &Value, kind: Option<wire::backend::Backend>) -> bool {
     use wire::backend::Backend;
     match tool {
@@ -148,151 +85,78 @@ fn opens_python(tool: &str, arguments: &Value, kind: Option<wire::backend::Backe
     }
 }
 
-/// Whether a call to `tool` changes the notebook: what Manual asks about
-/// even when runs don't ask.
 pub fn changes_notebook(tool: &str) -> bool {
     matches!(tool, "edit_cell" | "edit_cells" | "add_cell" | "delete_cell" | "move_cell" | "fold_cell" | "new_notebook" | "apply_package_update")
 }
 
-/// Whether the runtime holds a call to `tool` with `arguments` for the
-/// user's answer, in a session whose policy is `policy` and whose edits ask
-/// (`edits`, Manual). Nothing is held in "plan", which refuses writes. A large download
-/// (`approve_install`) is held in every other mode, Auto included: the user decides each one.
 pub fn asks_first(tool: &str, arguments: &Value, policy: &str, edits: bool) -> bool {
     policy != "plan" && (tool == "approve_install" || (policy == "ask" && runs_code(tool, arguments)) || (edits && changes_notebook(tool)))
 }
 
-/// A session's policy as the app set it.
 struct Policy {
     policy: String,
-    /// The app answers what the runtime holds (an app from before runtime asks doesn't).
     asks: bool,
-    /// Calls that change the notebook ask too (Manual).
     edits: bool,
 }
 
-/// A runtime started by `endeavor serve` or `mcp`, without the app
-/// (see `standalone`).
 pub struct Standalone {
-    /// The runtime's one port, which the user's browser reaches as
-    /// `localhost` (here, or through `ssh -L` with the same port).
     pub port: u16,
-    /// Where notebooks go for a session that was told no folder. For a runtime started without a
-    /// project folder (`no_folder`) it is the home folder.
     pub folder: String,
     pub no_folder: bool,
-    /// Host tools for every session, as on this host (`--host-tools`), for an
-    /// agent on another machine.
     pub host: Option<String>,
 }
 
-/// A link to `target` on Pluto's page, at `port` on this computer, for a browser that has been let
-/// in (it has the runtime's cookie). It carries no token: this is the link tool results give, and
-/// an agent is never given the runtime's token.
 pub(crate) fn browser_link(port: u16, target: &str) -> String {
     format!("http://localhost:{port}{target}")
 }
 
-/// `value` for a URL's query: percent-encoded, but for what's plain in a path.
 pub(crate) fn query_value(value: &str) -> String {
     value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
-/// `url` with the runtime's `token`, which lets a browser in: its first visit gets the cookie. Only
-/// for the user's own browser and terminal, never for a tool result.
 pub(crate) fn entry_link(url: &str, token: &str) -> String {
     let join = if url.contains('?') { '&' } else { '?' };
     format!("{url}{join}token={token}")
 }
 
-/// `url` without any `token` query parameter: a runtime from before tool results stopped carrying
-/// the token still puts it in `browser_url`.
 pub(crate) fn without_token(url: &str) -> String {
     let Some((path, query)) = url.split_once('?') else { return url.to_owned() };
     let rest: Vec<&str> = query.split('&').filter(|pair| !pair.is_empty() && !pair.starts_with("token=")).collect();
     if rest.is_empty() { path.to_owned() } else { format!("{path}?{}", rest.join("&")) }
 }
 
-/// What the core does with a session's folder and kind (`Bridge::on_folder`).
 pub type OnFolder = Box<dyn Fn(&str, &str) + Send + Sync>;
 
-/// What every client connection shares.
 pub struct Bridge {
     pub julia: Arc<Julia>,
     pub notebooks: Arc<Notebooks>,
     pub token: String,
-    /// Each agent session's policy, by its key.
     policies: Mutex<HashMap<String, Policy>>,
-    /// Each agent session's working folder on this machine, by its key; none is a session that was
-    /// told it has no project folder.
     folders: Mutex<HashMap<String, Option<String>>>,
-    /// Each agent session's last tool results, for the app to look up.
     results: Results,
-    /// Each agent session's open or creation the user allowed on a card, with when they did, while
-    /// it is told its engine is still starting (`STARTING_KINDS`): the same call again carries it on
-    /// without asking the user again (`ask_first`).
     starting_calls: Mutex<HashMap<String, (String, Value, Instant)>>,
-    /// `run_shell`'s environment, changed from ours as Julia's was: its
-    /// depot, and none of what the helper passes the runtime.
     shell_env: Vec<(&'static str, Option<String>)>,
-    /// Set when the runtime runs without the app.
     pub standalone: Option<Standalone>,
-    /// Told each folder a session is given, with the session's `kind` if the caller said it
-    /// (`julia`, `r` or `unknown`): the core warms Julia for a Julia session's folder.
     pub on_folder: std::sync::OnceLock<OnFolder>,
-    /// What the notebook views use: Pluto's page and their sockets to Pluto (`views`).
     pub views: crate::views::Views,
 }
 
-/// Who sent a message: the agent session's key and the server it works on,
-/// both empty for the app. The key is `X-Endeavor-Session`, else the
-/// `Mcp-Session-Id` this server issued; a client that sends neither is
-/// treated as the app is (no notebook of its own).
 #[derive(Default)]
 pub struct Caller {
     pub owner: String,
     pub host: String,
-    /// The agent loads Endeavor's skills itself (Claude Code's plugin), so it
-    /// gets no guide.
     pub has_skills: bool,
-    /// The port the user's browser reaches this runtime on (`X-Endeavor-Browser-Port`), when
-    /// it isn't the runtime's own: a session's loopback port. The links in results use it.
     pub browser_port: Option<u16>,
-    /// The caller is the stdio front (`endeavor mcp`), which also lists the host
-    /// tools and the machine tools, and answers the machine tools itself.
     pub front: bool,
-    /// The front was started without a project folder, so on this computer the tools take absolute paths only.
     pub no_folder: bool,
-    /// The client draws MCP App views (`views`): the front lists the notebook view and its tools.
     pub views: bool,
-    /// The session may work on several notebooks (`X-Endeavor-Notebooks: several`): its front's client
-    /// serves several conversations on one connection, as Claude's desktop app does.
     pub several: bool,
-    /// The caller is the app or one of its agents, which the app shows the notebooks to; otherwise it is
-    /// the plugin's (`endeavor mcp`, `serve`), whose user watches them in a browser. `X-Endeavor-Client`
-    /// says which (`app` or `plugin`); a caller that doesn't say is taken as the runtime's starter was, so
-    /// the app and the plugin can share one runtime and each still gets its own answers (#110).
     pub app: bool,
-    /// Someone asks the user before this caller's `approve_install` reaches the runtime, as the
-    /// caller itself says: the app, with its card (`X-Endeavor-Client: app`), or a front, in a dialog
-    /// or on a page in their browser (`X-Endeavor-Consent: front`, #285, #389). Only what the caller
-    /// sends counts, never the runtime's starter (`app`'s default), so a client `serve` set up on a
-    /// runtime the app started isn't taken for the app here (#391). Each header is a declaration,
-    /// not a check: it stops an agent's own yes, since a model can't add headers to its client's
-    /// requests, not a client configured to send one. No text an agent reads names them.
     pub consent: bool,
-    /// For a front's caller (`X-Endeavor-Client: plugin`), whether its client is in its own auto mode
-    /// (`X-Endeavor-Mode: auto`, from Claude Code's hook: `standalone::claude_mode`), so a run adds a
-    /// new package without asking, as in the app's Auto mode. None for any other caller, whose mode is
-    /// the app's to say (`endeavor/set_policy`). A declaration like `consent`: no text an agent reads names it.
     pub auto_mode: Option<bool>,
-    /// The front's own process (`X-Endeavor-Front-*`), which the runtime checks is still running to tell
-    /// whether the plugin is still in it when the app quits (`Notebooks::shared`, app #232).
     pub front_process: Option<Front>,
 }
 
-/// A front's process on this computer: its pid, when it started and in which boot, as `pid_alive`
-/// takes them, so a later process given the same pid isn't taken for it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Front {
     pub pid: i32,
@@ -301,12 +165,10 @@ pub struct Front {
 }
 
 impl Front {
-    /// This process.
     pub fn own() -> Front {
         Front { pid: std::process::id() as i32, started: crate::own_start_time(), boot: crate::own_boot() }
     }
 
-    /// The headers a front sends with each message.
     pub fn header(&self) -> String {
         let mut head = format!("X-Endeavor-Front-Pid: {}\r\n", self.pid);
         if let Some(started) = self.started {
@@ -325,29 +187,19 @@ impl Front {
         Some(Front { pid, started, boot })
     }
 
-    /// Whether that process still runs.
     pub fn alive(&self) -> bool {
         crate::pid_alive(self.pid, self.started, self.boot.as_deref())
     }
 }
 
-/// `approve_install`'s description, where the agent's call is the user's yes: the agent asks in the
-/// chat. The front swaps it for its own words (`standalone::consent`); a caller that reaches the
-/// runtime with no one to ask gets `NO_ONE_ASKS` (#391). A test checks notebook_tools.json says it.
 pub(crate) const ASK_IN_CHAT: &str = "It doesn't ask the user: calling it is the user's yes. Ask them first, end your reply, and call it only once they have said yes in a later message; never on your own.";
 
-/// `approve_install`'s description for a caller that no one asks for: a client connected to `serve`
-/// over HTTP, with no front between them (#391).
 const NO_ONE_ASKS: &str = "Endeavor can't ask the user over this connection (a client connected straight to `endeavor serve`), so it can't be approved here: calling it installs nothing. Tell the user what it would install and its size where known, that it needs their OK, and that it can be approved only from a client connected through `endeavor mcp` that shows Endeavor's dialog, such as a new Claude Code session in a terminal (not `claude -p`), or from the Endeavor desktop app (a program they install, not a web page): they close this notebook here, then open its file in the app, which asks them. The notebook's page (its browser_url) can't approve it either: it has no button for this, so don't send them there to approve it. Don't work around it.";
 
-/// The runtime's asking step (`notebooks::ASK_STEP`) for such a caller.
 const ASK_STEP_NO_ONE: &str = "Endeavor can't ask the user over this connection, so this can't be approved here: approve_install installs nothing. Tell the user what it would install and its size where known, that it needs their OK, and that it can be approved only from a client connected through `endeavor mcp` that shows Endeavor's dialog, such as a new Claude Code session in a terminal (not `claude -p`), or from the Endeavor desktop app (a program they install, not a web page): they close this notebook here, then open its file in the app, which asks them. The notebook's page (its browser_url) can't approve it either: it has no button for this, so don't send them there to approve it. Then end your reply.";
 
-/// What `approve_install` answers such a caller: nothing downloads.
 const NO_ONE_ASKS_ERROR: &str = "download_cant_ask::Endeavor can't ask the user over this connection: this client is connected straight to `endeavor serve`, which can neither show Endeavor's dialog nor open a page in their browser, and no dialog was shown. So this can't be approved here: nothing is installed, and calling approve_install again won't change that. Tell the user what it would install and its size where known, that it needs their OK, and that it can be approved only from a client connected through `endeavor mcp` that shows Endeavor's dialog, such as a new Claude Code session in a terminal (not `claude -p`), or from the Endeavor desktop app (a program they install, not a web page): they close this notebook here, then open its file in the app, which asks them. The notebook's page (its browser_url) can't approve it either: it has no button for this, so don't send them there to approve it. Don't work around it.";
 
-/// A name that goes in a header or a message: printable characters only,
-/// trimmed, at most `LABEL_MAX` of them. None if nothing is left.
 pub(crate) fn clean_label(text: &str) -> Option<String> {
     let label: String = text.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(LABEL_MAX).collect();
     let label = label.trim_end().to_owned();
@@ -357,7 +209,6 @@ pub(crate) fn clean_label(text: &str) -> Option<String> {
 const LABEL_MAX: usize = 80;
 
 impl Caller {
-    /// The caller of `request`, on a runtime the app started (`app_runtime`) or the plugin did.
     fn of(request: &Head, app_runtime: bool) -> Caller {
         let header = |name| request.header(name).unwrap_or_default().to_owned();
         let owner = request.header("X-Endeavor-Session").or_else(|| request.header("Mcp-Session-Id")).unwrap_or_default().to_owned();
@@ -373,15 +224,11 @@ impl Caller {
         Caller { owner, host: header("X-Endeavor-Host"), has_skills: header("X-Endeavor-Skills") == "plugin", browser_port, front: false, no_folder: false, views: false, several, app, consent, auto_mode, front_process: Front::of(request) }
     }
 
-    /// No one asks the user before this caller's `approve_install`: not the app (its card), not a
-    /// front (its dialog or page). Its call alone would be the yes, so it is refused (#391).
     fn no_one_asks(&self) -> bool {
         !self.front && !self.consent
     }
 }
 
-/// `reply`, a reply to a caller that no one asks for (`Caller::no_one_asks`), with the words that
-/// would have the agent ask in the chat and then approve saying that it can't approve here.
 fn no_one_asks_said(reply: String) -> String {
     if !reply.contains(ASK_IN_CHAT) && !reply.contains(crate::notebooks::ASK_STEP) {
         return reply;
@@ -390,8 +237,6 @@ fn no_one_asks_said(reply: String) -> String {
 }
 
 impl Bridge {
-    /// `depot` is Julia's JULIA_DEPOT_PATH.
-    /// `token` is the core's bearer token; `engine_token` the key to Julia's bridge (`Julia`).
     pub fn new(token: String, engine_token: String, depot: &str) -> Bridge {
         let shell_env = vec![
             ("JULIA_DEPOT_PATH", Some(crate::paths::with_user_depot(depot))),
@@ -409,7 +254,6 @@ impl Bridge {
         let julia = Arc::new(Julia::new(engine_token));
         let clock = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
         Bridge {
-            // Pluto's engine joins once Julia is ready (core.rs).
             notebooks: Arc::new(Notebooks::new(None, Box::new(clock))),
             julia,
             token,
@@ -424,8 +268,6 @@ impl Bridge {
         }
     }
 
-    /// A session's working folder: the one it was given, else the standalone runtime's. The app's
-    /// sessions always give theirs, so the standalone folder is only ever the plugin's sessions' fallback.
     fn folder(&self, owner: &str) -> Folder {
         match self.folders.lock().unwrap().get(owner) {
             Some(Some(dir)) => Folder::In(dir.clone()),
@@ -437,9 +279,6 @@ impl Bridge {
         }
     }
 
-    /// The reply to one of the app's `/call`s, if the bridge answers it; `None`
-    /// for the calls about Julia (`JULIA_CALLS`). Only the app calls this route, so its
-    /// tool calls have no caller.
     pub fn app_call(&self, raw: &[u8]) -> Option<String> {
         let message = serde_json::from_slice::<Value>(raw).ok().filter(Value::is_object)?;
         let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -462,7 +301,6 @@ impl Bridge {
                     _ => "",
                 };
                 eprintln!("[ Info: Session {owner} policy: {policy}{what}");
-                // A yes was given under the mode it was asked in.
                 self.starting_calls.lock().unwrap().remove(&owner);
                 self.notebooks.set_auto(&owner, policy == "auto");
                 self.policies.lock().unwrap().insert(owner, Policy { policy, asks, edits });
@@ -509,7 +347,6 @@ impl Bridge {
             }
             "endeavor/set_session_folder" => {
                 let (owner, folder) = (text("owner", ""), params.get("folder").filter(|f| !f.is_null()).map_or(String::new(), julia_string));
-                // The session's kind: kept until said again, so a later call that leaves it out keeps it.
                 let kind = match params["kind"].as_str() {
                     Some(said) => {
                         let kind = match said {
@@ -549,14 +386,8 @@ impl Bridge {
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
                 return Some(answer(self.notebooks.run_preview(&text("tool", ""), &arguments)));
             }
-            // The user's own Restart: what it adds is theirs.
             "endeavor/restart_notebook" => return Some(answer(self.notebooks.restart(&text("notebook_id", ""), false))),
             "endeavor/restore_cells" => return Some(answer(self.notebooks.restore_cells(&text("notebook_id", ""), &params["cells"]))),
-            // The user pressed Stop in the app, which the runtime hears of no other way when no call is
-            // under way: interrupt the session's runs that are still going. Answered at once with the
-            // notebooks it looks at (each may turn out to have nothing going), since Pluto's interrupt
-            // can take seconds; each on its own thread, so one that ends its process doesn't hold up
-            // the next.
             "endeavor/stop_session" => {
                 let owner = text("owner", "");
                 let stopping = self.notebooks.session_runs(&owner);
@@ -570,8 +401,6 @@ impl Bridge {
             "endeavor/file_info" => return Some(answer(notebooks::file_info(&text("path", "")))),
             "endeavor/new_notebook" => {
                 let owner = text("owner", "");
-                // The app's New notebook, in the session's kind: never Python, which it can't show yet
-                // (the agent's own calls are refused in `refusal`, #358). Its chip doesn't offer Python today.
                 if opens_python("new_notebook", &json!({}), self.notebooks.kind(&owner)) {
                     return Some(answer(Err(PYTHON_NOT_IN_APP.to_owned())));
                 }
@@ -579,17 +408,14 @@ impl Bridge {
                 return Some(answer(self.notebooks.new_for(&owner, &folder)));
             }
             method if JULIA_CALLS.contains(&method) => return None,
-            // The app's own call: the user's click there.
             _ => return Some(self.dispatch(&message, &Caller { app: true, consent: true, ..Caller::default() }, &|| false).unwrap_or_else(|| "{}".into())),
         }
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })))
     }
 
-    /// Serve `POST /mcp`. Whether the connection can carry another request.
     pub fn mcp(&self, request: &Head, reader: &mut BufReader<wire::Shared>, client: &mut wire::Shared) -> io::Result<bool> {
         let mut caller = Caller::of(request, self.standalone.is_none());
-        // `serve --host-tools` gives them to the plugin's sessions, not to the app's.
         if caller.host.is_empty()
             && !caller.app
             && let Some(host) = self.standalone.as_ref().and_then(|s| s.host.clone())
@@ -603,30 +429,22 @@ impl Bridge {
         })
     }
 
-    /// The reply to one JSON-RPC message, if it gets one. `gone`, called
-    /// while a call waits on the user: whether the client hung up.
     fn dispatch(&self, message: &Value, caller: &Caller, gone: &dyn Fn() -> bool) -> Option<String> {
         let began = Instant::now();
         if message["method"] == "notifications/cancelled" && !caller.owner.is_empty() {
             let request = &message["params"]["requestId"];
-            // The user's Stop: a yes for a call waiting on its engine goes with it.
             self.starting_calls.lock().unwrap().remove(&caller.owner);
-            // Waiting for the user's answer, it goes; running code, the run is interrupted.
             if self.notebooks.asks.cancel(&caller.owner, request) {
                 self.notebooks.publish();
             } else if let Some((notebook, runs_code)) = self.notebooks.cancelled(&caller.owner, request) {
-                // Pluto's interrupt can take seconds (it presses Ctrl+C again until the run ends):
-                // the notification is answered at once, and the call ends when the run does.
                 let (notebooks, owner) = (self.notebooks.clone(), caller.owner.clone());
                 std::thread::spawn(move || notebooks.stop_for(&owner, &notebook, runs_code));
             }
         }
         answer(message, caller, |params| {
-            // The notebook view's calls: not the session's activity, and nothing the app is told of.
             if let Some(name) = params["name"].as_str().filter(|name| crate::views::is_view_tool(name)) {
                 return self.view_call(name, params);
             }
-            // A front says its client's mode with each call; the mode can change between calls.
             if let Some(auto) = caller.auto_mode.filter(|_| !caller.owner.is_empty()) {
                 self.notebooks.set_auto(&caller.owner, auto);
             }
@@ -641,8 +459,6 @@ impl Bridge {
         })
     }
 
-    /// A call of one of the notebook view's tools (`views`). Its result carries what the view
-    /// reads in `structuredContent`, and a line of text for a client that shows it.
     fn view_call(&self, name: &str, params: &Value) -> Value {
         let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
         if let Err(result) = check_arguments(name, &arguments, false) {
@@ -650,8 +466,6 @@ impl Bridge {
         }
         let page = |backend, notebook: Option<&str>| match (backend, notebook) {
             (wire::backend::Backend::Ember, Some(id)) => self.notebooks.ember_page(id),
-            // ponytail: Python notebooks have no page for the notebook view yet (marimo's editor is
-            // 21 MB of lazily loaded modules); the user opens the browser link instead.
             (wire::backend::Backend::Marimo, Some(_)) => Err("not_supported: Python notebooks can't show in this view yet; open the notebook's browser link instead".to_owned()),
             _ => {
                 let port = *self.julia.port.get().ok_or("not_ready: Julia isn't running")?;
@@ -664,22 +478,14 @@ impl Bridge {
         }
     }
 
-    /// A `tools/call`'s result.
     fn call_tool(&self, params: &Value, call: &Call) -> Value {
         let caller = call.caller;
         let text = |result: &Value| json!({ "content": [{ "type": "text", "text": to_json(result) }], "isError": false });
-        // Whether a notebook-tool error is worth pointing at the guide: only an
-        // agent without it to begin with, and only for a call it could retry
-        // differently, not a host-tool mistake (its own tools, not these) or a
-        // refusal that already says exactly what to do.
         let help = !caller.has_skills;
         let (name, mut arguments) = match call_parts(params, help, false) {
             Ok(call) => call,
             Err(result) => return result,
         };
-        // A refusal answers first: a call that can never run is not told to fix its arguments. A call
-        // with the wrong arguments, or a relative path the session cannot resolve, runs nothing and is
-        // not the session's activity.
         let refusal = self.refusal(caller, name, &arguments);
         if refusal.is_none() {
             if let Err(result) = check_arguments(name, &arguments, help) {
@@ -697,7 +503,6 @@ impl Bridge {
             if self.notebooks.asks.moved_on(&caller.owner, name, &arguments) {
                 self.notebooks.publish();
             }
-            // Anything else the session does ends what its earlier yes covered.
             self.starting_calls.lock().unwrap().retain(|owner, (tool, args, _)| *owner != caller.owner || (tool == name && *args == arguments));
         }
         self.notebooks.note_activity(&arguments);
@@ -714,8 +519,6 @@ impl Bridge {
             let folder = self.folder(&caller.owner);
             let env: Vec<_> = self.shell_env.iter().map(|(name, value)| (*name, value.as_deref())).collect();
             let shell = host_tools::Shell { folder: folder.dir(), env: &env, owner: &caller.owner, wait: Duration::ZERO, started: None };
-            // The same command again only waits for the one this session already started: the user
-            // was asked once. The call then waits for that one and can't start another.
             let started = host_tools::started(name, &arguments, &shell);
             if started.is_none()
                 && let Err(result) = self.ask_first(call, name, &mut arguments)
@@ -735,7 +538,6 @@ impl Bridge {
         if let Some(refusal) = self.notebooks.refusal(&caller.owner, name, &arguments, &folder) {
             return tool_error(&refusal, help);
         }
-        // A box the user drew with Point in the notebook view: the picture the view drew of it.
         if name == "view_cell_output" && let Some(crop) = arguments["crop"].as_str() {
             let notebook = arguments["notebook_id"].as_str().unwrap_or_default();
             return match self.views.crop(notebook, crop) {
@@ -751,7 +553,6 @@ impl Bridge {
             Ok(run) => run,
             Err(result) => return result,
         };
-        // The agent cancelling a call on a notebook is the user's Stop (`Notebooks::stop_for`).
         let notebook = arguments.get("notebook_id").and_then(Value::as_str);
         let _running = match notebook {
             Some(notebook) if !caller.owner.is_empty() && !call.request.is_null() => {
@@ -764,8 +565,6 @@ impl Bridge {
         } else {
             self.notebooks.tool_unrun(&caller.owner, name, &arguments, &folder, call.began)
         };
-        // An allowed open or creation still waiting on its engine keeps its yes (`ask_first`); one that
-        // ended, or that the agent gave up on, doesn't.
         let waits_on_engine = matches!(&reply, Err(error) if starting(error)) && !(call.gone)();
         if matches!(name, "open_notebook" | "new_notebook") && !waits_on_engine {
             self.starting_calls.lock().unwrap().remove(&caller.owner);
@@ -780,11 +579,6 @@ impl Bridge {
         }
     }
 
-    /// Without the app, the user watches notebooks in a browser: the results
-    /// that name a notebook, or the session, carry the link to it. A caller
-    /// that says which port its browser uses (`X-Endeavor-Browser-Port`) gets it on any
-    /// runtime; otherwise only a standalone runtime adds one, with its own port, and not for the app's callers. The link has no
-    /// token: the `mcp` front opens the notebook in the user's browser with it, and `serve` prints it.
     fn add_browser_url(&self, tool: &str, caller: &Caller, result: &mut Value) {
         let Some(port) = caller.browser_port.or_else(|| self.standalone.as_ref().filter(|_| !caller.app).map(|s| s.port)) else { return };
         let Value::Object(fields) = result else { return };
@@ -793,7 +587,6 @@ impl Bridge {
                 Some(id) => match self.notebooks.backend_of(id) {
                     wire::backend::Backend::Pluto => format!("/edit?id={id}"),
                     wire::backend::Backend::Ember => format!("/ember/edit?id={id}"),
-                    // marimo's page names its notebook by path.
                     wire::backend::Backend::Marimo => match fields.get("path").and_then(Value::as_str) {
                         Some(path) => format!("/marimo/?file={}", query_value(path)),
                         None => return,
@@ -807,10 +600,6 @@ impl Bridge {
         fields.insert("browser_url".into(), browser_link(port, &target).into());
     }
 
-    /// Wait for the user's answer to a call the session's policy holds
-    /// (`asks_first`). Whether it runs as asked; false for an edit the user
-    /// didn't let run in Ask to run, which is made but not run. Otherwise the
-    /// call's result: refused, cancelled, or with no app to ask.
     fn ask_first(&self, call: &Call, tool: &str, arguments: &mut Value) -> Result<bool, Value> {
         let owner = &call.caller.owner;
         let (held, edits) = match self.policies.lock().unwrap().get(owner) {
@@ -818,17 +607,11 @@ impl Bridge {
             _ => (false, false),
         };
         if owner.is_empty() || !held {
-            // Allowed without asking now (Auto, say): a card left up for this call goes.
             if !owner.is_empty() && self.notebooks.asks.moved_on(owner, "", &Value::Null) {
                 self.notebooks.publish();
             }
             return Ok(true);
         }
-        // The user let this same call run on a card, and it was told its engine is still starting
-        // (Julia's download, say), so the agent made it again. It is still that one call: it doesn't
-        // ask again. Only this session's, only the same tool with the same arguments, only while
-        // nothing else came between (another call, a Stop, a change of mode), and only for a while
-        // after the user said yes.
         let carried_on = self.starting_calls.lock().unwrap().get(owner).is_some_and(|(t, args, allowed)| t == tool && args == arguments && allowed.elapsed() < STARTING_CALL_KEPT);
         if carried_on {
             eprintln!("[ Info: Session {owner} makes its allowed {tool} again while the engine starts; not asked again");
@@ -847,7 +630,6 @@ impl Bridge {
         self.notebooks.publish();
         match outcome {
             Outcome::Answered(Answer { allow: true, user_ran, packages }) => {
-                // The yes covers the packages the user's card named, and no package held since (#418).
                 if tool == "approve_install"
                     && let Some(packages) = packages
                 {
@@ -862,7 +644,6 @@ impl Bridge {
                 }
                 Ok(true)
             }
-            // In Manual a denied change isn't made, even one that was to run after.
             Outcome::Answered(_) if edits && changes_notebook(tool) => Err(tool_error("ArgumentError: not_approved::The user chose not to make this change.", false)),
             Outcome::Answered(_) if matches!(tool, "edit_cell" | "add_cell") => Ok(false),
             Outcome::Answered(_) => Err(tool_error("ArgumentError: not_approved::The user chose not to run this.", false)),
@@ -871,7 +652,6 @@ impl Bridge {
         }
     }
 
-    /// Why a session may not call `tool`, as the error Julia raised for it.
     fn refusal(&self, caller: &Caller, tool: &str, arguments: &Value) -> Option<String> {
         if tool == "approve_install" && caller.no_one_asks() {
             return Some(NO_ONE_ASKS_ERROR.to_owned());
@@ -879,11 +659,6 @@ impl Bridge {
         if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
             return Some(host_tool_refusal(tool));
         }
-        // ponytail: the app has no pane for marimo's page yet (Endeavor #1). Refused by caller, not by
-        // runtime, since the app and the plugin may share one (#358): the plugin's sessions open Python
-        // notebooks on the app's runtime too, and the app's never do on the plugin's.
-        // Only opening or making one is refused: an app session is bound to its one notebook
-        // (`endeavor/set_notebook`), so it never reaches a Python notebook a plugin session opened.
         if caller.app && opens_python(tool, arguments, self.notebooks.kind(&caller.owner)) {
             return Some(PYTHON_NOT_IN_APP.to_owned());
         }
@@ -898,21 +673,12 @@ impl Bridge {
     }
 }
 
-/// How long after the user allowed an open or creation the same call again, while its engine is
-/// still starting, goes on without asking (`Bridge::starting_calls`): counted from the yes, so a
-/// start that stalls doesn't keep it for as long as the agent tries. An agent told to try again in a
-/// minute does well within it; a first Julia download that takes longer is asked about again.
 const STARTING_CALL_KEPT: Duration = Duration::from_secs(5 * 60);
 
-/// Whether a tool's error says only that the engine or the notebook is still on its way: its kind
-/// is the whole text before the first `::`.
 fn starting(error: &str) -> bool {
     error.split_once("::").is_some_and(|(kind, _)| STARTING_KINDS.contains(&kind))
 }
 
-/// How long into a call it waits for the user's answer: what is left of the 60 seconds agents give a
-/// call must hold the work after it. Runs wait at least 5 seconds more (`WAIT_SECONDS` counts from
-/// the call's start); an open has no limit of its own and the first in a new Julia takes 20 to 25 s.
 fn ask_wait(tool: &str) -> Duration {
     match tool {
         "open_notebook" | "new_notebook" => Duration::from_secs(20),
@@ -920,8 +686,6 @@ fn ask_wait(tool: &str) -> Duration {
     }
 }
 
-/// How long `run_shell` waits for its command: what is left of `WAIT_SECONDS`, but at least
-/// `WAIT_FLOOR_SECONDS`, as a notebook run. A debug build reads `ENDEAVOR_TEST_SHELL_WAIT_SECS`.
 fn shell_wait(began: Instant) -> Duration {
     let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_SHELL_WAIT_SECS").ok()?.parse().ok()).flatten();
     if let Some(seconds) = test {
@@ -930,17 +694,10 @@ fn shell_wait(began: Instant) -> Duration {
     Duration::from_secs_f64(notebooks::WAIT_SECONDS).saturating_sub(began.elapsed()).max(Duration::from_secs_f64(notebooks::WAIT_FLOOR_SECONDS))
 }
 
-/// Whether a call changes or runs anything, and so takes down the session's asks left up for other
-/// calls. A read leaves them: the agent may read a cell before making the same call again, and an
-/// answer is tied to the notebook's code anyway.
 fn acts(tool: &str, arguments: &Value) -> bool {
     WRITE_TOOLS.contains(&tool) || runs_code(tool, arguments)
 }
 
-/// The error of a call whose wait for the user's answer ended first: the ask stays up for the same call
-/// made again. Agents stop retrying after one to four tries whatever the text says, so it also says
-/// what to do after stopping: the app keeps the card, and the same call when the user writes back
-/// takes their answer.
 fn unanswered(tool: &str) -> String {
     format!(
         "ArgumentError: waiting_for_user::The user hasn't answered yet, so nothing was changed or run. \
@@ -949,12 +706,10 @@ If you stop waiting, tell the user the request is waiting for their answer. When
     )
 }
 
-/// Why a session on the user's computer may not call host tool `tool`, as the error Julia raised for it.
 pub(crate) fn host_tool_refusal(tool: &str) -> String {
     format!("ArgumentError: host_tools::`{tool}` is only for sessions on a server. This session runs on the user's computer: use your own file and shell tools.")
 }
 
-/// The arguments of a `tools/call` (missing or null is `{}`), or the failed result for ones that aren't an object.
 pub(crate) fn call_arguments(params: &Value, help: bool) -> Result<Value, Value> {
     match params.get("arguments") {
         None | Some(Value::Null) => Ok(json!({})),
@@ -967,7 +722,6 @@ fn unknown_tool_result(name: &str, help: bool) -> Value {
     tool_error(&format!("ArgumentError: unknown_tool::Unknown tool: '{name}'"), help)
 }
 
-/// Each tool's `inputSchema` by name: the one list of the tools this build has, the machine tools included.
 static INPUT_SCHEMAS: LazyLock<HashMap<String, Value>> = LazyLock::new(|| {
     let listed = |tools: &Value| tools.as_array().cloned().unwrap_or_default();
     let tools = [listed(&NOTEBOOK_TOOLS), listed(&MACHINE_TOOLS), host_tools::schemas(), vec![guide::schema()], crate::views::schemas()];
@@ -976,17 +730,10 @@ static INPUT_SCHEMAS: LazyLock<HashMap<String, Value>> = LazyLock::new(|| {
         .collect()
 });
 
-/// The `inputSchema` of tool `name`, if this build has the tool. `machines`: whether the machine
-/// tools count (they do in the front; a runtime has none).
 fn known_tool(name: &str, machines: bool) -> Option<&'static Value> {
     INPUT_SCHEMAS.get(name).filter(|_| machines || !MACHINE_NAMES.contains(&name))
 }
 
-/// The one check of a call's argument names against the tool's `inputSchema`: a name the schema
-/// lacks, or a required one missing, is a failed result that says what the tool takes. Types and
-/// nested values are the tool's to check. A tool whose schema has no properties ignores its
-/// arguments (some clients can't send an empty object and add a placeholder). A tool without a
-/// schema passes.
 pub(crate) fn check_arguments(tool: &str, arguments: &Value, help: bool) -> Result<(), Value> {
     let Some(schema) = known_tool(tool, true) else { return Ok(()) };
     let known: Vec<&str> = schema["properties"].as_object().into_iter().flatten().map(|(name, _)| name.as_str()).collect();
@@ -995,7 +742,6 @@ pub(crate) fn check_arguments(tool: &str, arguments: &Value, help: bool) -> Resu
     }
     let quote = |names: &[&str]| names.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ");
     let unknown: Vec<&str> = (arguments.as_object().into_iter().flatten()).map(|(name, _)| name.as_str()).filter(|name| !known.contains(name)).collect();
-    // The guide covers the notebook tools, not the host tools (see `call_tool`).
     let help = help && !host_tools::NAMES.contains(&tool);
     let fail = |message: String| Err(tool_error(&format!("ArgumentError: invalid_argument::{message}"), help));
     if !unknown.is_empty() {
@@ -1012,9 +758,6 @@ pub(crate) fn check_arguments(tool: &str, arguments: &Value, help: bool) -> Resu
     Ok(())
 }
 
-/// A `tools/call` of a tool this build has: its name and arguments, or the failed result for
-/// arguments that aren't an object or a tool it lacks. `machines`: see `known_tool`. The check of
-/// the argument names (`check_arguments`) is separate, for the runtime to refuse a call first.
 pub(crate) fn call_parts(params: &Value, help: bool, machines: bool) -> Result<(&str, Value), Value> {
     let arguments = call_arguments(params, help)?;
     match params.get("name") {
@@ -1025,31 +768,24 @@ pub(crate) fn call_parts(params: &Value, help: bool, machines: bool) -> Result<(
     }
 }
 
-/// `call_parts`, then `check_arguments`: a call the front can pass on.
 pub(crate) fn checked_call(params: &Value, help: bool, machines: bool) -> Result<(&str, Value), Value> {
     let (name, arguments) = call_parts(params, help, machines)?;
     check_arguments(name, &arguments, help)?;
     Ok((name, arguments))
 }
 
-/// The JSON-RPC error for a request whose `method` isn't one this server answers.
 pub(crate) fn method_not_found(id: &Value, method: &str) -> String {
     to_json(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Method not found: {method}") } }))
 }
 
-/// One tool call: who made it, its JSON-RPC id, the id the agent's client
-/// gave it (Claude Code's `_meta["claudecode/toolUseId"]`), and whether the
-/// client has hung up.
 struct Call<'a> {
     caller: &'a Caller,
     request: &'a Value,
     call_id: Option<&'a str>,
     gone: &'a dyn Fn() -> bool,
-    /// When the call arrived: before any wait for the user's answer.
     began: Instant,
 }
 
-/// Whether the other end of `socket` has closed it, without reading from it.
 #[cfg(unix)]
 fn closed(socket: &TcpStream) -> bool {
     let mut byte = 0u8;
@@ -1058,20 +794,11 @@ fn closed(socket: &TcpStream) -> bool {
     n == 0 || (n < 0 && !matches!(io::Error::last_os_error().kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted))
 }
 
-/// Not ported: Windows needs a non-blocking peek with winsock's `recv`. Until
-/// then a call goes on after its client hangs up.
 #[cfg(windows)]
 fn closed(_socket: &TcpStream) -> bool {
     false
 }
 
-/// Serve one `POST /mcp`: one JSON-RPC message in; a request gets `reply`'s
-/// answer in this response, a notification or a response from the client gets
-/// `202 Accepted` with no body. `reply` is given the message and a check to
-/// call while its answer waits on the user (`Held::waiting`). With
-/// `issue_session`, the reply to `initialize` gives the client a new
-/// `Mcp-Session-Id`.
-/// Whether the connection can carry another request.
 pub(crate) fn post(
     request: &Head,
     reader: &mut BufReader<wire::Shared>,
@@ -1092,8 +819,6 @@ pub(crate) fn post(
     reply(request, client, &message, keep_alive, issue_session, answer_with)
 }
 
-/// Answer one JSON-RPC `message`, already read from `request`'s body, as `post` does.
-/// Whether the connection can carry another request.
 pub(crate) fn reply(
     request: &Head,
     client: &mut wire::Shared,
@@ -1120,7 +845,6 @@ pub(crate) fn reply(
     Ok(keep_alive)
 }
 
-/// A new `Mcp-Session-Id`: visible ASCII, as the spec asks, and unguessable.
 fn new_session_id() -> Option<String> {
     match crate::random_hex::<16>() {
         Ok(hex) => Some(format!("mcp-{hex}")),
@@ -1131,16 +855,11 @@ fn new_session_id() -> Option<String> {
     }
 }
 
-/// How often a held call's stream says it's still waiting.
 const KEEP_WAITING: Duration = Duration::from_secs(15);
 
-/// What a held call's stream says it waits on (#159): a call is told it waits for the user only while
-/// it does. Set around a wait by `waiting_on`; the hang-up check (`Held::waiting`) runs on the thread
-/// that waits, as it is a plain `Fn` the wait calls.
 pub(crate) struct Waits(&'static str);
 
 impl Waits {
-    /// Anything without its own words, such as a notebook's engine that is still starting.
     pub(crate) const WORKING: Waits = Waits("Still working on the call");
     pub(crate) const ANSWER: Waits = Waits("Waiting for the user's answer");
     pub(crate) const CELLS: Waits = Waits("Waiting for the cells to finish");
@@ -1151,7 +870,6 @@ thread_local! {
     static WAITING_ON: Cell<&'static str> = const { Cell::new(Waits::WORKING.0) };
 }
 
-/// Call `check` (a call's hang-up check) saying the call waits on `what`.
 pub(crate) fn waiting_on(what: Waits, check: &dyn Fn() -> bool) -> bool {
     let before = WAITING_ON.replace(what.0);
     let gone = check();
@@ -1159,23 +877,11 @@ pub(crate) fn waiting_on(what: Waits, check: &dyn Fn() -> bool) -> bool {
     gone
 }
 
-/// The response to a request whose reply may wait on the user. Once a call
-/// waits, its response begins at once as an event stream, which Streamable
-/// HTTP allows for a client that accepts one, says every `KEEP_WAITING` that
-/// the call is still waiting (a progress notification when the request asked
-/// for progress, else an SSE comment), and ends with the reply as its last event.
-/// This keeps Claude Code's idle check (five minutes without a word) and its
-/// wait for a response to begin satisfied, and lets it show the wait. It does
-/// not lengthen Claude Code's tool timeout, which ends every call after 60
-/// seconds unless `MCP_TOOL_TIMEOUT` or the server's `timeout` says otherwise,
-/// progress or not; so the wait itself ends before that (`Asks::wait`).
 struct Held {
     socket: wire::Shared,
-    /// The client accepts an event stream over HTTP/1.1 (chunked).
     streams: bool,
     keep_alive: bool,
     progress_token: Option<Value>,
-    /// Since the stream began: notifications sent, and when the last one went.
     sent: RefCell<Option<(u64, Instant)>>,
 }
 
@@ -1190,8 +896,6 @@ impl Held {
         self.sent.borrow().is_some()
     }
 
-    /// Called while the reply waits: begin or keep up the stream. Whether the
-    /// client hung up.
     fn waiting(&self) -> bool {
         let due = self.sent.borrow().is_none_or(|(_, last)| last.elapsed() >= KEEP_WAITING);
         if self.streams && due && self.keep_waiting().is_err() {
@@ -1221,16 +925,12 @@ impl Held {
     }
 }
 
-/// The reply to one JSON-RPC message, if it gets one; `call` gives a
-/// `tools/call`'s result.
 fn answer(message: &Value, caller: &Caller, call: impl FnOnce(&Value) -> Value) -> Option<String> {
-    // Notifications get no reply.
     let id = message.get("id").filter(|id| !id.is_null())?;
     let ok = |result: Value| Some(to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": result })));
     let method = message.get("method").map_or(String::new(), julia_string);
     match method.as_str() {
         "initialize" => {
-            // Standard negotiation: the client's version if we speak it, else our latest.
             let requested = message["params"]["protocolVersion"].as_str();
             let version = requested.filter(|v| SUPPORTED_VERSIONS.contains(v)).unwrap_or(SUPPORTED_VERSIONS[0]);
             let mut result = json!({
@@ -1269,8 +969,6 @@ fn answer(message: &Value, caller: &Caller, call: impl FnOnce(&Value) -> Value) 
                         tool["inputSchema"]["properties"]["path"]["description"] = described.into();
                     }
                 }
-                // MCP's read-only hint, what Claude Code's plan mode checks before prompting.
-                // open_notebook can run the notebook, so it is not read-only either.
                 let read_only = !tool["name"].as_str().is_some_and(|name| WRITE_TOOLS.contains(&name) || name == "open_notebook" || (MACHINE_NAMES.contains(&name) && name != "list_machines"));
                 tool["annotations"] = json!({ "readOnlyHint": read_only });
             }
@@ -1289,8 +987,6 @@ fn answer(message: &Value, caller: &Caller, call: impl FnOnce(&Value) -> Value) 
     }
 }
 
-/// The `path` descriptions of the tools that take one, in a front without a project folder: the usual
-/// ones say relative paths go in the session's folder, and that a name is generated there.
 const NO_FOLDER_NEW: &str = "Where to create it: an absolute path ending in `.jl` for a Julia notebook, `.R` for an R notebook or `.py` for a Python (marimo) notebook (R and Python not on Windows). The file must not exist yet and its folder must. \
 Required on this computer: this server was not told the project folder, so it can't choose one unless the client names it with the call, as Codex does. \
 A relative path starts in that folder, and without it is refused. \
@@ -1299,43 +995,27 @@ const NO_FOLDER_OPEN: &str = "The notebook file, as an absolute path: this serve
 A relative path starts in the project folder when the client names that folder with the call, as Codex does; otherwise it is refused. \
 On a server after `use_machine`, a relative path starts in the session's folder there.";
 
-/// The reply to a JSON-RPC message while the app can't reach the runtime:
-/// what the core would say, except that a tool call fails with `why`, plain
-/// text Claude reads before trying again. The listener that says this is the app's.
 pub(crate) fn answer_unreachable(message: &Value, request: &Head, why: &str) -> Option<String> {
     answer(message, &Caller::of(request, true), |_| json!({ "content": [{ "type": "text", "text": why }], "isError": true }))
 }
 
-/// The reply to a message a standalone runtime's stdio relay answers itself
-/// (`initialize`, `ping`, `tools/list`, and the notebook view's `resources/*`), as the runtime would to an agent
-/// with the plugin's skills or without (`has_skills`). None for anything else.
 pub(crate) fn answer_locally(message: &Value, has_skills: bool, no_folder: bool, views: bool) -> Option<String> {
     let local = matches!(message["method"].as_str(), Some("initialize" | "ping" | "tools/list" | "resources/list" | "resources/read"));
     let caller = Caller { has_skills, front: true, no_folder, views, ..Caller::default() };
     local.then(|| answer(message, &caller, |_| unreachable!("tools/call isn't answered locally"))).flatten()
 }
 
-/// Kinds that mean the agent called a notebook tool the wrong way (a bad
-/// argument, an unknown tool or cell, skipping the read-before-edit guard,
-/// editing outside the session's one notebook) rather than hitting a runtime
-/// problem in the user's Julia code, the Julia process, or the session's
-/// policy. `notebook_guide` explains all of these.
 const MISUSE_KINDS: [&str; 14] = [
     "invalid_argument", "unknown_tool", "cell_not_found", "notebook_not_found",
     "invalid_cell_id", "invalid_notebook_id", "invalid_order", "invalid_path",
     "read_required", "stale_read", "placement_required", "not_staged", "one_notebook", "run_conflict",
 ];
 
-/// The misuse kinds that only the guide's errors topic explains, not the guide itself.
 const ERRORS_TOPIC_KINDS: [&str; 6] = ["invalid_argument", "cell_not_found", "notebook_not_found", "invalid_path", "placement_required", "not_staged"];
 const ERRORS_TOPIC_HINT: &str = "See `notebook_guide` with `topic` set to `endeavor-notebooks/reference/errors.md` for what this error means and what to do.";
 
-/// Kinds that say something is still starting, not that the call failed: Julia, R notebooks' setup,
-/// or a notebook's open that outlasted the call. The agent only waits and makes the same call again,
-/// so the result isn't marked an error; it keeps the `error` code, which clients match on.
 const STARTING_KINDS: [&str; 4] = ["julia_starting", "r_installing", "python_installing", "notebook_opening"];
 
-/// A tool's result that is a PNG (base64), with `meta` as its text.
 pub(crate) fn image_result(meta: &Value, png_base64: String) -> Value {
     json!({
         "content": [
@@ -1346,13 +1026,6 @@ pub(crate) fn image_result(meta: &Value, png_base64: String) -> Value {
     })
 }
 
-/// A failed tool call's result, from the text of the error Julia raised:
-/// `ArgumentError: kind::message` names its kind; anything else is a
-/// `tool_error`. `help`: whether to point a misuse kind at `notebook_guide`,
-/// true only when the caller has no other way to learn it (no plugin) and
-/// the call site is a notebook tool's own mistake, not a host tool's or a
-/// refusal that already says what to do instead. A kind that says something
-/// is still starting is a normal result (`STARTING_KINDS`).
 pub(crate) fn tool_error(raw: &str, help: bool) -> Value {
     let unwrapped = unwrap_key_error(raw);
     let raw = unwrapped.as_deref().unwrap_or(raw);
@@ -1374,20 +1047,12 @@ pub(crate) fn tool_error(raw: &str, help: bool) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": !STARTING_KINDS.contains(&kind) })
 }
 
-/// A notebook or cell not found looks like a native Julia `KeyError`
-/// (`notebooks::notebook_not_found`, `tools::key_error`), which wraps its own
-/// `kind::message` inside the quoted key so the byte-for-byte error still
-/// reads like Julia's: `KeyError: key "notebook_not_found::No notebook with
-/// id '…'…" not found`. Splitting that whole thing on its first `::` lands
-/// inside the wrapper, before the key's quote even closes. Unwrap the key
-/// first, so the split lands on the `kind::message` it actually holds.
 fn unwrap_key_error(raw: &str) -> Option<String> {
     let inner = raw.strip_prefix("KeyError: key \"")?.strip_suffix("\" not found")?;
     let unescaped = unescape_julia_repr(inner);
     unescaped.contains("::").then_some(unescaped)
 }
 
-/// The inverse of `host_tools::julia_repr`'s escaping, for the text it quoted.
 fn unescape_julia_repr(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
@@ -1400,14 +1065,13 @@ fn unescape_julia_repr(text: &str) -> String {
             Some('n') => out.push('\n'),
             Some('t') => out.push('\t'),
             Some('r') => out.push('\r'),
-            Some(escaped) => out.push(escaped), // `\"`, `\\`, `\$`: the character itself
+            Some(escaped) => out.push(escaped),
             None => out.push('\\'),
         }
     }
     out
 }
 
-/// A JSON value as Julia's `string` shows it.
 pub fn julia_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -1416,9 +1080,6 @@ pub fn julia_string(value: &Value) -> String {
     }
 }
 
-/// JSON the way Julia's JSON.jl writes it, byte for byte: object keys sorted
-/// by their bytes, and DEL escaped. serde_json's own key order depends on a
-/// feature another crate in the workspace turns on.
 pub fn to_json(value: &Value) -> String {
     let mut out = String::new();
     write_json(&mut out, value);
@@ -1511,8 +1172,6 @@ mod tests {
 
     use super::*;
 
-    /// The notebook tools' names and arguments, without their descriptions: what a front of another
-    /// build sends to this core.
     fn tools_fingerprint() -> String {
         fn without_descriptions(value: &mut Value) {
             match value {
@@ -1559,18 +1218,13 @@ mod tests {
 
     #[test]
     fn the_notebook_tools_names_and_arguments_are_those_of_the_cores_interface() {
-        // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
-        // record the new fingerprint with the new number. An addition counts too, since a newer front
-        // lists its own tools to an agent whose calls an older core with the same number would refuse.
         assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (48, "31806aaaff1c73b0"), "see the comment in this test");
     }
 
-    /// The code of `source` before its tests.
     fn code(source: &str) -> &str {
         source.split("#[cfg(test)]").next().unwrap()
     }
 
-    /// The quoted names in `code` that start with `prefix` and go on in letters, digits and underscores, sorted, each once.
     fn quoted_names(code: &str, prefix: &str) -> Vec<String> {
         let opening = format!("\"{prefix}");
         let mut names: Vec<String> = code
@@ -1587,7 +1241,6 @@ mod tests {
         names
     }
 
-    /// The fields the core writes to `runtime.json`: the keys of its `json!` and the ones it sets after.
     fn record_fields() -> Vec<String> {
         let core = code(include_str!("core.rs"));
         let (from, to) = (core.find("let mut state = json!({").unwrap(), core.find("join(\"runtime.json\"), state").unwrap());
@@ -1599,10 +1252,6 @@ mod tests {
 
     #[test]
     fn the_app_calls_and_the_records_fields_are_those_of_the_cores_interface() {
-        // When this fails, a call the app makes at `/endeavor/call` or a field of `runtime.json` was added,
-        // removed or renamed: raise `core::INTERFACE` if a caller of the build before would get it wrong,
-        // then record the new lists with the number. What a call or the events stream returns isn't
-        // caught here; that stays the author's to judge.
         let calls: Vec<String> = quoted_names(code(include_str!("mcp.rs")), "endeavor/").iter().map(|call| call["endeavor/".len()..].to_owned()).collect();
         let calls_then = [
             "allow_julia_install", "allow_r_install", "allow_uv_install", "answer_run", "end_when_idle", "file_info", "julia_status", "keep_for_app", "leave_to_plugin", "move_notebook", "new_notebook", "r_status", "recent_sessions", "restart_notebook", "restore_cells", "run_preview", "set_folder",
@@ -1625,15 +1274,11 @@ mod tests {
             assert!(Caller::of(&head("X-Endeavor-Client: app\r\n"), app_runtime).app);
             assert!(!Caller::of(&head("X-Endeavor-Client: plugin\r\n"), app_runtime).app);
             assert_eq!(Caller::of(&head(""), app_runtime).app, app_runtime, "a caller that doesn't say is the starter's");
-            // No one asks before a plugin caller's approve_install unless it is a front that says it asks (#391).
             assert!(Caller::of(&head("X-Endeavor-Client: plugin\r\n"), app_runtime).no_one_asks());
             assert!(!Caller::of(&head("X-Endeavor-Client: plugin\r\nX-Endeavor-Consent: front\r\n"), app_runtime).no_one_asks());
             assert!(!Caller::of(&head("X-Endeavor-Client: app\r\n"), app_runtime).no_one_asks());
-            // A client that doesn't say is the starter's for its answers, but not for consent: on a
-            // runtime the app started it is still one no one asks for.
             assert!(Caller::of(&head(""), app_runtime).no_one_asks());
         }
-        // Its replies say this can't be approved over this connection, and where it can be.
         let asking = to_json(&json!({ "text": format!("R has to download ALL. {} Don't call read_cell to wait.", notebooks::ASK_STEP) }));
         let said = no_one_asks_said(asking);
         assert!(said.contains(ASK_STEP_NO_ONE) && !said.contains(notebooks::ASK_STEP), "{said}");
@@ -1796,7 +1441,6 @@ Start a code cell that defines no name, such as a plot or a check, with a `# ` c
         assert_eq!(text("SystemError: opening file \"/x\": Permission denied"), r#"{"error":"tool_error","message":"SystemError: opening file \"/x\": Permission denied"}"#);
         assert_eq!(text("IOError: readdir(\"/a::b\"): denied"), r#"{"error":"readdir(\"/a","message":"b\"): denied"}"#);
         assert_eq!(tool_error("x", false)["isError"], true);
-        // Still starting is not a failure: the agent waits and calls again, and the code stays.
         let starting = tool_error("julia_starting::Julia 1.12.6 is starting and loading Pluto (40 seconds so far).", false);
         assert_eq!(starting["isError"], false);
         assert_eq!(text("julia_starting::Julia is starting"), r#"{"error":"julia_starting","message":"Julia is starting"}"#);
@@ -1813,7 +1457,6 @@ Start a code cell that defines no name, such as a plot or a check, with a `# ` c
             text("KeyError: key \"notebook_not_found::No notebook with id 'x' in the current session. Run list_notebooks to see what's open.\" not found"),
             r#"{"error":"notebook_not_found","message":"No notebook with id 'x' in the current session. Run list_notebooks to see what's open."}"#
         );
-        // A quoted key with no kind::message of its own reads as a plain KeyError.
         assert_eq!(text("KeyError: key \"code\" not found"), r#"{"error":"tool_error","message":"KeyError: key \"code\" not found"}"#);
     }
 
@@ -1835,7 +1478,6 @@ Start a code cell that defines no name, such as a plot or a check, with a `# ` c
             r#"{"error":"notebook_not_found","message":"No notebook with id 'x' in the current session."}"#,
             "an agent with its own skills gets no pointer to this server's guide"
         );
-        // A Julia process crash isn't something the guide explains, whether asked to help or not.
         let crashed = "ArgumentError: process_exited::The notebook's Julia process exited while running a cell";
         assert_eq!(text(crashed, true), text(crashed, false), "not an agent misuse kind");
         assert!(!text(crashed, true).contains("notebook_guide"));

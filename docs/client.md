@@ -266,6 +266,12 @@ and never stops the runtime.
 
 ## Askpass over loopback TCP
 
+ssh runs the helper as `SSH_ASKPASS` with the prompt as its only argument.
+The helper passes the prompt to the app, only on this computer, over its
+Unix socket or loopback TCP (Rust's std has no Unix sockets on Windows), and
+prints the answer for ssh, or exits 1 if the user cancelled. A notice ("touch
+your security key") needs no answer: ssh takes it down itself.
+
 `askpass::Asker` is a port on 127.0.0.1 and a random token, one per
 listener, that a connection must send first. It works on every platform, and
 is the only way on Windows.

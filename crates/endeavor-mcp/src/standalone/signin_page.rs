@@ -1,20 +1,3 @@
-//! ssh's sign-in questions for the machine tools, answered by the user on a page in their browser
-//! (#106). The plugin's machine tools used to connect in batch mode, so a server that asks for a
-//! password or a second factor couldn't be reached at all. The app answers these prompts in its own
-//! window (`client::askpass::Asker`); the plugin has no window, so the front asks on a page.
-//!
-//! The agent never sees the question or the answer: the page's link goes from this process to the
-//! browser only, with a one-time secret, and what the user types goes from the page to ssh. Not an
-//! MCP dialog either: MCP's form dialogs are for what an agent may know, and must not ask for
-//! passwords. The page is served on 127.0.0.1 only, answers only its own links and only a request
-//! addressed to that loopback address, takes its answer only by POST from its own form, and can't be
-//! shown inside another page, as the install page (`install_page`). An answer is handed to ssh once
-//! and then forgotten.
-//!
-//! What it doesn't stop: an agent with a shell on this computer can find the link (in the opener's
-//! command line while it runs, or in the browser's history) and answer the page first. That spends a
-//! wrong answer, which the server refuses; it doesn't give the agent the user's password.
-
 use std::collections::HashMap;
 use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -26,25 +9,20 @@ use wire::askpass::{Ask, Kind};
 use crate::client::Reply;
 use crate::http::{self, Head};
 
-/// Where the pages are, before each one's secret.
 const PATH: &str = "/sign-in/";
 
-/// The longest answer a page takes: a password or a code, form-encoded.
 const MAX_BODY: u64 = 4096;
 
-/// How long a page stays answerable: about as long as a server waits for a sign-in.
 const KEEP: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Default)]
 pub(super) struct SignIn {
     shared: Arc<Shared>,
-    /// The page server's port, once it is started; None if it couldn't be.
     port: OnceLock<Option<u16>>,
 }
 
 #[derive(Default)]
 struct Shared {
-    /// The questions waiting for an answer, by their pages' secrets.
     pages: Mutex<HashMap<String, Page>>,
     answered: Condvar,
 }
@@ -52,21 +30,16 @@ struct Shared {
 struct Page {
     machine: String,
     ask: Ask,
-    /// Once the user answered: the text, or None for Cancel. Taken by the waiting call.
     answer: Option<Option<String>>,
     asked: Instant,
 }
 
 impl SignIn {
-    /// Ask the user `ask`, ssh's question for `machine`, on a page in their browser: their answer,
-    /// `Refused` if they cancelled, or `GaveUp` if no page could be opened or `wait` ran out. `open`
-    /// opens a link in the user's browser and says whether it could.
     pub(super) fn ask(&self, machine: &str, ask: &Ask, wait: Duration, open: &dyn Fn(&str) -> bool) -> Reply {
         let Some(port) = self.port() else { return Reply::GaveUp };
         let Ok(secret) = crate::random_hex::<16>() else { return Reply::GaveUp };
         let page = Page { machine: machine.to_owned(), ask: ask.clone(), answer: None, asked: Instant::now() };
         self.shared.pages.lock().unwrap().insert(secret.clone(), page);
-        // The link goes from here to the browser only: never into a tool result.
         if !open(&format!("http://127.0.0.1:{port}{PATH}{secret}")) {
             self.shared.pages.lock().unwrap().remove(&secret);
             return Reply::GaveUp;
@@ -89,7 +62,6 @@ impl SignIn {
         }
     }
 
-    /// The page server's port, started on first use.
     fn port(&self) -> Option<u16> {
         *self.port.get_or_init(|| {
             let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| eprintln!("endeavor: couldn't start the sign-in page: {e}")).ok()?;
@@ -109,13 +81,11 @@ impl SignIn {
     }
 }
 
-/// Answer one request on the page server.
 fn serve(stream: TcpStream, port: u16, shared: &Shared) -> std::io::Result<()> {
     let stream = wire::Shared::new(stream);
     let mut out = stream.clone();
     let mut reader = BufReader::new(stream);
     let Some(head) = Head::read(&mut reader)? else { return Ok(()) };
-    // The body is read before any answer: closing a socket with it unread sends a reset (#538).
     let body = match (head.method(), head.request_body()) {
         ("POST", Ok(http::Framing::Length(length))) if length <= MAX_BODY => String::from_utf8_lossy(&http::read_body(&mut reader, http::Framing::Length(length))?).into_owned(),
         _ => String::new(),
@@ -183,10 +153,8 @@ fn serve(stream: TcpStream, port: u16, shared: &Shared) -> std::io::Result<()> {
     out.flush()
 }
 
-/// What the page says once it is answered.
 const SENT: &str = "<h1>Sent</h1><p>Your answer went to ssh, and Endeavor goes on connecting. You can close this page.</p>";
 
-/// The page for an unanswered question.
 fn question(page: &Page) -> String {
     let machine = escape(&page.machine);
     let prompt = escape(&page.ask.prompt);
@@ -208,7 +176,6 @@ fn question(page: &Page) -> String {
     }
 }
 
-/// The fields of a form-encoded body.
 fn form(body: &str) -> Vec<(String, String)> {
     body.split('&').filter(|pair| !pair.is_empty()).filter_map(|pair| {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -258,7 +225,6 @@ mod tests {
         request(port, &format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{origin}Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}", body.len()))
     }
 
-    /// Ask `ask` on a thread, and hand back the page's link and the answer when it comes.
     fn asked(pages: &Arc<SignIn>, ask: Ask) -> (String, std::thread::JoinHandle<Reply>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let pages = pages.clone();
@@ -278,7 +244,6 @@ mod tests {
         let origin = url[..url.find(PATH).unwrap()].to_owned();
         let (status, shown) = get(&url);
         assert!(status == 200 && shown.contains("jc@&lt;lab&gt;'s password:") && shown.contains("type=\"password\""), "{shown}");
-        // Only the page's own form answers: not another site, nor a request with no origin.
         assert_eq!(post(&url, "answer=x", Some("https://evil.example")).0, 403);
         assert_eq!(post(&url, "answer=x", None).0, 403, "curl -d answer=x");
         assert_eq!(post(&format!("{url}0"), "answer=x", Some(&origin)).0, 404);
@@ -286,7 +251,6 @@ mod tests {
         let (status, said) = post(&url, "answer=p%40ss+word%26", Some(&origin));
         assert!(status == 200 && said.contains("Sent"), "{said}");
         assert_eq!(waiting.join().unwrap(), Reply::Answered("p@ss word&".into()));
-        // Handed over once, then forgotten: the page is gone.
         assert_eq!(get(&url).0, 404);
         assert_eq!(post(&url, "answer=again", Some(&origin)).0, 404);
     }

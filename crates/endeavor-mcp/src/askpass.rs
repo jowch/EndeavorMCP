@@ -1,8 +1,3 @@
-//! Askpass mode: ssh runs the helper as `SSH_ASKPASS` with the prompt as its
-//! only argument. Pass the prompt to the app (over loopback TCP, or its Unix
-//! socket; see `wire::askpass`) and print the answer for ssh; exit 1 if the user
-//! cancelled.
-
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 #[cfg(unix)]
@@ -14,7 +9,6 @@ use wire::askpass::SOCKET_ENV;
 
 pub fn run(prompt: &str) -> ! {
     let hint = std::env::var("SSH_ASKPASS_PROMPT").ok();
-    // A notice ("touch your security key") that ssh takes down itself; nothing to answer.
     if hint.as_deref() == Some("none") {
         std::process::exit(0);
     }
@@ -43,7 +37,6 @@ fn ask_app(ask: &Ask) -> Result<Answer, String> {
     line.push('\n');
     match std::env::var(ADDRESS_ENV) {
         Ok(address) => {
-            // Only to this computer: the prompt and the token go nowhere else.
             let to: SocketAddr = address.parse().ok().filter(|a: &SocketAddr| a.ip().is_loopback()).ok_or_else(|| format!("{ADDRESS_ENV} isn't a loopback address: {address}"))?;
             let token = std::env::var(TOKEN_ENV).map_err(|_| format!("{TOKEN_ENV} isn't set"))?;
             let socket = TcpStream::connect(to).map_err(|e| format!("{address}: {e}"))?;
@@ -53,7 +46,6 @@ fn ask_app(ask: &Ask) -> Result<Answer, String> {
     }
 }
 
-/// Send `lines` and read the app's one-line `Answer`.
 fn exchange(mut socket: impl Read + Write, lines: &str) -> Result<Answer, String> {
     socket.write_all(lines.as_bytes()).map_err(|e| e.to_string())?;
     let mut reply = String::new();
@@ -71,7 +63,6 @@ fn unix_socket(line: &str) -> Result<Answer, String> {
     exchange(socket, line)
 }
 
-/// Windows has no Unix sockets in Rust's std: the app listens on loopback TCP instead.
 #[cfg(windows)]
 fn unix_socket(_line: &str) -> Result<Answer, String> {
     Err(format!("{ADDRESS_ENV} isn't set"))

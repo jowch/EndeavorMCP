@@ -47,7 +47,6 @@ fn a_machine_that_is_not_ready_says_what_state_it_is_in_and_what_to_do() {
     let running = Outcome::Queued { job, queue: QueueInfo { state: "RUNNING".into(), reason: "n123".into() } };
     let said = not_ready_message("hpc", &reached(running, status(State::Starting { queue: Some(QueueInfo { state: "RUNNING".into(), reason: "n123".into() }) })));
     assert!(said.contains("running on node n123, and Endeavor is starting there") && said.contains("call the notebook tool you want again") && !said.contains("minutes or hours"), "{said}");
-    // The status's `queue` names the node of a job that runs, not as its reason.
     let queue = queue_json(&status(State::Starting { queue: Some(QueueInfo { state: "RUNNING".into(), reason: "n123".into() }) })).unwrap();
     assert_eq!(queue, json!({ "state": "RUNNING", "node": "n123", "reason_text": "running on node n123, and Endeavor is starting there" }));
     let queue = queue_json(&status(State::Queued(QueueInfo { state: "PENDING".into(), reason: "BeginTime".into() }))).unwrap();
@@ -324,7 +323,6 @@ fn the_check_for_other_sessions_is_not_made_when_no_time_is_left_and_ends_with_t
     assert!(said.contains("no time was left to ask") && said.contains("`force: true`"), "{said}");
     assert!(silent.set_nonblocking(true).is_ok() && silent.accept().is_err(), "no connection was made");
 
-    // A runtime that answers a little, slowly, is cut off by the time for the whole answer.
     silent.set_nonblocking(false).unwrap();
     let dripper = std::thread::spawn(move || {
         let (mut socket, _) = silent.accept().unwrap();
@@ -343,7 +341,6 @@ fn the_check_for_other_sessions_is_not_made_when_no_time_is_left_and_ends_with_t
     dripper.join().unwrap();
 }
 
-/// A runtime that answers `/endeavor/call` once with `status` and `body`.
 fn answering(status: &str, body: &str) -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -533,7 +530,6 @@ fn a_look_on_this_computer_waits_for_a_start_another_process_has_under_way() {
     std::fs::create_dir_all(&options.state_dir).unwrap();
     let local = Arc::new(super::super::target::Local::new(options.clone()));
     let attach = Want::Attach { install: false };
-    // Another process's start, as this computer sees it: a lock on `starting.lock` that isn't ours.
     let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(options.state_dir.join("starting.lock")).unwrap();
     lock.lock().unwrap();
     let began = Instant::now();
@@ -542,7 +538,6 @@ fn a_look_on_this_computer_waits_for_a_start_another_process_has_under_way() {
     let began = Instant::now();
     assert!(matches!(local.ensure(attach.clone(), Duration::from_secs(2), false), Outcome::StillWorking(_)));
     assert!(began.elapsed() >= Duration::from_secs(2) && began.elapsed() < Duration::from_secs(4), "it waits for the whole wait: {:?}", began.elapsed());
-    // The start ends with nothing running: the look says so then, not at the end of its wait.
     let waiter = {
         let (local, attach) = (local.clone(), attach.clone());
         std::thread::spawn(move || {
@@ -557,7 +552,6 @@ fn a_look_on_this_computer_waits_for_a_start_another_process_has_under_way() {
     assert!(took < Duration::from_secs(5), "{took:?}");
 }
 
-/// A Julia that fails, and notes in `log` each time it is run.
 #[cfg(unix)]
 fn failing_julia(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let (script, log) = (dir.join("julia"), dir.join("runs"));
@@ -635,7 +629,6 @@ fn where_a_dialog_asks_the_asking_step_says_so_and_the_rest_stays() {
 fn only_an_answered_sign_in_keeps_the_user_counted_as_there() {
     let long_ago = Instant::now() - Duration::from_secs(90);
     let wanted = Mutex::new(long_ago);
-    // Nobody answered: a reconnect's next question, past the window, opens no page.
     assert_eq!(put_to_user("lab", &wanted, || Reply::GaveUp), Reply::GaveUp);
     assert_eq!(put_to_user("lab", &wanted, || Reply::Refused), Reply::Refused);
     assert_eq!(*wanted.lock().unwrap(), long_ago, "neither a page nobody answered nor a Cancel counts as the user asking");

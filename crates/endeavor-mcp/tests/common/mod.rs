@@ -1,14 +1,4 @@
-//! A stand-in for Julia under `endeavor core`: a script that writes the
-//! state boot.jl would and then sleeps, naming a bridge and a Pluto served by
-//! this test process. The bridge answers like Julia's (chunked responses to
-//! HTTP/1.1, close-delimited to HTTP/1.0, the adapter's calls on `/adapter` and
-//! its notifications on `/notifications`); Pluto wants its secret in a cookie,
-//! echoes bodies on `/echo`, streams events on `/stream` and echoes a
-//! WebSocket's bytes after an upgrade. Both record what they were sent.
-//! `helper` drives `endeavor connect` as the app does.
-
 #![allow(dead_code)]
-// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
 #![allow(clippy::disallowed_methods)]
 
 pub mod exec;
@@ -26,12 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-/// The pages' token a test core is given (its state folder's `page_token`), which the bearer token `TOKEN` isn't.
 pub const PAGES: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
-/// The secret the fake Pluto requires.
 pub const PLUTO_SECRET: &str = "s3cret";
 
-/// For the end-to-end tests, the julia to test with, and the app's folder when it's the app's.
 pub fn find_julia() -> Option<(PathBuf, Option<PathBuf>)> {
     if let Some(julia) = std::env::var_os("ENDEAVOR_E2E_JULIA") {
         return Some((julia.into(), None));
@@ -56,10 +43,6 @@ pub fn find_julia() -> Option<(PathBuf, Option<PathBuf>)> {
 }
 
 #[cfg(unix)]
-/// A julia that says it's 1.12, records its arguments, the token it was given (`engine_token`, which
-/// `FakeBridge` then requires) and its pid (a line of `julia.pids` per run), writes
-/// its state for the core naming `bridge`'s ports, and sleeps as its own pid. It waits first while the file
-/// `hold` is in `dir`.
 pub fn serving_julia(dir: &Path, bridge: &FakeBridge) -> PathBuf {
     let bin = dir.join("fakebin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -74,7 +57,6 @@ echo "booting"
 while [ -e "{dir}/hold" ]; do sleep 0.1; done
 printf '{{"launcher":"%s","node":"%s","pid":%s,"pluto_port":{pluto},"mcp_port":{mcp},"pluto_secret":"{PLUTO_SECRET}","job":"%s"}}' "$ENDEAVOR_LAUNCHER" "$(hostname)" $$ "$SLURM_JOB_ID" > "$ENDEAVOR_STATE.tmp"
 mv "$ENDEAVOR_STATE.tmp" "$ENDEAVOR_STATE"
-# A Julia that a stop signal doesn't end, as one with notebooks open can be (#316).
 [ -e "{dir}/deaf" ] && trap '' TERM INT HUP
 exec sleep 600
 "#,
@@ -86,8 +68,6 @@ exec sleep 600
     julia
 }
 
-
-/// For a test that sets an `ENDEAVOR_TEST_*` variable for the binary: a release build ignores them.
 pub fn require_debug_build() {
     assert!(cfg!(debug_assertions), "these tests need a debug build: a release build ignores ENDEAVOR_TEST_*, and would use real ssh");
 }
@@ -99,8 +79,6 @@ pub fn state_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// What a connect installs on a server, put under `root` as it would be: this build's
-/// helper and `runtime/`, so that a connect finds them there and asks nothing.
 pub fn install_helper(root: &Path) {
     let dir = root.join(endeavor_mcp::embedded::BUILD_VERSION);
     std::fs::create_dir_all(&dir).unwrap();
@@ -115,14 +93,11 @@ pub fn install_helper(root: &Path) {
     }
 }
 
-/// A process whose command looks like a runtime's core, for the look at what a recorded pid is.
 #[cfg(unix)]
 pub fn core_like_child() -> std::process::Child {
     use std::os::unix::process::CommandExt;
     use std::process::Command;
     let child = Command::new("sleep").arg("600").arg0("endeavor core --state-dir fake").spawn().unwrap();
-    // Just after the spawn the kernel may not have set the new command line yet, and `ps` then shows
-    // `[sleep]`: wait until it shows the core's.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !String::from_utf8_lossy(&Command::new("ps").args(["-p", &child.id().to_string(), "-o", "args="]).output().unwrap().stdout).contains("--state-dir") {
         assert!(std::time::Instant::now() < deadline, "the fake core never showed its command line");
@@ -143,15 +118,11 @@ pub fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
-/// The pids of the Julia runs `serving_julia` made in `dir`, one per start.
 pub fn julia_pids(dir: &Path) -> Vec<i32> {
     std::fs::read_to_string(dir.join("julia.pids")).map(|text| text.split_whitespace().filter_map(|p| p.parse().ok()).collect()).unwrap_or_default()
 }
 
 #[cfg(unix)]
-/// Whether `pid` runs. A zombie doesn't: a container whose PID 1 reaps slowly or not at all may keep an
-/// ended process that was reparented to it for a while, or for good, and the runtime counts it as gone
-/// too (`unixproc::start_time`).
 pub fn pid_alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
     if unsafe { libc::kill(pid, 0) } != 0 {
@@ -162,8 +133,6 @@ pub fn pid_alive(pid: i32) -> bool {
 }
 
 #[cfg(unix)]
-/// Whether a process of the group `pgid` runs, by the runtime's rule (`unixproc::group_running`):
-/// zombies don't count. Without `/proc` (macOS, which reaps), any member counts.
 #[allow(dead_code)]
 pub fn group_alive(pgid: i32) -> bool {
     // SAFETY: signal 0 only checks that the group has a member.
@@ -178,7 +147,6 @@ pub fn group_alive(pgid: i32) -> bool {
     })
 }
 
-/// A request as the bridge received it.
 #[derive(Clone, Debug)]
 pub struct Seen {
     pub line: String,
@@ -195,17 +163,11 @@ impl Seen {
 #[derive(Default)]
 struct Shared {
     seen: Mutex<Vec<Seen>>,
-    /// What Pluto was sent.
     pluto_seen: Mutex<Vec<Seen>>,
-    /// Said when Pluto's end of a WebSocket closes.
     socket_closed: Mutex<Option<Sender<()>>>,
-    /// The open `/stream` stream: events to write, or `None` to end it abruptly.
     events: Mutex<Option<Sender<Option<String>>>>,
-    /// Said when the core closes the `/stream` stream's upstream connection.
     closed: Mutex<Option<Sender<()>>>,
-    /// The open `/notifications` streams.
     notifications: Mutex<Vec<Sender<String>>>,
-    /// What `snapshot` reports: each open notebook.
     notebooks: Mutex<Vec<serde_json::Value>>,
 }
 
@@ -215,7 +177,6 @@ pub struct FakeBridge {
     shared: Arc<Shared>,
     closed: Receiver<()>,
     socket_closed: Receiver<()>,
-    /// The state folder, where the core keeps Julia's pid (`endeavor/shutdown` ends it).
     dir: PathBuf,
 }
 
@@ -253,41 +214,33 @@ impl FakeBridge {
         self.shared.pluto_seen.lock().unwrap().clone()
     }
 
-    /// Wait for Pluto's end of a WebSocket to close.
     pub fn socket_closed(&self) -> bool {
         self.socket_closed.recv_timeout(Duration::from_secs(5)).is_ok()
     }
 
-    /// Write an event on the open `/stream` stream, waiting for one to open.
     pub fn event(&self, text: &str) {
         wait_for("a /stream stream", || self.shared.events.lock().unwrap().is_some());
         self.shared.events.lock().unwrap().as_ref().unwrap().send(Some(text.to_owned())).unwrap();
     }
 
-    /// End the open `/stream` stream without its final chunk, like a crash.
     pub fn drop_events(&self) {
         self.shared.events.lock().unwrap().take().unwrap().send(None).unwrap();
     }
 
-    /// Send a notification to the core, waiting for it to listen.
     pub fn notify(&self, message: serde_json::Value) {
         wait_for("a /notifications stream", || !self.shared.notifications.lock().unwrap().is_empty());
         self.shared.notifications.lock().unwrap().retain(|n| n.send(message.to_string()).is_ok());
     }
 
-    /// The notebooks the adapter reports from now on.
     pub fn set_notebooks(&self, notebooks: Vec<serde_json::Value>) {
         *self.shared.notebooks.lock().unwrap() = notebooks;
     }
 
-    /// Wait for the core to close the `/stream` stream's connection.
     pub fn events_closed(&self) -> bool {
         self.closed.recv_timeout(Duration::from_secs(5)).is_ok()
     }
 }
 
-/// The token the core gave Julia in `dir` (`serving_julia`): the bridge's key, which is neither the MCP
-/// bearer token nor the pages' token.
 pub fn engine_token(dir: &Path) -> String {
     std::fs::read_to_string(dir.join("engine_token")).unwrap_or_default()
 }
@@ -354,8 +307,6 @@ fn serve(socket: TcpStream, shared: &Arc<Shared>, dir: &Path) {
     }
 }
 
-/// Pluto, which wants its secret in a cookie and sets it again on its reply,
-/// as Pluto does.
 fn pluto_serve(socket: TcpStream, shared: &Arc<Shared>) {
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let mut socket = socket;

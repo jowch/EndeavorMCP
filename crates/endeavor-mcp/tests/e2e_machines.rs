@@ -1,22 +1,3 @@
-//! The machine tools of `endeavor mcp` over real ssh and real Julia: an agent's
-//! harness (stdio) adds a machine, puts the session on it, works in a notebook
-//! there, reads its files and runs a command on it, opens the notebook's page
-//! through the front's port for the machine, and stops the runtime, until nothing is left
-//! running. It's ignored by default and runs only when `ENDEAVOR_TEST_SSH_HOST`
-//! names a host that this user can `ssh` to with a key (`localhost` is one):
-//!
-//!     ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines -- --ignored --nocapture
-//!
-//! Julia is `ENDEAVOR_E2E_JULIA` if set, else the app's own, else `julia` on the
-//! PATH, and it has to be at the same path on the host. Its depot is
-//! `e2e_client`'s, in `target/tmp/e2e-client/depot`, so run that test first or
-//! expect several minutes. The front's state, config and cache folders, the
-//! machines file, and the helper's install and state
-//! folders are under `target/tmp/e2e-machines`. `HOME` stays the user's, where
-//! `ssh` finds its keys, so `list_machines` reads the real `~/.ssh/config`; the
-//! test doesn't look at what it lists. The front's own runtime (this computer's)
-//! is pointed at a Julia that doesn't exist, so none is started here.
-
 #![cfg(unix)]
 
 mod common;
@@ -32,7 +13,6 @@ use common::{find_julia, pid_alive, wait_for};
 use endeavor_mcp::client::MachinesFile;
 use serde_json::{Value, json};
 
-/// A failed step leaves no Julia behind.
 struct Ends {
     state: PathBuf,
 }
@@ -46,12 +26,10 @@ impl Drop for Ends {
     }
 }
 
-/// The helpers (`endeavor connect`) on this computer that have `state` as their state folder.
 fn helpers(state: &Path) -> Vec<u8> {
     Command::new("pgrep").arg("-f").arg("--").arg(format!("connect --state-dir {}", state.display())).output().unwrap().stdout
 }
 
-/// One GET to `port`: the status line, the head and the body.
 fn get(port: u16, target: &str, headers: &str) -> (String, String, String) {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
@@ -119,7 +97,6 @@ fn the_machine_tools_over_real_ssh() {
     assert!(listed["ssh_hosts_not_added"].is_array());
     assert!(helpers(&state).is_empty(), "listing connects to nothing");
 
-    // The host may have Slurm, as a workstation or login node may; this test runs Julia there directly, not in a job.
     let looked = front.ok("add_machine", json!({ "host": host, "name": "e2e-machines", "julia": julia.display().to_string(), "slurm": false }));
     assert_eq!(looked["state"], "needs_install", "{looked}");
     assert!(!root.join(endeavor_mcp::embedded::BUILD_VERSION).exists(), "a look installs nothing");
@@ -172,7 +149,6 @@ fn the_machine_tools_over_real_ssh() {
     assert_eq!((status["machine"].as_str(), status["browser_url"].as_str()), (Some("e2e-machines"), Some(page.as_str())), "{status}");
     eprintln!("[{:?}] a cell ran on the machine", started.elapsed());
 
-    // The server's files and shell, which the agent's own tools can't see.
     let folder_list = front.ok("list_folder", json!({ "path": folder }));
     assert!(folder_list.to_string().contains("analysis.jl"), "{folder_list}");
     let file = front.ok("read_file", json!({ "path": notebooks.join("analysis.jl").display().to_string() }));
@@ -180,7 +156,6 @@ fn the_machine_tools_over_real_ssh() {
     let shell = front.ok("run_shell", json!({ "command": "pwd; hostname" }));
     assert!(shell.to_string().contains(&folder), "the session's folder: {shell}");
 
-    // The page, as a browser reaches it through the front's port for the machine.
     let (line, head, _) = get(port, &format!("/edit?id={notebook}&token={token}"), "");
     assert_eq!(line, "HTTP/1.1 303 See Other", "{head}");
     let cookie = head.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap_or_else(|| panic!("no cookie: {head}")).split(';').next().unwrap().to_owned();
@@ -189,8 +164,6 @@ fn the_machine_tools_over_real_ssh() {
     assert!(body.contains("Pluto"), "{}", &body[..body.len().min(300)]);
     eprintln!("[{:?}] the page answers", started.elapsed());
 
-    // The connection drops, as it does when the network fails: the front makes it again, the address the
-    // user has open stays the same, and it attaches to the runtime that kept running.
     let runtime_pid = std::fs::read_to_string(state.join("runtime.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["pid"].as_i64()).expect("the runtime's record") as i32;
     let pids = |bytes: Vec<u8>| String::from_utf8_lossy(&bytes).split_whitespace().filter_map(|p| p.parse::<i32>().ok()).collect::<Vec<_>>();
     let lost = pids(helpers(&state));
@@ -225,7 +198,6 @@ fn the_machine_tools_over_real_ssh() {
     assert!(failed && said.as_str().is_some_and(|t| t.contains("use_machine")), "{said}");
     front.finish();
 
-    // Nothing is left: the front's end took its connection with it.
     wait_for("the helper to go", || helpers(&state).is_empty());
     assert!(!state.join("runtime.json").exists());
     eprintln!("[{:?}] stopped; nothing left", started.elapsed());
