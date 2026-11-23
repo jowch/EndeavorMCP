@@ -29,6 +29,15 @@ like a flake. A child process writes the file, so the test process never
 holds it open. The crate's own tests reach the same file as
 `crate::test_exec`.
 
+On Windows, where the tests' `#!/bin/sh` stand-in Julia can't run,
+`examples/stand_in_julia.rs` stands in, copied to `julia.exe` by
+`tests/windows.rs`. Like the shell one it says it is 1.12, records its
+arguments, token and pid in `STAND_IN_DIR`, writes the state boot.jl would
+(naming the stand-in bridge and Pluto, `STAND_IN_MCP_PORT` and
+`STAND_IN_PLUTO_PORT`), and stays up, waiting first while `hold` is in that
+folder. Asked for `Sys.BINDIR`, it names its own folder, so the core's look
+for the real julia.exe behind a launcher finds it. It ships in no build.
+
 ## Trying the plugin before a release
 
 The plugin's launcher gets its binary from the Helpers release, which holds no

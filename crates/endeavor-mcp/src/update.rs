@@ -1,14 +1,3 @@
-//! `endeavor --version`, and `endeavor update`: replace this binary with the
-//! build main's `scripts/release-key` pins, checked against the checksums
-//! there, the build the plugins run. When main can't be read, or its pin has
-//! no checksums, nothing changes, unless `ENDEAVOR_PIN_URL=none` says to take
-//! the newest build on the Helpers release, the one its `LATEST` file names,
-//! checked against the release's own checksum file.
-//!
-//! The release has binaries for Linux, macOS and Windows (`release::platform_name`).
-//! A copy the Endeavor app installed, or one cargo installed, is left to the
-//! app, to cargo or to a plugin.
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -18,14 +7,10 @@ use crate::{embedded, paths, release, standalone};
 const CARGO_INSTALL: &str = "cargo install --git https://github.com/jowch/EndeavorMCP endeavor-mcp";
 const USAGE: &str = "usage: endeavor update   replace this binary with the newest build from the Helpers release";
 
-/// This binary's version line: the package version, and the build
-/// (`embedded::BUILD_VERSION`), which tells apart builds of one version.
 pub(crate) fn version_line() -> String {
     format!("endeavor {} (build {})", env!("CARGO_PKG_VERSION"), embedded::BUILD_VERSION)
 }
 
-/// `version_line`; on a release build a line `release <key>`; and a line `interface <n>`, the number
-/// for what this build's core offers its callers (`core::INTERFACE`), which `update` reads from the new binary.
 pub(crate) fn print_version() -> ! {
     println!("{}", version_line());
     if let Some(key) = embedded::RELEASE_KEY {
@@ -35,29 +20,20 @@ pub(crate) fn print_version() -> ! {
     std::process::exit(0)
 }
 
-/// The build and the interface number a binary's `--version` output says; a binary from before the
-/// interface was printed says none.
 fn build_and_interface(output: &str) -> (Option<String>, Option<u32>) {
     let build = output.lines().next().and_then(|line| Some(line.split_once("(build ")?.1.split_once(')')?.0.to_owned()));
     let interface = output.lines().find_map(|line| line.strip_prefix("interface ")?.trim().parse().ok());
     (build, interface)
 }
 
-/// What `update` works from.
 struct Here {
-    /// This binary, links resolved.
     exe: PathBuf,
-    /// The Helpers release's name for this platform, if it has binaries for it.
     platform: Option<&'static str>,
-    /// `~/.cache/endeavor`, where the app installs its helper (`paths::Env::server_root`).
     server_root: PathBuf,
     cargo_home: PathBuf,
-    /// Where the plugins' launcher keeps binaries (`paths::Env::plugin_bin`).
     plugin_bin: PathBuf,
     release: String,
-    /// Where main's release-key is read from, if anywhere (`release::pin_url`).
     pin: Option<String>,
-    /// Where a runtime from the old build would be recorded.
     state_dir: PathBuf,
 }
 
@@ -79,7 +55,6 @@ impl Here {
     }
 }
 
-/// `endeavor update`.
 pub(crate) fn main(argv: &[String]) -> ! {
     match argv.first().map(String::as_str) {
         None => {}
@@ -108,20 +83,13 @@ pub(crate) fn main(argv: &[String]) -> ! {
     }
 }
 
-/// Run as the app's helper (`endeavor.exe --helper update` on Windows, where the app is its own
-/// helper), the binary is the app itself, wherever it's installed: replacing it would swap the
-/// app for this command-line build (Endeavor #200).
 fn app_helper_refusal(helper_args: &[&str]) -> Option<String> {
     (!helper_args.is_empty()).then(|| "This is the Endeavor app, running as its own helper. The app installs and updates itself; update the app instead.".to_owned())
 }
 
-/// Update `here.exe`, or say why not. The message for the user either way.
 fn update(here: &Here) -> Result<String, String> {
     let exe = &here.exe;
     let dir = exe.parent().ok_or_else(|| format!("{} has no folder", exe.display()))?;
-    // The app installs its helper as ~/.cache/endeavor/<version>/endeavor and
-    // reinstalls only when that folder is missing, so a replaced file there
-    // would run under the wrong version's name.
     if dir.parent().is_some_and(|d| same(d, &here.server_root)) || exe.ancestors().any(|a| a.extension().is_some_and(|e| e == "app")) {
         return Err(format!("This copy of endeavor ({}) belongs to the Endeavor app, which installs and updates it. Update the app instead.", exe.display()));
     }
@@ -178,7 +146,6 @@ fn update(here: &Here) -> Result<String, String> {
     let _ = std::fs::remove_file(&part);
     let (new_build, new_interface) = installed?;
     let mut message = format!("Updated {} to the newest build ({key}).", exe.display());
-    // The new binary's interface, when it says one: a runtime that offers it is used as it is.
     if running(&here.state_dir)
         && let Some(note) = standalone::other_build_than(&here.state_dir, new_build.as_deref().unwrap_or_default(), new_interface)
     {
@@ -187,15 +154,11 @@ fn update(here: &Here) -> Result<String, String> {
     Ok(message)
 }
 
-/// Whether `a` and `b` are one folder, links resolved where they exist.
 fn same(a: &Path, b: &Path) -> bool {
     let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_owned());
     real(a) == real(b)
 }
 
-/// Download `url` to `part`, check it against `sha256` (main's, when
-/// `pinned`), and put it in place of `exe`. The new binary's build and
-/// interface number, as far as it says them.
 fn install(url: &str, part: &Path, sha256: &str, pinned: bool, exe: &Path) -> Result<(Option<String>, Option<u32>), String> {
     download(url, Some(part))?;
     let got = sha256_of(part)?;
@@ -216,16 +179,12 @@ fn install(url: &str, part: &Path, sha256: &str, pinned: bool, exe: &Path) -> Re
     Ok(said)
 }
 
-/// Where `put_in_place` moves a running binary that can't be overwritten: a
-/// name of its own, since an earlier one may still be running from its aside.
 fn aside_name(exe: &Path) -> PathBuf {
     let mut name = exe.file_name().unwrap_or_default().to_owned();
     name.push(format!(".old-{}", std::process::id()));
     exe.with_file_name(name)
 }
 
-/// With `aside` (Windows), remove the binaries earlier updates moved aside
-/// that no process is running from any more; a running one can't be removed.
 fn clear_asides(exe: &Path, aside: bool) {
     let Some((dir, name)) = aside.then(|| exe.parent().zip(exe.file_name())).flatten() else { return };
     let prefix = format!("{}.old", name.to_string_lossy());
@@ -237,11 +196,6 @@ fn clear_asides(exe: &Path, aside: bool) {
     }
 }
 
-/// Make `part` the binary `exe`. A rename within one folder is atomic, and a
-/// process running the old binary (a runtime's core) keeps the file it
-/// started from. Windows can rename a running exe but not replace it, so with
-/// `aside` the old one is renamed out of the way first, and put back if the
-/// new one can't be moved in.
 fn put_in_place(part: &Path, exe: &Path, aside: bool) -> Result<(), String> {
     let fail = |e: std::io::Error| format!("Couldn't replace {}: {e}", exe.display());
     if !aside {
@@ -256,7 +210,6 @@ fn put_in_place(part: &Path, exe: &Path, aside: bool) -> Result<(), String> {
     })
 }
 
-/// Whether a runtime recorded in `dir` is running on this machine.
 fn running(dir: &Path) -> bool {
     crate::runtime::look(dir, false, false).alive().is_some()
 }

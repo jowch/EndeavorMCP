@@ -99,6 +99,17 @@ children, as described in endeavor-mcp.md. The lock of a core that was ended
 is waited for a moment: the OS lets it go when the core's last handle closes,
 and a process the core was starting may hold the file a little longer.
 
+### The note a stop leaves (`stopped.rs`)
+
+`DIR/stopped` tells the others still attached to the runtime, or waiting for
+its job, what was stopped and how: "ID HOW", where ID is the runtime's pid,
+or `job:` and the job's id for a job not yet running, and HOW is `stop`
+(`endeavor stop`) or `connection` (a client's Stop). A pid alone, which an
+older `endeavor stop` writes, is `stop`. One note at a time; a stop that
+didn't happen takes it back. A starting runtime clears a pid's note, since the
+pid may come again, but not a job's: job ids aren't reused, and a helper
+still waiting on that job may not have read it.
+
 ## Telling a process from a later one
 
 A pid alone doesn't name a process for long: pids come round, and a reboot

@@ -160,3 +160,56 @@ with the same number would refuse. The other lists the app's `/endeavor/call`
 methods and the fields of `runtime.json`: raise `core::INTERFACE` if a caller
 of the build before would get it wrong. What a call or the events stream
 returns isn't caught; that stays the author's to judge.
+
+## Asks (`asks.rs`)
+
+In Ask to run, an agent's call that runs code waits for the user's answer;
+in Manual, so does a call that changes the notebook. The app sees each
+waiting call in its event stream (`asks`), shows it as a run or edit card,
+and answers with `endeavor/answer_run`.
+
+- A call waits only until its deadline, since agents end a tool call after
+  about 60 s and a user can be away longer. The ask then stays up without a
+  call, and the same call by the same session, on the same notebook code,
+  waits on it again; an approval given meanwhile is that call's at once. The
+  app sees which asks a call waits on (`waiting`), so it can keep one left up
+  past the end of the agent's turn.
+- Any other call by the session that changes or runs something takes it
+  down, and so does a refusal of an ask no call waits on: that may be the
+  app's at the end of a turn, and the next call asks afresh. Another
+  session's same call is its own ask.
+- A call stops waiting when the agent cancels it or its connection closes.
+- Ask ids go on from the runtime's start time, so an app that saw another
+  runtime's asks doesn't take a new one for an old one.
+- An answer to a run carries the cells the user's own run reached while the
+  call waited; an answer to `approve_install` the packages the card named
+  (#418).
+
+## Tool results (`results.rs`)
+
+Each session keeps its last 64 tool results, for the app to look up with
+`endeavor/tool_result` when the agent doesn't pass a result on (Cursor
+reports only `{"success": true}`). A result is found by the id the agent's
+client gave the call (Claude Code's `_meta["claudecode/toolUseId"]`, the
+same id its ACP adapter gives), else as the oldest result not yet looked up
+of a call to the same tool with the same arguments, in any key order and with
+`1` and `1.0` the same.
+
+## The guide (`guide.rs`)
+
+Agents that don't load the plugin get Endeavor's skills from the
+`notebook_guide` tool, and the server's MCP `instructions` say to call it
+first. A session that loads the plugin says so (`X-Endeavor-Skills: plugin`),
+gets no guide, and is told to load the skill instead. That pointer matters:
+with only the skill's description, Haiku 4.5 starts on the tools, splits a
+cell's code wrongly and skips looking at plots (#242), and with the skill but
+not the reference it still defines a name in two cells.
+
+- The guide is the notebook skill and the Julia reference; R's reference and
+  the rest are topics, the skill files' links rewritten as topic names.
+- How to point to a cell in a reply is in the instructions every agent gets
+  on a runtime with the app, with the skills or without: `app.md` says it
+  too, but agents read that for approvals and didn't link cells.
+- A runtime without the app says so, since the skill keeps what holds only
+  in the app apart; `endeavor mcp` adds the machine tools, and a client that
+  draws the notebook view hears of it.

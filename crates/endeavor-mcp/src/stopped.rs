@@ -1,13 +1,5 @@
-//! `DIR/stopped`, the note a stop leaves for the others still attached to the
-//! runtime (or waiting for its job): what was stopped and how. The file says
-//! "ID HOW": ID is the runtime's pid, or `job:` and the job's id for a job not
-//! yet running; HOW is `stop` (`endeavor stop`) or `connection` (a client's
-//! Stop). A note with the pid alone, which an older `endeavor stop` writes, is
-//! `stop`. One note at a time: a later stop replaces it.
-
 use std::path::Path;
 
-/// What a stop ended.
 #[derive(Clone, Copy)]
 pub enum Of<'a> {
     Runtime(i32),
@@ -16,9 +8,7 @@ pub enum Of<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum How {
-    /// `endeavor stop`.
     Stop,
-    /// A client sent Stop.
     Connection,
 }
 
@@ -33,7 +23,6 @@ impl Of<'_> {
     }
 }
 
-/// Note that `of` is being stopped.
 pub fn mark(dir: &Path, of: Of, how: How) {
     let how = match how {
         How::Stop => "stop",
@@ -42,22 +31,18 @@ pub fn mark(dir: &Path, of: Of, how: How) {
     let _ = std::fs::write(dir.join(FILE), format!("{} {how}", of.key()));
 }
 
-/// How `of` was stopped, if the note names it.
 pub fn why(dir: &Path, of: Of) -> Option<How> {
     let text = std::fs::read_to_string(dir.join(FILE)).ok()?;
     let mut words = text.split_whitespace();
     (words.next()? == of.key()).then(|| if words.next() == Some("connection") { How::Connection } else { How::Stop })
 }
 
-/// Take the note back if it names `of`: the stop didn't happen.
 pub fn unmark(dir: &Path, of: Of) {
     if why(dir, of).is_some() {
         let _ = std::fs::remove_file(dir.join(FILE));
     }
 }
 
-/// A runtime is starting: a note about an earlier one is no use, and its pid may come again.
-/// A job's note stays: ids aren't reused, and a helper still waiting on that job may not have read it.
 pub fn clear(dir: &Path) {
     let job = std::fs::read_to_string(dir.join(FILE)).is_ok_and(|text| text.starts_with("job:"));
     if !job {

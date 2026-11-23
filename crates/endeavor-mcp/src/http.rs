@@ -1,27 +1,17 @@
-//! Just enough HTTP/1.1 for the core to pass requests through to Pluto and
-//! Julia's bridge one at a time: request and response heads, and bodies relayed
-//! as they arrive in whatever framing the sender used (a length, chunks, or
-//! until the connection closes), so a stream of events reaches the client as
-//! it's written; a WebSocket's bytes after its upgrade; and whole requests and
-//! responses, for what the core answers itself and asks Julia.
-
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 
-/// Longest request or response head accepted.
 const MAX_HEAD: usize = 64 * 1024;
 
-/// A request or status line and its headers, in the order they came.
 pub struct Head {
     pub line: String,
     pub headers: Vec<(String, String)>,
 }
 
 impl Head {
-    /// The next head on `reader`, or `None` if the connection closed before one began.
     pub fn read(reader: &mut impl BufRead) -> io::Result<Option<Head>> {
         let mut size = 0;
         let mut next_line = |reader: &mut dyn BufRead| -> io::Result<Option<String>> {
@@ -61,22 +51,18 @@ impl Head {
         self.line.split(' ').next().unwrap_or_default()
     }
 
-    /// A request's target: its path and query.
     pub fn target(&self) -> &str {
         self.line.split(' ').nth(1).unwrap_or_default()
     }
 
-    /// A request's path, without its query.
     pub fn path(&self) -> &str {
         self.target().split('?').next().unwrap_or_default()
     }
 
-    /// Point a request at `target` instead.
     pub fn set_target(&mut self, target: &str) {
         self.line = format!("{} {target} {}", self.method(), self.version());
     }
 
-    /// A response's status code.
     pub fn status(&self) -> u16 {
         self.line.split(' ').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0)
     }
@@ -85,7 +71,6 @@ impl Head {
         if self.line.starts_with("HTTP/") { self.line.split(' ').next() } else { self.line.rsplit(' ').next() }.unwrap_or_default()
     }
 
-    /// Whether the connection may carry another request after this message.
     pub fn keeps_alive(&self) -> bool {
         let close = self.header("Connection").is_some_and(|c| c.split(',').any(|t| t.trim().eq_ignore_ascii_case("close")));
         self.version() == "HTTP/1.1" && !close
@@ -100,7 +85,6 @@ impl Head {
         out.write_all(text.as_bytes())
     }
 
-    /// How a request's body is framed.
     pub fn request_body(&self) -> io::Result<Framing> {
         match self.framing()? {
             Framing::UntilClose => Ok(Framing::Length(0)),
@@ -108,7 +92,6 @@ impl Head {
         }
     }
 
-    /// How the response to a `method` request is framed.
     pub fn response_body(&self, method: &str) -> io::Result<Framing> {
         let status = self.status();
         if method == "HEAD" || (100..200).contains(&status) || status == 204 || status == 304 {
@@ -132,7 +115,6 @@ fn invalid(what: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, what)
 }
 
-/// Where a body ends, tracked as its bytes pass through unchanged.
 #[derive(Debug, PartialEq)]
 pub enum Framing {
     Length(u64),
@@ -142,15 +124,10 @@ pub enum Framing {
 
 #[derive(Debug, PartialEq)]
 pub enum Chunk {
-    /// In a chunk's size line (hex digits, maybe `;extensions`).
     Size { size: u64 },
-    /// Past the digits: skipping extensions to the end of the line.
     Extension { size: u64 },
     Data(u64),
-    /// The line break after a chunk's data.
     DataEnd,
-    /// After the last chunk: trailer lines up to a blank one; `blank` while the
-    /// current line is still empty.
     Trailer { blank: bool },
     Done,
 }
@@ -160,7 +137,6 @@ impl Framing {
         matches!(self, Framing::Length(0) | Framing::Chunked(Chunk::Done))
     }
 
-    /// How many of `bytes` belong to this body, advancing past them.
     pub fn take(&mut self, bytes: &[u8]) -> io::Result<usize> {
         match self {
             Framing::UntilClose => Ok(bytes.len()),
@@ -220,8 +196,6 @@ impl Chunk {
     }
 }
 
-/// Copy a body from `from` to `to` as it arrives, leaving anything after it
-/// (a pipelined request) in `from`. An error if `from` closes before its end.
 pub fn copy_body(from: &mut impl BufRead, to: &mut impl Write, framing: &mut Framing) -> io::Result<()> {
     while !framing.done() {
         let bytes = from.fill_buf()?;
@@ -238,7 +212,6 @@ pub fn copy_body(from: &mut impl BufRead, to: &mut impl Write, framing: &mut Fra
     Ok(())
 }
 
-/// Read a whole body, undoing chunked framing.
 pub fn read_body(from: &mut impl BufRead, framing: Framing) -> io::Result<Vec<u8>> {
     let mut body = Vec::new();
     match framing {
@@ -257,7 +230,6 @@ pub fn read_body(from: &mut impl BufRead, framing: Framing) -> io::Result<Vec<u8
             let digits = line.split([';', '\r', '\n']).next().unwrap_or_default().trim();
             let size = u64::from_str_radix(digits, 16).map_err(|_| invalid("bad chunk size"))?;
             if size == 0 {
-                // Trailers, up to a blank line.
                 while !matches!(line.as_str(), "\r\n" | "\n") {
                     line.clear();
                     if from.take(MAX_HEAD as u64).read_line(&mut line)? == 0 {
@@ -278,12 +250,10 @@ pub fn read_body(from: &mut impl BufRead, framing: Framing) -> io::Result<Vec<u8
     Ok(body)
 }
 
-/// Write a whole response with a body of known length.
 pub fn respond(out: &mut impl Write, status: &str, content_type: Option<&str>, body: &[u8], keep_alive: bool) -> io::Result<()> {
     respond_with(out, status, content_type, &[], body, keep_alive)
 }
 
-/// `respond`, with more headers.
 pub fn respond_with(out: &mut impl Write, status: &str, content_type: Option<&str>, headers: &[(&str, &str)], body: &[u8], keep_alive: bool) -> io::Result<()> {
     let mut head = format!("HTTP/1.1 {status}\r\n");
     if let Some(content_type) = content_type {
@@ -301,21 +271,16 @@ pub fn respond_with(out: &mut impl Write, status: &str, content_type: Option<&st
     out.write_all(body)
 }
 
-/// Write one chunk of a chunked body; an empty one ends the body.
 pub fn write_chunk(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     write!(out, "{:x}\r\n", bytes.len())?;
     out.write_all(bytes)?;
     out.write_all(b"\r\n")
 }
 
-/// POST `body` to `path` on the loopback server at `port`, on a connection of
-/// its own: the response's status and whole body.
 pub fn post(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8]) -> io::Result<(u16, Vec<u8>)> {
     post_by(port, path, headers, body, None)
 }
 
-/// A socket whose reads fail with `TimedOut` once `deadline` has passed, each read
-/// waiting only for what is left.
 struct Timed<'a> {
     socket: &'a TcpStream,
     deadline: Option<Instant>,
@@ -334,12 +299,10 @@ impl Read for Timed<'_> {
     }
 }
 
-/// `post`, which fails with `TimedOut` if the whole exchange isn't done by `deadline`.
 pub fn post_by(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], deadline: Option<Instant>) -> io::Result<(u16, Vec<u8>)> {
     exchange(port, path, headers, body, deadline, true).map(|(status, body)| (status, body.unwrap_or_default()))
 }
 
-/// `post_by`, for a caller that wants only the status: it returns once the response's head is read, and the body is left unread.
 pub fn post_status_by(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], deadline: Instant) -> io::Result<u16> {
     exchange(port, path, headers, body, Some(deadline), false).map(|(status, _)| status)
 }
@@ -350,7 +313,6 @@ fn exchange(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], deadli
     let _ = upstream.set_nodelay(true);
     let mut head = format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
     for (name, value) in headers {
-        // A value can't end the header early.
         let value: String = value.chars().filter(|c| !c.is_control()).collect();
         head.push_str(&format!("{name}: {value}\r\n"));
     }
@@ -372,8 +334,6 @@ fn exchange(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8], deadli
     Ok((response.status(), Some(body)))
 }
 
-/// A GET of `path` on this computer's `port`: the status, the `Content-Type`, and the body, all
-/// done by `deadline`.
 pub fn get_by(port: u16, path: &str, deadline: Instant) -> io::Result<(u16, Option<String>, Vec<u8>)> {
     let connect = deadline.saturating_duration_since(Instant::now()).clamp(Duration::from_millis(1), Duration::from_secs(5));
     let upstream = TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), connect)?;
@@ -391,9 +351,6 @@ pub fn get_by(port: u16, path: &str, deadline: Instant) -> io::Result<(u16, Opti
     Ok((response.status(), response.header("content-type").map(str::to_owned), body))
 }
 
-/// Relay a response body from `upstream` to `client` as it arrives, like
-/// `copy_body`, but give up as soon as the client hangs up: a stream of events
-/// may write nothing for a long time, and the upstream end should close with it.
 pub fn relay_body(upstream: &mut BufReader<wire::Shared>, client: &mut wire::Shared, framing: &mut Framing) -> io::Result<()> {
     let mut watch_client = true;
     while !framing.done() {
@@ -401,7 +358,6 @@ pub fn relay_body(upstream: &mut BufReader<wire::Shared>, client: &mut wire::Sha
             match wait_readable(upstream.get_ref(), client, watch_client)? {
                 Readable::Upstream => {}
                 Readable::ClientClosed => return Err(io::ErrorKind::ConnectionAborted.into()),
-                // The client's next request; it waits in the socket for this response to end.
                 Readable::ClientSent => {
                     watch_client = false;
                     continue;
@@ -422,10 +378,6 @@ pub fn relay_body(upstream: &mut BufReader<wire::Shared>, client: &mut wire::Sha
     Ok(())
 }
 
-/// Pass `upstream`'s response to `request` on to the client as it comes,
-/// each head through `edit` first, and after a `101 Switching Protocols` the
-/// connection itself (`tunnel`). Whether the client connection can carry
-/// another request.
 pub fn relay_response(
     request: &Head,
     client: &mut BufReader<wire::Shared>,
@@ -441,7 +393,6 @@ pub fn relay_response(
             tunnel(client, upstream)?;
             return Ok(false);
         }
-        // `100 Continue` comes before the real response.
         if !(100..200).contains(&response.status()) {
             break response;
         }
@@ -451,9 +402,6 @@ pub fn relay_response(
     Ok(request.keeps_alive() && response.keeps_alive() && framing != Framing::UntilClose)
 }
 
-/// Copy bytes both ways between a client and an upstream server until either
-/// side closes, then close both: the connection after a `101 Switching
-/// Protocols` (a WebSocket). What either reader already holds goes first.
 pub fn tunnel(client: &mut BufReader<wire::Shared>, upstream: &mut BufReader<wire::Shared>) -> io::Result<()> {
     let (mut to_client, mut to_upstream) = (client.get_ref().clone(), upstream.get_ref().clone());
     to_client.write_all(upstream.buffer())?;
@@ -482,8 +430,6 @@ enum Readable {
     ClientSent,
 }
 
-/// Not ported: Windows needs WSAPoll. Until then a client that hangs up is
-/// noticed only when a write to it fails.
 #[cfg(windows)]
 fn wait_readable(_upstream: &TcpStream, _client: &TcpStream, _watch_client: bool) -> io::Result<Readable> {
     Ok(Readable::Upstream)
