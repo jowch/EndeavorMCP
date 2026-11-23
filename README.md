@@ -246,10 +246,12 @@ to send. The text goes at the end of the box, after anything you typed, and
 starts with ↓. The app turns it away for a few seconds after you type or click
 elsewhere on the page, or if the same press was already used. Then your pick
 comes back, and you press ↩ again.
-A message holds at most 8,000 characters, so a long cell's code is cut in the
-middle, keeping its start and end, and Claude reads the rest with its tools.
-Your comment is never cut: if it is too long on its own, the view says so and
-gives your pick back.
+A message holds at most 8,000 characters. A picked output's text is cut to
+4,000 characters, and when the message is still too long, the longest quoted
+texts (code, picked lines or output) are cut in the middle, keeping their start
+and end; Claude reads the rest with its tools. Your comment is never cut: if
+the comments or the number of picks still make it too long, the view says so
+and gives your pick back.
 
 **Find** (the magnifier, or ⌘F / Ctrl+F with the cursor in the notebook)
 searches the cells' code and outputs. ↩ and ⇧↩ step through the matches, and
