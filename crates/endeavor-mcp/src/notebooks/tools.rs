@@ -219,10 +219,10 @@ impl Notebooks {
     }
 }
 
-/// Who may have changed a cell since a session read it, as its replies say.
 /// How recent another session's edit of a cell must be for a session's first read of it to say so (#108).
 const OTHER_SESSION_RECENT: f64 = 600.0;
 
+/// Who may have changed a cell since a session read it, as its replies say.
 pub(crate) const CHANGED_BY: &str = "by the user, by another Endeavor session, or by this conversation before it was resumed";
 
 /// The owner of a change the user made through the app (`endeavor/restore_cells`): no session's.
