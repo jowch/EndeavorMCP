@@ -1,12 +1,5 @@
-//! Opening a notebook in the user's browser. The link that lets a browser in carries the
-//! runtime's token, so it goes from this process to the browser and never through the agent:
-//! tool results only carry the link without it (`mcp::browser_link`), which works in a browser
-//! that has been let in.
-
 use std::process::{Command, Stdio};
 
-/// Whether this process can show the user a browser: not one started over ssh, and on Linux and
-/// the other Unixes only with a display.
 pub(crate) fn can_open(var: impl Fn(&str) -> Option<String>) -> bool {
     let set = |name: &str| var(name).is_some_and(|value| !value.is_empty());
     if cfg!(any(target_os = "macos", windows)) {
@@ -15,8 +8,6 @@ pub(crate) fn can_open(var: impl Fn(&str) -> Option<String>) -> bool {
     set("DISPLAY") || set("WAYLAND_DISPLAY")
 }
 
-/// Whether this process can show the user a browser, as `open` decides it: in a debug build, whether a
-/// test stands one in (`ENDEAVOR_TEST_BROWSER`).
 pub(crate) fn shows(var: impl Fn(&str) -> Option<String>) -> bool {
     if cfg!(debug_assertions) {
         return var("ENDEAVOR_TEST_BROWSER").is_some();
@@ -24,13 +15,6 @@ pub(crate) fn shows(var: impl Fn(&str) -> Option<String>) -> bool {
     can_open(var)
 }
 
-/// What the agent is told with a `browser_url` that no browser was opened for: this computer
-/// (`host`) shows no browser. Whether the user's browser reaches `localhost:{port}` as it is can't be
-/// told from here: a virtual machine on their computer that shares its ports reaches it, and one
-/// entered with `orb run` has the same ssh variables as a real ssh login, which doesn't. So the address
-/// comes first, and the port forward only if it doesn't load. The agent can't forward it: the forward
-/// starts on the user's computer. `open` lets their browser in (`endeavor open`), since the link a
-/// browser needs carries the token, which the agent never gets.
 pub(crate) fn note(host: &str, port: u16, open: &str) -> String {
     format!(
         "No browser could be opened on {host}, so the notebook did not open for the user. \
@@ -42,8 +26,6 @@ You can't forward the port for them: it starts on their computer."
     )
 }
 
-/// The program and arguments that open `url` in the default browser. The URL is one argument and
-/// no shell reads it (on Windows, `start` in cmd would split it at `&`).
 pub(crate) fn command(url: &str) -> (&'static str, Vec<String>) {
     if cfg!(target_os = "macos") {
         ("open", vec![url.to_owned()])
@@ -54,16 +36,8 @@ pub(crate) fn command(url: &str) -> (&'static str, Vec<String>) {
     }
 }
 
-/// How long the opener is waited for: `open` and `xdg-open` exit soon and say when no browser took the
-/// link. One still running then is taken as opening it.
 const OPENER_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Open `url` in the user's browser. Whether it was handed to the browser: on macOS and Linux the
-/// opener's exit says so; on Windows `rundll32` always exits 0, so there it is whether it started.
-///
-/// A debug build never opens a real browser, so that the tests don't: with
-/// `ENDEAVOR_TEST_BROWSER` set to a file it adds each URL to that file as a line and counts it as
-/// opened, and without it nothing is opened.
 pub(crate) fn open(url: &str) -> bool {
     if cfg!(debug_assertions) {
         let Some(file) = std::env::var_os("ENDEAVOR_TEST_BROWSER") else { return false };
@@ -74,7 +48,6 @@ pub(crate) fn open(url: &str) -> bool {
         return false;
     }
     let (program, args) = command(url);
-    // stdout is the agent's MCP connection: the opener writes nothing there.
     match Command::new(program).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
         Ok(mut child) => {
             if cfg!(windows) {
@@ -90,8 +63,6 @@ pub(crate) fn open(url: &str) -> bool {
     }
 }
 
-/// Whether the opener `child` (`program`) took the link: it exited with success within `wait`, or
-/// is still running then (and is left to end on its own).
 fn took(mut child: std::process::Child, program: &str, wait: std::time::Duration) -> bool {
     let until = std::time::Instant::now() + wait;
     loop {

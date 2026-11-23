@@ -2,10 +2,11 @@
 
 `runtime.rs` is the one place that finds the runtime in a state folder,
 starts one, and stops it, for the helper (`endeavor connect`,
-[helper.md](helper.md)), `serve` and `mcp`. The callers differ only in what they say while it goes on and how
-they end it (`Hooks`). The start lock and its rules are in
-[endeavor-mcp.md](endeavor-mcp.md) ("A start, once begun, finishes without
-the process that asked for it"); this is what the code adds to them.
+[helper.md](helper.md)), `serve` and `mcp`. The callers differ only in what
+they say while it goes on and how they end it (`Hooks`). The start lock and
+its rules are in [endeavor-mcp.md](endeavor-mcp.md) ("A start, once begun,
+finishes without the process that asked for it"); this is what the code adds
+to them.
 
 ## Which state folder
 

@@ -1,22 +1,3 @@
-//! The notebook tools without the app (docs/serve.md). The user starts
-//! the runtime themselves, as they would Pluto or Jupyter, and points their
-//! agent and browser at its one port:
-//!
-//! - `serve` starts the runtime in the foreground (or uses the one already
-//!   running from its state folder) and prints how to connect: the browser
-//!   link, the MCP URL and token, agent configs and the `ssh -L` line.
-//!   Ctrl-C (and on Windows, closing the console) stops a runtime it started.
-//! - `mcp` is the stdio form for an agent on the same machine (plugin
-//!   installs): it starts or reuses the runtime in the background, where it
-//!   outlives the agent and ends itself after the idle stop, and relays MCP
-//!   between stdin/stdout and the runtime's `/mcp`.
-//! - `stop` ends the runtime running from the state folder.
-//! - `open` lets the user's browser in to it, with the link that holds its token.
-//! - `status` says what Endeavor has on this computer, and changes nothing.
-//!
-//! `runtime/` is built into this binary (build.rs) and unpacked to a folder
-//! named by its version on first use, so the binary is all a user installs.
-
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -45,7 +26,6 @@ mod projects;
 mod status;
 mod target;
 
-
 const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Endeavor here and print how to connect (Ctrl-C stops it)
        endeavor mcp [OPTIONS]     MCP over stdin/stdout for an agent on this machine
        endeavor stop [--force]    stop what serve or mcp started; --force cancels a start under way
@@ -71,13 +51,8 @@ options:
   --force              end Julia while it is still starting, with what it began [stop]
 ";
 
-/// A notebook this session opened in the browser this recently isn't opened again: agents call
-/// `open_notebook` on an open notebook to get its id, sometimes several times in a turn.
 const REOPEN_AFTER: Duration = Duration::from_secs(10);
 
-/// How long a relayed call, and each machine tool, waits for a runtime that is
-/// still starting before it says so, under the time agents give a tool call.
-/// `ENDEAVOR_START_WAIT_SECS` sets it (the tests do).
 fn start_wait() -> Duration {
     lock_limit("ENDEAVOR_START_WAIT_SECS", 45)
 }
@@ -93,30 +68,17 @@ pub(crate) enum Command {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Options {
-    /// The runtime's `runtime.json`, token and log. Read through `state_dir()`.
     state_dir: PathBuf,
-    /// With no `--state-dir`, the app's older folder (`Env::apps_old_state_dir`), used instead of
-    /// `state_dir` while a runtime alive on this machine is recorded there (`runtime::or_older`).
     older_state_dir: Option<PathBuf>,
-    /// Where `runtime/` is unpacked, a folder per version.
     cache: PathBuf,
     julia: julia::Source,
-    /// Julia is found and started only when something needs it, so an agent that only opens R
-    /// notebooks never needs Julia. Always so for `serve` and `mcp`, except in tests of a start that
-    /// waits for Julia: a debug build reads ENDEAVOR_TEST_JULIA_AT_START.
     julia_when_needed: bool,
-    /// The R for R notebooks.
     r: crate::r::Source,
-    /// JULIA_DEPOT_PATH.
     depot: String,
-    /// Where notebooks are created, and relative paths start; none for `--no-folder`.
     folder: Option<PathBuf>,
-    /// The runtime's port; 0 picks a free one.
     port: u16,
-    /// Every MCP session gets the host tools (`serve` only).
     host_tools: bool,
     idle_hours: f64,
-    /// The agent loads the skills from the plugin (`mcp` only).
     skills_plugin: bool,
 }
 
@@ -191,8 +153,6 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
-    // `mcp` lives long and starts its runtime again after a stop, so it decides between the two folders
-    // before each start (`Options::state_dir`); the others decide once (#434).
     let older_state_dir = state_dir.is_none().then(|| env.apps_old_state_dir()).flatten();
     let state_dir = state_dir.unwrap_or_else(|| env.state_dir());
     let now = || runtime::or_older(&state_dir, older_state_dir.as_deref());
@@ -230,7 +190,6 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     }
 }
 
-/// `endeavor serve|mcp|stop|status|open …`.
 pub fn main(argv: &[String]) -> ! {
     if argv.iter().any(|a| a == "--help" || a == "-h") {
         println!("{USAGE}");
@@ -250,15 +209,10 @@ pub fn main(argv: &[String]) -> ! {
     }
 }
 
-/// Unpack the runtime built into this binary, once per version. The folder.
 pub(crate) fn unpack_runtime(cache: &Path) -> Result<PathBuf, String> {
     Ok(unpack(cache, embedded::RUNTIME_VERSION, embedded::RUNTIME_FILES)?.join("runtime"))
 }
 
-/// `files` in `cache/version/`, put there whole: written to a folder of
-/// their own, then moved into place, so a folder by that name is complete.
-/// A new version's folder replaces the older ones nothing uses any more
-/// (`remove_unused`). That folder.
 pub fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<PathBuf, String> {
     let dir = cache.join(version);
     if dir.is_dir() {
@@ -266,8 +220,6 @@ pub fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<Pa
         return Ok(dir);
     }
     let failed = |e: io::Error| format!("Couldn't unpack Endeavor's runtime into {}: {e}", cache.display());
-    // One staging folder per call, not per process: a server's precompile thread unpacks while the
-    // server does, and with a shared one, one call cleared it as the other moved it into place (#363).
     static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let part = cache.join(format!("{version}.part.{}.{}", std::process::id(), CALLS.fetch_add(1, Ordering::Relaxed)));
     let written = files.iter().chain([&(IN_USE, &b""[..])]).try_for_each(|(path, contents)| {
@@ -276,7 +228,6 @@ pub fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<Pa
         std::fs::write(&file, contents)
     });
     if let Err(e) = written {
-        // A full disk shouldn't also keep each try's partial copy.
         let _ = std::fs::remove_dir_all(&part);
         return Err(failed(e));
     }
@@ -285,7 +236,6 @@ pub fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<Pa
             remove_unused(cache, version);
             Ok(dir)
         }
-        // Another process unpacked the same version first.
         Err(_) if dir.is_dir() => {
             let _ = std::fs::remove_dir_all(&part);
             Ok(dir)
@@ -297,30 +247,17 @@ pub fn unpack(cache: &Path, version: &str, files: &[(&str, &[u8])]) -> Result<Pa
     }
 }
 
-/// In each unpacked folder: whoever uses the folder holds a shared lock on
-/// it (`Lease`), and its time is when the folder was last unpacked or used.
 pub(crate) const IN_USE: &str = "in-use";
 
-/// How long an unused folder is kept after its last use. The lock alone may
-/// not show: a cache in a home folder shared by a cluster's nodes may have
-/// locks that only its own node sees.
 const KEEP_UNUSED: Duration = Duration::from_secs(24 * 3600);
 
-/// How often a `Lease` marks its folder as used.
 const LEASE_TOUCH: Duration = Duration::from_secs(3600);
 
-/// Remove the folders in `cache` other than `keep`'s that no one holds a
-/// `Lease` on and no one has unpacked or used for `KEEP_UNUSED`, and staging
-/// folders an unpack left more than `KEEP_PART` ago. A folder
-/// with no `IN_USE` is left alone: a build from before leases unpacked it,
-/// and a runtime it started may still run from it.
 fn remove_unused(cache: &Path, keep: &str) {
     let Ok(entries) = std::fs::read_dir(cache) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
-        // `--cache` can name a folder that also holds the user's own files (#126): touch only what
-        // `unpack` names, a crate version and a dash first.
         if !named_by_unpack(&name) {
             continue;
         }
@@ -332,8 +269,6 @@ fn remove_unused(cache: &Path, keep: &str) {
             continue;
         }
         if name.contains(".part.") {
-            // A staging folder whose unpack was cut short before its rename (#365); one this young may
-            // still be filling.
             let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
             if age.is_some_and(|age| age > crate::old_builds::KEEP_PART) {
                 let _ = std::fs::remove_dir_all(&path);
@@ -356,28 +291,22 @@ fn remove_unused(cache: &Path, keep: &str) {
     }
 }
 
-/// Whether `name` starts the way `unpack`'s folders do: a crate version (`0.1.0`), then `-`.
 fn named_by_unpack(name: &str) -> bool {
     let Some((version, _)) = name.split_once('-') else { return false };
     let parts: Vec<&str> = version.split('.').collect();
     parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// A shared lock on an unpacked folder (`unpack`) that keeps another
-/// version's `unpack` from removing it, for as long as this lives.
 pub struct Lease {
     _marker: Arc<std::fs::File>,
 }
 
-/// Hold `dir`, a folder `unpack` returned, while it is used. None if it
-/// wasn't unpacked by `unpack` (such as a server's runtime the app installs).
 pub fn lease(dir: &Path) -> Option<Lease> {
     let marker = std::fs::OpenOptions::new().read(true).write(true).open(dir.join(IN_USE)).ok()?;
     marker.try_lock_shared().ok()?;
     Some(lease_locked(marker))
 }
 
-/// A `Lease` on `marker`, an `IN_USE` file this process holds a shared lock on.
 pub(crate) fn lease_locked(marker: std::fs::File) -> Lease {
     let marker = Arc::new(marker);
     let _ = marker.set_modified(SystemTime::now());
@@ -393,8 +322,6 @@ pub(crate) fn lease_locked(marker: std::fs::File) -> Lease {
 }
 
 impl Options {
-    /// The state folder now: `state_dir`, or while a runtime alive here is recorded in the app's older
-    /// folder, that one. Asked again each time, so a start after that runtime stopped is in `state_dir`.
     pub(crate) fn state_dir(&self) -> PathBuf {
         runtime::or_older(&self.state_dir, self.older_state_dir.as_deref())
     }
@@ -407,7 +334,6 @@ fn runtime_args(options: &Options, exit_idle: bool) -> Args {
         julia: options.julia.clone(),
         julia_when_needed: options.julia_when_needed,
         r: options.r.clone(),
-        // `serve` and `mcp` run on the user's own computer.
         own_r: true,
         runtime: PathBuf::new(),
         depot: options.depot.clone(),
@@ -422,7 +348,6 @@ fn runtime_args(options: &Options, exit_idle: bool) -> Args {
     }
 }
 
-/// What `serve` and `mcp` say while a start goes on: its lines to `progress`, and the wait ends when `cancelled` says so.
 struct Saying<'a> {
     progress: &'a dyn Fn(&str),
     cancelled: &'a dyn Fn() -> bool,
@@ -443,9 +368,6 @@ impl Hooks for Saying<'_> {
     }
 }
 
-/// The runtime running from the state folder, or a new one, once it answers (`runtime::find_or_start`).
-/// One of an older version is kept here: the front decides whether to stop it (`target::Local::other_build`).
-/// `progress` hears the start's log; `cancelled` ends a start early, and a runtime that was starting with it.
 fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), cancelled: &dyn Fn() -> bool) -> Result<Up, String> {
     let args = runtime_args(options, exit_idle);
     let (events, _) = mpsc::channel();
@@ -465,13 +387,10 @@ fn start_or_reuse(options: &Options, exit_idle: bool, progress: &dyn Fn(&str), c
     }
 }
 
-/// Why a runtime from a build before one port per runtime can't be used here.
 const OLDER_RUNTIME_HERE: &str = "The Endeavor running here was started by an older version. Stop it with `endeavor stop`, then try again.";
 
-/// The core's environment for a standalone runtime (see `core::main`).
 fn core_env(options: &Options, exit_idle: bool) -> Vec<(&'static str, Option<String>)> {
     let mut env = vec![("ENDEAVOR_IDLE_HOURS", Some(options.idle_hours.to_string()))];
-    // The other of the two is cleared: the core lets a folder win over the lack of one.
     match &options.folder {
         Some(folder) => env.extend([("ENDEAVOR_FOLDER", Some(folder.display().to_string())), ("ENDEAVOR_NO_FOLDER", None)]),
         None => env.extend([("ENDEAVOR_NO_FOLDER", Some("1".into())), ("ENDEAVOR_FOLDER", None)]),
@@ -488,8 +407,6 @@ fn core_env(options: &Options, exit_idle: bool) -> Vec<(&'static str, Option<Str
     env
 }
 
-/// `DIR/start.lock`, opened and not yet held. `serve`, `mcp` and `connect` hold
-/// it while they find or start a runtime in `dir`.
 pub(crate) fn open_start_lock(dir: &Path) -> Result<std::fs::File, String> {
     let path = dir.join("start.lock");
     crate::owner_only(std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false))
@@ -497,16 +414,10 @@ pub(crate) fn open_start_lock(dir: &Path) -> Result<std::fs::File, String> {
         .map_err(|e| format!("Couldn't open {}: {e}", path.display()))
 }
 
-/// How long to wait for another process's start before giving up. A first
-/// start downloads Julia and precompiles Pluto, which takes minutes, so this is
-/// well past that; `ENDEAVOR_START_LOCK_SECS` sets it (the tests do).
 pub(crate) fn start_lock_limit() -> Duration {
     lock_limit("ENDEAVOR_START_LOCK_SECS", 30 * 60)
 }
 
-/// How long a stop waits for the start lock. The stop itself takes up to about
-/// 20 s more, and the client waits 60 s for the answer (`STOP_WAIT` in the
-/// client); `ENDEAVOR_STOP_LOCK_SECS` sets it (the tests do).
 pub(crate) fn stop_lock_limit() -> Duration {
     lock_limit("ENDEAVOR_STOP_LOCK_SECS", 20)
 }
@@ -515,24 +426,16 @@ fn lock_limit(var: &str, default_secs: u64) -> Duration {
     Duration::from_secs(std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default_secs))
 }
 
-/// What to say when `start_lock_limit` passes.
 pub(crate) fn start_lock_gave_up(dir: &Path) -> String {
     format!("Gave up waiting for another process that is starting Endeavor in {}. If none is, delete {} and try again.", dir.display(), dir.join("start.lock").display())
 }
 
-/// What `wait_for_start_lock` gave up on.
 pub(crate) enum Wait<E> {
-    /// The lock file couldn't be opened.
     Failed(String),
-    /// The limit passed.
     TimedOut,
-    /// `pause` said to stop waiting.
     Interrupted(E),
 }
 
-/// Hold `DIR/start.lock` until dropped, waiting up to `limit` for another
-/// process to let go. `pause` is called between attempts and does the waiting;
-/// an error from it ends the wait.
 pub(crate) fn wait_for_start_lock<E>(dir: &Path, limit: Duration, mut pause: impl FnMut() -> Result<(), E>) -> Result<std::fs::File, Wait<E>> {
     let file = open_start_lock(dir).map_err(Wait::Failed)?;
     let started = Instant::now();
@@ -545,7 +448,6 @@ pub(crate) fn wait_for_start_lock<E>(dir: &Path, limit: Duration, mut pause: imp
     Ok(file)
 }
 
-/// Hold `DIR/start.lock` to stop the runtime, waiting up to `stop_lock_limit()` for a start under way.
 pub(crate) fn stop_lock(dir: &Path) -> Result<std::fs::File, String> {
     let pause = || {
         std::thread::sleep(Duration::from_millis(200));
@@ -558,7 +460,6 @@ pub(crate) fn stop_lock(dir: &Path) -> Result<std::fs::File, String> {
     })
 }
 
-/// What to say when a stop gave up waiting for the start lock.
 pub(crate) fn stop_lock_gave_up(dir: &Path) -> String {
     format!(
         "Endeavor was not stopped: another process has held the start lock in {} for too long. Endeavor is still running. Try again, or delete {} if nothing is starting Endeavor.",
@@ -567,24 +468,16 @@ pub(crate) fn stop_lock_gave_up(dir: &Path) -> String {
     )
 }
 
-/// How to reach a runtime, for `connection_text`.
 pub(crate) struct Connection<'a> {
     pub port: u16,
-    /// The bearer token, for an agent's MCP config.
     pub token: &'a str,
-    /// The pages' token, for the browser's link.
     pub page_token: &'a str,
-    /// This machine, as `ssh` from the user's computer names it (its host name).
     pub node: &'a str,
-    /// Where new notebooks without a path go.
     pub folder: &'a str,
-    /// The runtime has a project folder; if not, `folder` is the home folder it works in.
     pub project: bool,
-    /// In a Slurm job, the login node it was submitted from (`SLURM_SUBMIT_HOST`).
     pub login: Option<&'a str>,
 }
 
-/// What `serve` prints once the runtime answers.
 pub(crate) fn connection_text(c: &Connection) -> String {
     let Connection { port, token, page_token, node, folder, project, .. } = c;
     let url = format!("http://localhost:{port}/mcp");
@@ -627,23 +520,15 @@ The link and the header each let anyone who has them run code as you. Keep them 
     )
 }
 
-/// The folder a running standalone runtime recorded for its notebooks, and whether it is a project
-/// folder (`false`: it was started without one, and this is the home folder it works in).
 fn recorded_folder(dir: &Path) -> Option<(String, bool)> {
     let state: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("runtime.json")).ok()?).ok()?;
     Some((state["folder"].as_str()?.to_owned(), state["no_folder"] != true))
 }
 
-/// What to tell the user when the runtime recorded in `dir` came from
-/// another build than this binary (`embedded::BUILD_VERSION`) and doesn't offer
-/// its interface (`core::INTERFACE`); none when it's this build's or offers it,
-/// or nothing is recorded. The runtime keeps working as it was started:
-/// stopping it is the user's call.
 pub(crate) fn other_build(dir: &Path) -> Option<String> {
     other_build_than(dir, embedded::BUILD_VERSION, Some(crate::core::INTERFACE))
 }
 
-/// `other_build`, against build `this` and its interface, when that is known.
 pub(crate) fn other_build_than(dir: &Path, this: &str, interface: Option<u32>) -> Option<String> {
     let state: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("runtime.json")).ok()?).ok()?;
     if interface.is_some() && state["interface"].as_u64() == interface.map(u64::from) {
@@ -663,8 +548,6 @@ pub(crate) fn other_build_than(dir: &Path, this: &str, interface: Option<u32>) -
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
-/// Take Ctrl-C, SIGTERM and SIGHUP on a thread of their own, as a request to
-/// stop. Called before any other thread starts, so they all inherit the mask.
 #[cfg(unix)]
 fn catch_stop_signals() {
     // SAFETY: initializing and applying a signal set on this (still only) thread.
@@ -688,23 +571,17 @@ fn catch_stop_signals() {
     });
 }
 
-/// The console window was closed (or the user is logging off): Windows ends
-/// the process a few seconds after it says so, too soon to ask Julia to shut down.
 #[cfg(windows)]
 static CLOSING: AtomicBool = AtomicBool::new(false);
 
-/// Take Ctrl-C, Ctrl-Break and the console closing as a request to stop. The
-/// runtime has a console of its own (`crate::start`), so none of them reach it.
 #[cfg(windows)]
 fn catch_stop_signals() {
     use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
     unsafe extern "system" fn on_console_event(event: u32) -> windows_sys::core::BOOL {
         let closing = event != CTRL_C_EVENT && event != CTRL_BREAK_EVENT;
-        // Before STOP, so `serve` sees it when it stops.
         CLOSING.fetch_or(closing, Ordering::SeqCst);
         STOP.store(true, Ordering::SeqCst);
         if closing {
-            // Windows ends the process once this returns; `serve` exits when Julia is stopped.
             loop {
                 std::thread::sleep(Duration::from_secs(1));
             }
@@ -805,10 +682,6 @@ fn stop(dir: &Path, force: bool) -> ! {
     std::process::exit(0)
 }
 
-/// `open`: let the user's browser in to the runtime running from `dir`, with the link that holds its
-/// token, which tool results don't carry. The browser is opened when this computer shows one;
-/// otherwise the link is printed, but only to a terminal: an agent that runs this in its shell would
-/// otherwise read the token and could quote it.
 fn open(dir: &Path) -> ! {
     let failed = |message: String| -> ! {
         eprintln!("{message}");
@@ -834,51 +707,26 @@ fn open(dir: &Path) -> ! {
     std::process::exit(0)
 }
 
-/// `mcp`: the agent's MCP messages, one JSON-RPC message per line on stdin,
-/// relayed to the runtime's `/mcp` and the answers written to stdout.
 struct Relay {
     options: Options,
-    /// This agent session's key (`X-Endeavor-Session`): each runtime gives the
-    /// session one notebook under it, and tells sessions apart by it. The same
-    /// key goes to every runtime the session uses.
     session: String,
-    /// Where this session's notebooks run.
     target: Mutex<Target>,
-    /// The project folder Codex names in a tool call's metadata, for a front started with `--no-folder`
-    /// (`learn_workspace`).
     workspace: Mutex<Option<String>>,
-    /// This computer's runtime, which the target is when it is on this computer.
     local: Arc<Local>,
-    /// The connections to the machines this session has used.
     connections: machines::Connections,
-    /// One machine tool at a time (they switch, start and stop things).
     ops: Mutex<()>,
-    /// Said once, in the first result.
     notice: Mutex<Option<String>>,
-    /// The machines' runtimes (machine id and pid) the agent was told came from another build.
     told_other_build: Mutex<std::collections::HashSet<(String, u32)>>,
     machines: crate::client::MachinesFile,
     projects: projects::Projects,
-    /// When this session last opened each notebook in the user's browser, by the browser's port and the
-    /// notebook's id: an agent that calls `open_notebook` again at once, for its id, opens no second tab.
     opened: Mutex<std::collections::HashMap<(u16, String), Instant>>,
-    /// What `initialize` negotiated, for `MCP-Protocol-Version`.
     protocol: Mutex<Option<String>>,
-    /// The runtime's `Mcp-Session-Id`, if it gives one.
     mcp_session: Mutex<Option<String>>,
-    /// The client draws MCP App views (it said so in `initialize`): notebooks show in the notebook
-    /// view beside the chat, not in a browser tab (`views`).
     views: std::sync::atomic::AtomicBool,
-    /// What the log said of the tool calls' `_meta`: its keys, and how many calls had their values
-    /// logged (`log_meta`).
     meta_logged: Mutex<(Vec<String>, u32)>,
-    /// The salt of those fingerprints, made per process, so a log doesn't let anyone check a guessed value.
     meta_salt: std::collections::hash_map::RandomState,
-    /// The user's own OK for a large R download, asked by the front (`consent`).
     consent: consent::Consent,
-    /// The user's own yes to an install on a machine, where the client can't show a dialog (`install_page`).
     pages: install_page::Pages,
-    /// Where the plugin's hook writes Claude Code's permission mode (`claude_mode`).
     mode: claude_mode::Files,
     out: Mutex<Box<dyn Write + Send>>,
 }
@@ -891,8 +739,6 @@ fn relay(options: Options) -> ! {
     let session = session_key(conversation.as_deref(), child_of_shell).unwrap_or(fresh);
     precompile_after_update(&options);
     let mut relay = Relay::new(options, session, Box::new(io::stdout()));
-    // A Claude Code started from another one's shell has that one's conversation in its environment,
-    // so only its own process's file counts; registering it keeps the inner hook's mode there.
     #[cfg(unix)]
     let parent = Some(std::os::unix::process::parent_id());
     #[cfg(not(unix))]
@@ -907,8 +753,6 @@ fn relay(options: Options) -> ! {
         if line.trim().is_empty() {
             continue;
         }
-        // Each on its own thread: a run can take minutes, and a cancellation
-        // must get through meanwhile.
         let relay = relay.clone();
         std::thread::spawn(move || relay.handle(&line));
     }
@@ -916,43 +760,20 @@ fn relay(options: Options) -> ! {
     std::process::exit(0)
 }
 
-/// After an install or an update, precompile the runtime and EndeavorRuntimeWarm in the
-/// background, at low priority, before any notebook needs them. The runtime loads
-/// EndeavorRuntimeWarm only when it's already precompiled, and an update leaves it stale: until
-/// the runtime itself got round to it (`warm_up_later`, after 30 s quiet), the first opens ran
-/// without it, about 20 s slower each (measured 2026-11-11). Only where Julia notebooks ran before
-/// (an earlier runtime's precompiled code is in the depot): someone who only opens R notebooks never
-/// needs Julia, and a first install waits for a first Julia notebook as before. It never downloads
-/// Julia, and a failure costs only the speedup: the runtime does its own.
-///
-/// The Julia process is meant to outlive this server: a short session shouldn't throw the work
-/// away. So it, not the server, takes the lock (`.precompiling`, so however many servers start
-/// after an update, one precompiles and the rest exit at once) and writes the marker
-/// (`.precompiled`) when it's done. A runtime folder is one version, so a folder done once for a
-/// depot and a Julia version is never done again. Compiled code is per Julia version, so the user's
-/// Julia moving on (`juliaup update`) does it again; finding which Julia that is costs one
-/// `julia --version`, and only where Julia notebooks ran. After a failure (`.precompile-failed`) it
-/// waits a day.
 fn precompile_after_update(options: &Options) {
     let (cache, source, depot) = (options.cache.clone(), options.julia.clone(), options.depot.clone());
     std::thread::spawn(move || {
         let find = || julia::find(&source, false, &mut |_| {}).ok();
         precompile_if_needed(&depot, &|| unpack_runtime(&cache).ok(), &find, &mut |runtime, key, julia| {
             if let Some(mut command) = precompile_command(julia, runtime, &depot, key) {
-                // Waited for only so it doesn't stay a zombie while this server runs.
                 let _ = command.status();
             }
         });
     });
 }
 
-/// How long a failed background precompile keeps the next ones from trying.
 const PRECOMPILE_RETRY: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// `precompile_after_update`'s choice, with the runtime's unpacking, finding Julia (its path and
-/// version) and the spawn passed in (for the tests): `run` gets the runtime folder, the marker's
-/// contents and the julia, only when Julia notebooks ran in `depot`, the folder hasn't been done for
-/// it with this Julia version, and it hasn't failed in the last day.
 fn precompile_if_needed(depot: &str, runtime: &dyn Fn() -> Option<PathBuf>, julia: &dyn Fn() -> Option<(String, String)>, run: &mut dyn FnMut(&Path, &str, &str)) {
     if !julia_ran_here(depot) {
         return;
@@ -970,8 +791,6 @@ fn precompile_if_needed(depot: &str, runtime: &dyn Fn() -> Option<PathBuf>, juli
     run(&runtime, &key, &julia);
 }
 
-/// Whether an Endeavor runtime has been precompiled in `depot` (JULIA_DEPOT_PATH, whose first
-/// entry is where Julia writes), by any version: a folder only a Julia that ran our runtime makes.
 fn julia_ran_here(depot: &str) -> bool {
     let sep = if cfg!(windows) { ';' } else { ':' };
     let Some(first) = depot.split(sep).next().filter(|p| !p.is_empty()) else { return false };
@@ -980,11 +799,6 @@ fn julia_ran_here(depot: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// What the background Julia runs, in the runtime folder (`ENDEAVOR_RUNTIME`). It takes the lock
-/// or exits; leaves a folder whose packages aren't all installed to the runtime's own
-/// `Pkg.instantiate` (two installs into one depot at once aren't safe); removes compiled files of
-/// ours that can't be read (runtime/cache_guard.jl), before and after; precompiles; and writes the
-/// marker (`ENDEAVOR_PRECOMPILED`), or the failure marker.
 const PRECOMPILE_SCRIPT: &str = r#"
 using FileWatching.Pidfile: mkpidlock
 const R = ENV["ENDEAVOR_RUNTIME"]
@@ -999,8 +813,6 @@ ok = try
 catch
     false
 end
-# A runtime folder removed while this ran (it outlives the server) leaves the file Julia was
-# writing unreadable (#383): removed again here, so the next start doesn't trip on it.
 endeavor_drop_unreadable_caches(; log=devnull)
 isdir(R) || exit(ok ? 0 : 1)
 if ok
@@ -1012,10 +824,6 @@ else
 end
 "#;
 
-/// Julia precompiling the runtime's packages below normal priority: under `nice` where there is
-/// one; on Windows the process lowers its own priority class, which the precompiles it starts inherit.
-/// Its flags must keep the compile cache's key the same as the runtime's (`core::julia_command`):
-/// a flag such as `-O` or `--check-bounds` on one side only would make this work wasted.
 fn precompile_command(julia: &str, runtime: &Path, depot: &str, key: &str) -> Option<std::process::Command> {
     let lower = if cfg!(windows) {
         "ccall((:SetPriorityClass, \"kernel32\"), stdcall, Cint, (Ptr{Cvoid}, UInt32), ccall((:GetCurrentProcess, \"kernel32\"), stdcall, Ptr{Cvoid}, ()), 0x00004000)\n"
@@ -1047,14 +855,6 @@ fn precompile_command(julia: &str, runtime: &Path, depot: &str, key: &str) -> Op
     Some(command)
 }
 
-/// The session key of an agent whose client names its conversation: Claude Code gives
-/// its MCP servers `CLAUDE_CODE_SESSION_ID`, and keeps it when the conversation is
-/// resumed. Under it a resumed conversation is the same session, with its reads,
-/// edits and notebook, rather than a new one that has to read its own edits again
-/// and is told another session changed them (#176). None for anything that isn't a
-/// short id, so it can go in a header, and in a process Claude Code's shell started
-/// (`CLAUDE_CODE_CHILD_SESSION`, which Claude Code sets for its Bash tool and not
-/// for its MCP servers): another agent run from there isn't that conversation.
 fn session_key(conversation: Option<&str>, child_of_shell: bool) -> Option<String> {
     if child_of_shell {
         return None;
@@ -1064,21 +864,14 @@ fn session_key(conversation: Option<&str>, child_of_shell: bool) -> Option<Strin
     ok.then(|| format!("claude-{id}"))
 }
 
-/// How many tool calls `Relay::log_meta` logs the `_meta` values of.
 const META_CALLS_LOGGED: u32 = 5;
 
-/// A short fingerprint of `text` for the log, salted per process (`salt`): two calls with the same value
-/// show the same one, and the value itself can't be checked against it.
 fn fingerprint(salt: &std::collections::hash_map::RandomState, text: &str) -> String {
     use std::hash::BuildHasher;
     format!("{:08x}", salt.hash_one(text) as u32)
 }
 
 impl Relay {
-    /// Log what a tool call's `_meta` holds, to learn whether a client that serves several conversations
-    /// on one connection names the conversation in each call: its keys whenever they change, and for the
-    /// first `META_CALLS_LOGGED` calls a fingerprint of each string value, never the value. A value that
-    /// differs between two conversations and stays the same within one names the conversation.
     fn log_meta(&self, meta: &Value) {
         let keys: Vec<String> = meta.as_object().map(|meta| meta.keys().cloned().collect()).unwrap_or_default();
         let mut logged = self.meta_logged.lock().unwrap();
@@ -1132,8 +925,6 @@ impl Relay {
         let _ = out.flush();
     }
 
-    /// Tell the runtime something about this session, as the app does for its
-    /// sessions with `/endeavor/call`. It fails with `TimedOut` if the exchange isn't done by `deadline`.
     fn tell(port: u16, token: &str, method: &str, params: Value, deadline: Option<Instant>) -> io::Result<(u16, Vec<u8>)> {
         let body = to_json(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }));
         let bearer = format!("Bearer {token}");
@@ -1141,9 +932,6 @@ impl Relay {
         crate::http::post_by(port, crate::CALL, &headers, body.as_bytes(), deadline)
     }
 
-    /// Give the runtime on `port` this session's folder, which is `folder` there: the
-    /// runtime may have been started from another folder. With none, the session is told it has no
-    /// project folder, so that relative paths are refused. Whether the runtime took it.
     fn tell_session_folder(&self, port: u16, token: &str, folder: Option<&str>) -> bool {
         let params = match folder {
             Some(folder) => json!({ "owner": self.session, "folder": folder }),
@@ -1162,9 +950,6 @@ impl Relay {
         }
     }
 
-    /// The session's folder on this computer, when `target` is this computer: its project folder, or
-    /// `Unknown` for a front started with `--no-folder`. None on a machine, whose folder the front does
-    /// not know until the machine says (`ready`).
     fn local_folder(&self, target: &Target) -> Option<Folder> {
         target.is_local().then(|| match (&self.options.folder, self.workspace.lock().unwrap().as_ref()) {
             (Some(folder), _) => Folder::In(folder.display().to_string()),
@@ -1173,18 +958,11 @@ impl Relay {
         })
     }
 
-    /// For a front started with `--no-folder`, take the session's project folder from Codex's metadata on a
-    /// tool call. Codex starts a plugin's server in the plugin's own folder and names no project, but each
-    /// `tools/call` carries `_meta["x-codex-turn-metadata"].workspaces`, an object keyed by the turn's
-    /// workspace paths (undocumented; #99). Only one existing absolute folder counts: with several, a
-    /// relative path would be a guess. A folder learned is kept until another single one is named, and the
-    /// runtime is told it with the next call (`ready`).
     fn learn_workspace(&self, message: &Value) {
         if self.options.folder.is_some() {
             return;
         }
         let metadata = &message["params"]["_meta"]["x-codex-turn-metadata"];
-        // Sent as an object; a JSON string of one is read the same way.
         let parsed = metadata.as_str().and_then(|text| serde_json::from_str::<Value>(text).ok());
         let Some(workspaces) = parsed.as_ref().unwrap_or(metadata)["workspaces"].as_object().cloned() else { return };
         let mut folders = workspaces.keys().filter(|path| Path::new(path).is_absolute() && Path::new(path).is_dir());
@@ -1202,16 +980,13 @@ impl Relay {
 
     fn handle(self: &Arc<Self>, line: &str) {
         let rewritten: String;
-        // The call's whole time, from the moment it arrived: every wait for a runtime comes out of it.
         let mut deadline = machines::Deadline::after(start_wait());
         let Ok(message) = serde_json::from_str::<Value>(line) else {
             return self.write(&to_json(&json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "Parse error" } })));
         };
-        // The client's answer to the front's own question, which no runtime asked.
         if self.consent.take_answer(&message) {
             return;
         }
-        // A cancel of a call that waits for the user's answer, which the runtime hasn't seen.
         if self.consent.take_cancel(&message) {
             return;
         }
@@ -1220,11 +995,8 @@ impl Relay {
             self.consent.learn_client(&message);
             let draws = crate::views::client_draws_views(&message);
             self.views.store(draws, std::sync::atomic::Ordering::SeqCst);
-            // Which client this is and whether it says it draws views: a host's log shows only method names.
             let client = &message["params"]["clientInfo"];
             let dialogs = if self.consent.can_ask() { "yes" } else { "no" };
-            // With what it said of elicitation, which is all there is to tell a client that takes
-            // dialogs and never shows them (`claude -p`) from one that shows them.
             eprintln!("[ Info: Client {} {}: draws views: {}; shows dialogs: {dialogs} (elicitation: {})", client["name"].as_str().unwrap_or("?"), client["version"].as_str().unwrap_or("?"), if draws { "yes" } else { "no" }, message["params"]["capabilities"]["elicitation"]);
         }
         let views = self.views.load(std::sync::atomic::Ordering::SeqCst);
@@ -1236,7 +1008,6 @@ impl Relay {
             let reply = if message["method"] == "tools/list" { self.consent.tools_listed(reply, self.page_shows()) } else { reply };
             return self.write(&reply);
         }
-        // The runtime has nothing to do with it.
         if message["method"] == "notifications/initialized" {
             return;
         }
@@ -1244,8 +1015,6 @@ impl Relay {
         if tool.is_some() {
             self.log_meta(&message["params"]["_meta"]);
         }
-        // `in_browser` is the front's, for a client that draws views (`views::add_to`); the runtime
-        // doesn't know it.
         let mut message = message;
         let mut in_browser = false;
         let stripped;
@@ -1265,12 +1034,10 @@ impl Relay {
         }
         let help = !self.options.skills_plugin;
         let target = self.current();
-        // On this computer the front answers what needs no runtime.
         if target.is_local() && let Some(tool) = tool.as_deref().filter(|tool| *tool == crate::guide::TOOL || crate::host_tools::NAMES.contains(tool)) {
             if id.is_none() {
                 return;
             }
-            // The host-tool refusal comes before the check of the arguments, as the runtime's does.
             let result = crate::mcp::call_parts(&message["params"], help, true).and_then(|(_, arguments)| {
                 if tool != crate::guide::TOOL {
                     return Err(crate::mcp::tool_error(&crate::mcp::host_tool_refusal(tool), false));
@@ -1280,11 +1047,8 @@ impl Relay {
             });
             return self.answer_call(&message, Some(tool), result.unwrap_or_else(|failed| failed));
         }
-        // The front lists the tools of its own build, so it checks every call against that, whether or
-        // not a runtime is up; the runtime checks against its own.
         if let Some(tool) = tool.as_deref() {
             let checked = crate::mcp::checked_call(&message["params"], help, true).and_then(|(_, arguments)| {
-                // A path the runtime would refuse is refused here, before a runtime is started for it.
                 match self.local_folder(&target).and_then(|folder| crate::notebooks::path_refusal(tool, &arguments, &folder)) {
                     Some((refusal, says_what_to_do)) => Err(crate::mcp::tool_error(&refusal, help && !says_what_to_do)),
                     None => Ok(()),
@@ -1297,7 +1061,6 @@ impl Relay {
                 return;
             }
         }
-        // Only a call of a tool this build has starts a runtime.
         if !self.held(&target).is_some_and(|provider| matches!(provider.status().state, crate::client::State::Ready(_))) {
             let Some(id) = &id else { return };
             if tool.is_none() {
@@ -1312,29 +1075,20 @@ impl Relay {
                 self.write(&self.decorate(&message, tool.as_deref(), tool_failure(id, &message, &why)));
             }
         };
-        // Nothing downloads unless the user says yes to it themselves: in a dialog where the client
-        // can show one, else on a page in their browser (#388), else not at all. Only a download that
-        // waits for an OK is asked about, with what the runtime says it is.
         if tool.as_deref() == Some("approve_install") && id.is_some() {
             let began = Instant::now();
             self.consent.looking(&message);
             let waiting = self.waiting_download(&message["params"]["arguments"]["notebook_id"], deadline);
             let seen = consent::Consent::seen_packages(&waiting);
             let page = self.page_shows();
-            // An answer the user gave on the page still holds (10 minutes): it is the answer, with
-            // no dialog first, which would ask them again what they said.
             let held = page && consent::Consent::download_question(&waiting).is_some_and(|question| self.pages.held(&question));
             let mut dialog = self.consent.can_ask() && !held;
             let mut asked = if dialog { self.consent.ask(&message, waiting.clone(), page, &|line| self.write(line)) } else { consent::Asked::NoDialog };
-            // No dialog, or one the client said it would show and didn't (#381): the page.
             if matches!(asked, consent::Asked::NoDialog) {
                 dialog = false;
-                // The click and the call after it within what a client gives a call (`machines::PAGE_CALL`).
                 let wait = machines::page_wait().min(machines::PAGE_CALL.saturating_sub(began.elapsed() + Duration::from_secs(10)));
                 asked = self.consent.ask_on_page(&message, waiting, page, wait, &self.pages, &machines::open_page, &|line| self.write(line));
             } else if matches!(asked, consent::Asked::Silent) {
-                // A dialog with no answer yet, which may not be up at all (`claude -p`): the page asks
-                // as well, for as long as the dialog would have waited, and the first answer counts.
                 let wait = consent::ANSWER_WAIT.saturating_sub(began.elapsed());
                 asked = self.consent.ask_on_page(&message, waiting, page, wait, &self.pages, &machines::open_page, &|line| self.write(line));
             }
@@ -1342,19 +1096,11 @@ impl Relay {
             match asked {
                 consent::Asked::No(result) => return self.answer_call(&message, tool.as_deref(), result),
                 consent::Asked::Dropped => return,
-                // After a click, the call gets what's left of the client's budget for it.
                 consent::Asked::Yes if dialog => deadline = machines::Deadline::after(start_wait()),
                 consent::Asked::Yes => deadline = machines::Deadline::after(machines::PAGE_CALL.saturating_sub(began.elapsed()).max(machines::MIN_INSTALL)),
                 consent::Asked::Unasked => {}
-                // Not reached (`ask_on_page` answers for itself), but a call nobody asked about
-                // never passes on as if they had said yes.
                 consent::Asked::NoDialog | consent::Asked::Silent => return self.answer_call(&message, tool.as_deref(), consent::download_cant_ask()),
             }
-            // The yes is to the packages the question named, the same in the dialog and on the
-            // page: the runtime approves only those of what the agent's call names. A call no yes
-            // named packages for (nothing waited when the front looked, or it couldn't tell what
-            // did, or R's download) names none, so a package held since approves nothing
-            // unseen; R's download goes by the download, not by names.
             let seen = if yes { seen } else { None };
             let mut call = message.clone();
             call["params"]["arguments"]["packages"] = crate::notebooks::seen_packages(message["params"]["arguments"].get("packages"), &seen.unwrap_or_else(|| json!([])));
@@ -1362,7 +1108,6 @@ impl Relay {
             line = &rewritten;
         }
         let crop_call = tool.as_deref() == Some("notebook_crop") || (tool.as_deref() == Some("view_cell_output") && message["params"]["arguments"].get("crop").is_some_and(|crop| !crop.is_null()));
-        // These two use a runtime that is running, and start none.
         let need = match tool.as_deref() {
             Some("session_status") => Need::Peek,
             Some("list_notebooks") => Need::Look,
@@ -1373,9 +1118,6 @@ impl Relay {
                 Ok(route) => route,
                 Err(unready) => return self.unready(&message, tool.as_deref(), unready),
             };
-            // This build lists a box's picture, but a runtime an older version started, kept because a
-            // notebook is open in it (runtime::replaces), doesn't have it: say so rather than relay its
-            // "not an argument".
             if crop_call && let Some(older) = self.held(&target).and_then(|provider| match provider.status().state {
                 crate::client::State::Ready(info) => info.interface.is_none_or(|interface| interface < crate::CROP_SINCE).then_some(info.pid),
                 _ => None,
@@ -1399,11 +1141,7 @@ impl Relay {
         }
     }
 
-    /// What `notebook`'s install waits for, from the runtime's own `list_notebooks`. With no runtime
-    /// there, nothing can wait. A runtime that can't be reached now may be by the call itself, which
-    /// reconnects and `Look` doesn't, so the front can't tell then.
     fn waiting_download(&self, notebook: &Value, deadline: machines::Deadline) -> consent::Waiting {
-        // The user waits for the dialog meanwhile; a look that takes longer asks without the sizes.
         let deadline = machines::Deadline::after(deadline.left().min(Duration::from_secs(10)));
         let route = match self.route(Need::Look, deadline) {
             Ok(route) => route,
@@ -1424,13 +1162,7 @@ impl Relay {
         listed.into_inner().unwrap().map_or_else(|| consent::unknown(notebook), |listed| consent::waiting_in(&listed, notebook))
     }
 
-    /// A runtime's reply to the agent's call, with no token in its `browser_url` (a runtime from
-    /// before results stopped carrying it still adds one), and the notebook that `new_notebook` or
-    /// `open_notebook` made or opened opened in the user's browser, with the link that lets the
-    /// browser in. Each such call opens it, so that asking the agent to open it again works, except
-    /// within `REOPEN_AFTER` of opening the same one. `opened_in_browser` says whether it is open.
     fn in_browser(&self, message: &Value, tool: Option<&str>, route: &Route, asked: bool, reply: String) -> String {
-        // The view's replies, a receive up to a few MB: nothing here is for them.
         if tool.is_some_and(crate::views::is_view_tool) {
             return reply;
         }
@@ -1440,10 +1172,6 @@ impl Relay {
         }
         let Some(Value::Object(mut fields)) = parsed["result"]["content"][0]["text"].as_str().and_then(|text| serde_json::from_str(text).ok()) else { return reply };
         let Some(url) = fields.get("browser_url").and_then(Value::as_str).map(crate::mcp::without_token) else { return reply };
-        // A client that draws views shows a notebook on this computer beside the chat (`views`), and
-        // no tab opens. A notebook on a machine opens in a tab as before: the view's calls may reach
-        // another front, which works on this computer. `shown_at` lets a view the client draws again
-        // later (the conversation reopened) tell that it's an old one.
         let in_view = route.host.is_none() && self.views.load(std::sync::atomic::Ordering::SeqCst) && matches!(tool, Some("new_notebook" | "open_notebook")) && !asked;
         let mut failed = false;
         if in_view {
@@ -1461,10 +1189,6 @@ impl Relay {
             fields.insert("opened_in_browser".into(), opened.into());
             failed = !opened;
         }
-        // A runtime on this computer that shows the user no browser, or whose opener failed (a display
-        // that is set but gone, as in a tmux session left from a desktop login, #299): nothing opened
-        // for them, and the address may or may not reach their browser. (On a machine the
-        // connection's port is on the user's computer already.)
         let var = |name: &str| std::env::var(name).ok();
         if route.host.is_none() && !in_view && (failed || !browser::shows(var)) {
             let open = crate::core::open_command(&self.options.state_dir());
@@ -1475,15 +1199,12 @@ impl Relay {
         to_json(&parsed)
     }
 
-    /// POST one message to the runtime and give what it answers to `sink`.
     fn post(&self, route: &Route, body: &str, sink: &dyn Fn(String)) -> Result<(), Sent> {
         let port = route.port;
         let token = &route.token;
         let socket = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)).map_err(Sent::NotConnected)?;
         let _ = socket.set_nodelay(true);
         let mut head = format!(
-            // `X-Endeavor-Client`: the plugin's answers, on a runtime the app started too (`mcp::Caller::app`).
-            // `X-Endeavor-Consent`: the front asks the user before `approve_install` (`mcp::Caller::consent`).
             "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nConnection: close\r\nX-Endeavor-Session: {}\r\nX-Endeavor-Client: plugin\r\nX-Endeavor-Consent: front\r\nContent-Length: {}\r\n",
             self.session,
             body.len()
@@ -1494,14 +1215,10 @@ impl Relay {
         if self.options.skills_plugin {
             head.push_str("X-Endeavor-Skills: plugin\r\n");
         }
-        // Claude Code is in auto mode, so a new package isn't asked about (`claude_mode`, `mcp::Caller::auto_mode`).
         if self.mode.auto() {
             head.push_str("X-Endeavor-Mode: auto\r\n");
         }
-        // This front's process, so the runtime can tell while it lives (`mcp::Front`, app #232).
         head.push_str(&crate::mcp::Front::own().header());
-        // A client that draws views (Claude's desktop app) serves all its conversations on this one
-        // connection, so its session may work on several notebooks (`Notebooks::refusal`).
         if self.views.load(std::sync::atomic::Ordering::SeqCst) {
             head.push_str("X-Endeavor-Notebooks: several\r\n");
         }
@@ -1552,13 +1269,10 @@ impl Relay {
 }
 
 enum Sent {
-    /// The runtime isn't there: worth starting it again.
     NotConnected(io::Error),
     Failed(io::Error),
 }
 
-/// The answer to request `id` (`message`) when the runtime can't give one:
-/// for a tool call, a failed result the agent reads; else a JSON-RPC error.
 fn tool_failure(id: &Value, message: &Value, why: &str) -> String {
     if message["method"] == "tools/call" {
         return to_json(&json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": why }], "isError": true } }));
@@ -1566,7 +1280,6 @@ fn tool_failure(id: &Value, message: &Value, why: &str) -> String {
     to_json(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": why } }))
 }
 
-/// A JSON-RPC message as one line, which stdio's framing needs.
 fn one_line(text: &str) -> String {
     match serde_json::from_str::<Value>(text) {
         Ok(value) => to_json(&value),
@@ -1574,24 +1287,16 @@ fn one_line(text: &str) -> String {
     }
 }
 
-/// Where a call goes: a runtime's port and token, and for a machine's runtime its name.
-/// They are taken together, so a call that races a move of the session goes whole to the
-/// runtime it was routed to.
 pub(crate) struct Route {
     pub port: u16,
     pub token: String,
-    /// The token for the runtime's pages, for the link that lets the user's browser in.
     pub page_token: String,
-    /// The machine's name (`X-Endeavor-Host`). With it the runtime also gets
-    /// the connection's port as the browser's (`X-Endeavor-Browser-Port`), which is `port`.
     pub host: Option<String>,
 }
 
-/// A response body as its sender framed it, read without the framing.
 struct Body<R> {
     inner: R,
     framing: crate::http::Framing,
-    /// Bytes left in the current chunk.
     chunk_left: u64,
     first_chunk: bool,
 }
@@ -1616,7 +1321,6 @@ impl<R: BufRead> Read for Body<R> {
                 if self.chunk_left == 0 {
                     let mut line = String::new();
                     if !self.first_chunk {
-                        // The line break after the last chunk's data.
                         self.inner.read_line(&mut line)?;
                         line.clear();
                     }
@@ -1642,7 +1346,6 @@ impl<R: BufRead> Read for Body<R> {
     }
 }
 
-/// The data of each event in an event stream, as it arrives.
 fn events(body: impl Read) -> impl Iterator<Item = io::Result<String>> {
     let mut lines = BufReader::new(body).lines();
     let mut data: Vec<String> = Vec::new();
