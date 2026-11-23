@@ -377,7 +377,7 @@ first installed after the repository has changed. A runtime that is already
 running keeps its build: run `endeavor stop`, then start a new session.
 
 For a copy installed by hand, run `endeavor update`. It refuses to replace the
-plugin's copy.
+plugin's copy, or the Endeavor app's.
 
 There is no uninstall command. Stop the runtime, remove the plugin with your
 agent, then delete what you do not want to keep (`endeavor status` prints

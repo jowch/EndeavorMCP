@@ -92,6 +92,10 @@ pub(crate) fn main(argv: &[String]) -> ! {
             std::process::exit(2)
         }
     }
+    if let Some(refusal) = app_helper_refusal(crate::HELPER_ARGS.get().copied().unwrap_or_default()) {
+        eprintln!("{refusal}");
+        std::process::exit(1)
+    }
     match Here::now().and_then(|here| update(&here)) {
         Ok(message) => {
             println!("{message}");
@@ -102,6 +106,13 @@ pub(crate) fn main(argv: &[String]) -> ! {
             std::process::exit(1)
         }
     }
+}
+
+/// Run as the app's helper (`endeavor.exe --helper update` on Windows, where the app is its own
+/// helper), the binary is the app itself, wherever it's installed: replacing it would swap the
+/// app for this command-line build (Endeavor #200).
+fn app_helper_refusal(helper_args: &[&str]) -> Option<String> {
+    (!helper_args.is_empty()).then(|| "This is the Endeavor app, running as its own helper. The app installs and updates itself; update the app instead.".to_owned())
 }
 
 /// Update `here.exe`, or say why not. The message for the user either way.
@@ -252,3 +263,14 @@ fn running(dir: &Path) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(test)]
+mod app_helper_tests {
+    use super::app_helper_refusal;
+
+    #[test]
+    fn the_app_running_as_its_helper_refuses_to_update() {
+        assert!(app_helper_refusal(&["--helper"]).is_some_and(|m| m.contains("update the app")));
+        assert_eq!(app_helper_refusal(&[]), None);
+    }
+}
