@@ -221,6 +221,12 @@ fn serve(stream: TcpStream, port: u16, shared: &Shared) -> std::io::Result<()> {
     let mut out = stream.clone();
     let mut reader = BufReader::new(stream);
     let Some(head) = Head::read(&mut reader)? else { return Ok(()) };
+    // A POST's body is read before any answer, the early 404 and 403 too: closing a socket with
+    // its body still unread sends a reset, and the browser shows that instead of the page (#538).
+    let body = match (head.method(), head.request_body()) {
+        ("POST", Ok(http::Framing::Length(length))) if length <= MAX_BODY => String::from_utf8_lossy(&http::read_body(&mut reader, http::Framing::Length(length))?).into_owned(),
+        _ => String::new(),
+    };
     let ours = |value: Option<&str>, scheme: &str| value.is_some_and(|v| v == format!("{scheme}127.0.0.1:{port}") || v == format!("{scheme}localhost:{port}"));
     // Only a request addressed to this loopback port: a page elsewhere that points a name at
     // 127.0.0.1 sends its own name as the host.
@@ -261,23 +267,10 @@ fn serve(stream: TcpStream, port: u16, shared: &Shared) -> std::io::Result<()> {
                 drop(state);
                 return page("403 Forbidden", "<h1>Not from this page</h1>".to_owned(), &mut out);
             }
-            let body = match head.request_body() {
-                Ok(http::Framing::Length(length)) if length <= MAX_BODY => {
-                    drop(state);
-                    let body = http::read_body(&mut reader, http::Framing::Length(length))?;
-                    state = shared.state.lock().unwrap();
-                    String::from_utf8_lossy(&body).into_owned()
-                }
-                _ => String::new(),
-            };
             let answer = match body.trim() {
                 "answer=install" => Some(true),
                 "answer=decline" => Some(false),
                 _ => None,
-            };
-            let Some(entry) = secret.and_then(|secret| state.pages.get_mut(secret)) else {
-                drop(state);
-                return page("404 Not Found", "<h1>This question is gone</h1><p>Endeavor asks again if the agent tries the install again.</p>".to_owned(), &mut out);
             };
             let Some(answer) = answer else {
                 drop(state);
@@ -412,6 +405,37 @@ mod tests {
         // Another question is another page.
         assert_eq!(pages.ask("Install R?", true, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
         assert_eq!(opens(), 2);
+    }
+
+    #[test]
+    fn a_click_on_a_page_that_is_gone_gets_the_page_that_says_so() {
+        // The page used to answer a POST before reading its body, so a body that arrived after the
+        // head was left unread, and closing the socket sent a reset in place of the 404 (#538).
+        let pages = Pages::default();
+        let opened = Mutex::new(Vec::<String>::new());
+        let open = |url: &str| {
+            opened.lock().unwrap().push(url.to_owned());
+            true
+        };
+        assert_eq!(pages.ask("Install R?", true, Duration::from_millis(50), &|| false, &open), Clicked::NotYet);
+        let url = opened.lock().unwrap()[0].clone();
+        let (port, path) = url.strip_prefix("http://127.0.0.1:").unwrap().split_once('/').unwrap();
+        let port: u16 = port.parse().unwrap();
+        let body = "answer=install";
+        for (path, origin, status) in [(format!("{path}0"), format!("http://127.0.0.1:{port}"), "404"), (path.to_owned(), "https://evil.example".to_owned(), "403")] {
+            let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(socket, "POST /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {origin}\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
+            // macOS resets at once; Linux doesn't, so the check is that nothing comes back, and the
+            // socket isn't closed, before the body is sent.
+            socket.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+            let early = socket.read(&mut [0; 64]);
+            assert!(early.as_ref().is_err_and(|e| matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)), "the page answered before reading the body: {early:?}");
+            socket.set_read_timeout(None).unwrap();
+            socket.write_all(body.as_bytes()).unwrap();
+            let mut reply = String::new();
+            socket.read_to_string(&mut reply).unwrap();
+            assert!(reply.starts_with(&format!("HTTP/1.1 {status}")), "{reply}");
+        }
     }
 
     #[test]
