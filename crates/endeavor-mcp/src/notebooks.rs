@@ -907,10 +907,7 @@ impl Notebooks {
         let began = Instant::now();
         let backend = engines::of_params(&params);
         self.start_engine(backend, wait)?;
-        let why = match backend {
-            Backend::Pluto => "the first notebook in a new Julia process takes a while to compile".to_owned(),
-            other => format!("{} can take a while to start a notebook, the first time most of all", engines::language(other)),
-        };
+        let why = engines::slow_start(backend, false);
         self.waited(owner, method, params, key, (began + wait).saturating_duration_since(Instant::now()), &format!("{doing} is taking longer than one call waits: {why}"))
     }
 

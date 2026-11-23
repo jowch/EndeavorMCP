@@ -1669,7 +1669,7 @@ impl Call<'_> {
         }
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(true));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
-        // Leaving safe preview starts a new Julia process for the notebook, which can outlast the
+        // Leaving safe preview starts a new process for the notebook, which can outlast the
         // call; a call made again while it is under way gets its result. While it starts the
         // runtime answers nothing else, so that call waits for it without reading the notebook.
         let shown = julia_string(&self.args["notebook_id"]);
@@ -1686,7 +1686,7 @@ impl Call<'_> {
             }
         }
         let params = json!({ "notebook_id": id, "run": run, "timeout": TIMEOUT_SECONDS, "ask_new": self.nbs.asks_new_packages(self.owner) });
-        let why = "a new Julia process starts for it, and its packages may need installing";
+        let why = super::engines::slow_start(self.nbs.backend_of(&id), true);
         let (allowed, _) = self.nbs.waited(self.owner, "allow_execution", params, key, self.run_wait(), &format!("Starting the notebook is taking longer than one call waits: {why}"))?;
         let ran = allowed["ran"] == true;
         let mut result = json!({
