@@ -279,14 +279,13 @@ static HELPER_ARGS: OnceLock<&'static [&'static str]> = OnceLock::new();
 
 /// With `--own-with-client`, the write end of the core's lifeline: a pipe whose other end the core this
 /// helper started reads (`core --lifeline`). However this process ends, SIGKILL included, the core then
-/// reads the pipe's end, and ends with Julia unless `keep_runtime` was called first.
-#[cfg(unix)]
+/// reads the pipe's end, and ends with Julia unless `keep_runtime` was called first. On Windows the core
+/// gets the pipe's read handle by inheritance, as an fd on Unix (#144).
 static LIFELINE: Mutex<Option<std::io::PipeWriter>> = Mutex::new(None);
 
 /// Tell the core this helper started that it is wanted, so that it lives on when this helper ends: once the
 /// app has it, or detaches while it starts.
 fn keep_runtime() {
-    #[cfg(unix)]
     if let Some(mut lifeline) = LIFELINE.lock().unwrap().take() {
         let _ = lifeline.write_all(b"k");
     }
@@ -1693,6 +1692,7 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
 /// when it ends (see core).
 #[cfg(windows)]
 fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<Child, String> {
+    use std::os::windows::io::AsRawHandle;
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
     use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
@@ -1702,6 +1702,17 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
     command.args(args.r.args()).args(args.own_r.then_some("--own-r")).stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
     not_inherited_std_handles();
+    // A start this connection owns ends if this helper does before the app has it (`LIFELINE`). Every
+    // inheritable handle goes to each child, so only the read end is made one, and only until the spawn.
+    let lifeline = match args.own_with_client.load(Ordering::SeqCst) {
+        true => Some(std::io::pipe().map_err(|e| format!("Couldn't start the runtime: {e}"))?),
+        false => None,
+    };
+    if let Some((reader, writer)) = &lifeline {
+        inherited(writer.as_raw_handle(), false);
+        inherited(reader.as_raw_handle(), true);
+        command.arg("--lifeline").arg((reader.as_raw_handle() as usize).to_string());
+    }
     // CREATE_NO_WINDOW gives a console-program core a console without a
     // window. A GUI-program core (the app's own exe) gets no console at all,
     // so the core also starts Julia with CREATE_NO_WINDOW (core.rs), and
@@ -1709,14 +1720,29 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
     // app runs in lets the runtime outlive the app, as it does on Unix; a job
     // that doesn't allow that refuses it, and then the runtime ends with the app.
     let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
-    match command.creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB).spawn() {
+    let child = match command.creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB).spawn() {
         Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
             eprintln!("endeavor: the runtime can't leave the job this helper runs in, so it ends with the app");
             command.creation_flags(flags).spawn()
         }
         result => result,
     }
-    .map_err(|e| format!("Couldn't start the runtime: {e}"))
+    .map_err(|e| format!("Couldn't start the runtime: {e}"));
+    if let Some((reader, writer)) = lifeline {
+        drop(reader);
+        if child.is_ok() {
+            *LIFELINE.lock().unwrap() = Some(writer);
+        }
+    }
+    child
+}
+
+/// Whether children get `handle`.
+#[cfg(windows)]
+fn inherited(handle: std::os::windows::io::RawHandle, on: bool) {
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+    // SAFETY: a handle this process holds; only the flag changes.
+    unsafe { SetHandleInformation(handle as _, HANDLE_FLAG_INHERIT, if on { HANDLE_FLAG_INHERIT } else { 0 }) };
 }
 
 /// Our standard handles came from whoever started us as inheritable handles,
