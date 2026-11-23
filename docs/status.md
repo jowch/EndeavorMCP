@@ -136,7 +136,11 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   next starts. An R notebook's widgets (htmlwidgets: plotly, DT) get their
   files through `notebook_file`, which reads `deps/<name>-<version>/<file>`
   from Ember on this computer, for Ember's `window.ember_dep_file` (Ember
-  #629, interface 39; `--widget` in the check). What a widget fetches from
+  #629, interface 39; `--widget` in the check). A box the user draws with Point goes
+  to Claude as a picture: the view draws what it can of the box (images, SVG
+  and canvases, not text or WebGL), keeps it with `notebook_crop` in the core
+  (32 pictures, an hour, 8 MB each), and the quote names it; the agent sees it
+  with `view_cell_output`'s `crop`. What a widget fetches from
   the internet (Leaflet's map tiles, a CDN script, web fonts) stays blocked
   by the view's sandbox. A socket no view asks about for 60 s, or with 256 MB unread,
   closes itself; a message over 1 MB comes in parts. A card that Claude draws

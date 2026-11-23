@@ -38,6 +38,10 @@
         "cell_id": {
           "type": "string"
         },
+        "crop": {
+          "description": "The `crop` of a quote the user sent from the notebook view: the picture of the box they drew, instead of the cell's output. Give one of the cells its `uri` names as `cell_id`.",
+          "type": "string"
+        },
         "notebook_id": {
           "type": "string"
         }

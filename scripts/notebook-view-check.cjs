@@ -111,8 +111,8 @@ const check = (ok, what) => { console.log((ok ? "ok   " : "FAIL ") + what); if (
   const tools = (await rpc("tools/list", {})).result.tools;
   const open = tools.find(t => t.name === "open_notebook");
   check(open?._meta?.ui?.resourceUri === "ui://endeavor/notebook", "open_notebook shows the notebook view");
-  const VIEW_TOOLS = ["notebook_page", "notebook_socket_open", "notebook_socket_send", "notebook_socket_recv", "notebook_socket_close", "notebook_file"];
-  check(tools.filter(t => VIEW_TOOLS.includes(t.name)).length === 6 && tools.filter(t => VIEW_TOOLS.includes(t.name)).every(t => t._meta?.ui?.visibility?.[0] === "app"), "the view's tools are for the view only");
+  const VIEW_TOOLS = ["notebook_page", "notebook_socket_open", "notebook_socket_send", "notebook_socket_recv", "notebook_socket_close", "notebook_file", "notebook_crop"];
+  check(tools.filter(t => VIEW_TOOLS.includes(t.name)).length === VIEW_TOOLS.length && tools.filter(t => VIEW_TOOLS.includes(t.name)).every(t => t._meta?.ui?.visibility?.[0] === "app"), "the view's tools are for the view only");
   const view = (await rpc("resources/read", { uri: "ui://endeavor/notebook" })).result.contents[0];
   check(view.mimeType === "text/html;profile=mcp-app" && view.text.length > 100000, `the view is served (${view.text.length} bytes)`);
 
@@ -349,6 +349,14 @@ window.addEventListener("message", async e => {
   // Back in the pane, Claude closes the notebook: the view says so, instead of Pluto's endless "Reconnecting…".
   await frame.click("#endeavor-open");
   await frame.waitForFunction(() => document.querySelector("#endeavor-card").hidden, null, { timeout: 10000 });
+  // A box Point drew: the view keeps its picture, and the agent sees it with view_cell_output's `crop`.
+  const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const kept = (await rpc("tools/call", { name: "notebook_crop", arguments: { notebook_id: fields.notebook_id, png: PNG } })).result;
+  const crop = kept.structuredContent?.crop;
+  const seen = (await rpc("tools/call", { name: "view_cell_output", arguments: { notebook_id: fields.notebook_id, cell_id: SQUARES, crop } })).result;
+  check(!kept.isError && !seen.isError && seen.content.find(c => c.type === "image")?.data === PNG, `the agent sees the box's picture the view kept (${JSON.stringify(seen.content?.[0]).slice(0, 160)})`);
+  const lost = (await rpc("tools/call", { name: "view_cell_output", arguments: { notebook_id: fields.notebook_id, cell_id: SQUARES, crop: "0123456789abcdef" } })).result;
+  check(lost.isError && /No picture was kept/.test(lost.content?.[0]?.text || ""), "a box with no picture kept says so");
   const closed = (await rpc("tools/call", { name: "close_notebook", arguments: { notebook_id: fields.notebook_id } })).result;
   check(!closed.isError, "close_notebook closed it");
   await frame.waitForFunction(() => /was closed/.test(document.querySelector("#endeavor-card.cover:not([hidden]) .note")?.textContent || ""), null, { timeout: 30000 }).catch(() => {});

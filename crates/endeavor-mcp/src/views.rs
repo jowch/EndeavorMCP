@@ -41,7 +41,7 @@ static TOOLS: LazyLock<Value> = LazyLock::new(|| {
     tools
 });
 /// The view's tools: only the view calls them, and the agent doesn't see them.
-pub const NAMES: [&str; 6] = ["notebook_page", "notebook_socket_open", "notebook_socket_send", "notebook_socket_recv", "notebook_socket_close", "notebook_file"];
+pub const NAMES: [&str; 7] = ["notebook_page", "notebook_socket_open", "notebook_socket_send", "notebook_socket_recv", "notebook_socket_close", "notebook_file", "notebook_crop"];
 
 /// The tools that show the view.
 const SHOWN_BY: [&str; 2] = ["open_notebook", "new_notebook"];
@@ -174,6 +174,17 @@ pub struct Views {
     /// The widget files the view read last, with the start of R that served them: one is read in
     /// parts, and a few outputs ask for the same files in turn.
     files: Mutex<Vec<(u64, String, Arc<File>)>>,
+    /// The pictures Point's box picks drew in the view (`notebook_crop`), newest last, for the agent's
+    /// `view_cell_output` with `crop`: the view's frame can reach only our tools.
+    crops: Mutex<VecDeque<Crop>>,
+}
+
+/// A picture of a box the user drew in the view: its id, the notebook, when, and the PNG.
+struct Crop {
+    id: String,
+    notebook: String,
+    at: Instant,
+    png: Arc<Vec<u8>>,
 }
 
 /// A widget file: its `Content-Type` and its bytes.
@@ -198,6 +209,11 @@ const FILE_PART: usize = 999_999;
 const FILE_MAX: usize = 64_000_000;
 /// Widget files kept for the view's next parts.
 const FILES_KEPT: usize = 8;
+/// A box's picture at most, as PNG: a box over a full-screen panel at 2x is about 1 MB.
+const CROP_MAX: usize = 8_000_000;
+/// Pictures kept, and for how long: the agent reads one in the turn the user sends its quote.
+const CROPS_KEPT: usize = 32;
+const CROP_KEPT_FOR: Duration = Duration::from_secs(3600);
 
 impl Views {
     /// R started: Ember's port and secret.
@@ -299,6 +315,36 @@ impl Views {
                 let end = (offset + FILE_PART).min(file.1.len());
                 Ok(json!({ "mime": file.0, "total": file.1.len(), "next": end, "data": STANDARD.encode(&file.1[offset..end]) }))
             }
+            "notebook_crop" => {
+                let notebook = arguments["notebook_id"].as_str().ok_or("notebook_id must be a string")?;
+                if !self.engines.lock().unwrap().contains_key(notebook) && open(notebook).is_none() {
+                    return Err(format!("not_open: no open notebook has the id {notebook}"));
+                }
+                let png = STANDARD.decode(arguments["png"].as_str().unwrap_or_default()).map_err(|e| format!("png isn't base64: {e}"))?;
+                if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+                    return Err("not_png: png must be a PNG".into());
+                }
+                if png.len() > CROP_MAX {
+                    return Err(format!("too_large: the picture is {} MB, more than {} MB", png.len() / 1_000_000, CROP_MAX / 1_000_000));
+                }
+                // The view names it, so that its message needn't wait for this call (Claude's desktop app takes
+                // a view's message only just after the user's press): 16 hex digits it picked at random.
+                let id = match arguments["crop"].as_str() {
+                    Some(id) if id.len() == 16 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => id.to_owned(),
+                    Some(_) => return Err("crop must be 16 lowercase hex digits".into()),
+                    None => crate::random_hex::<8>()?,
+                };
+                let mut crops = self.crops.lock().unwrap();
+                if crops.iter().any(|c| c.id == id) {
+                    return Err(format!("taken: there is already a picture {id}"));
+                }
+                crops.retain(|c| c.at.elapsed() < CROP_KEPT_FOR);
+                while crops.len() >= CROPS_KEPT {
+                    crops.pop_front();
+                }
+                crops.push_back(Crop { id: id.clone(), notebook: notebook.to_owned(), at: Instant::now(), png: Arc::new(png) });
+                Ok(json!({ "crop": id }))
+            }
             "notebook_socket_close" => {
                 if let Ok(socket) = socket_of() {
                     socket.close();
@@ -308,6 +354,12 @@ impl Views {
             }
             _ => Err(format!("unknown view tool {name}")),
         }
+    }
+
+    /// The picture `crop` of a box the user drew over notebook `notebook` in the view, while it's kept.
+    pub fn crop(&self, notebook: &str, crop: &str) -> Option<Arc<Vec<u8>>> {
+        let crops = self.crops.lock().unwrap();
+        crops.iter().find(|c| c.id == crop && c.notebook == notebook && c.at.elapsed() < CROP_KEPT_FOR).map(|c| c.png.clone())
     }
 
     /// A widget file of the R that runs now, as Ember serves it: `deps/<name>-<version>/<file>`,
@@ -1097,5 +1149,34 @@ mod tests {
         views.set_ember(port, "s".into());
         file(0).unwrap();
         assert_eq!(served.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_box_picture_is_kept_for_its_notebook_and_only_a_png() {
+        let views = Views::default();
+        const NB: &str = "11111111-0000-4000-8000-000000000001";
+        let png = b"\x89PNG\r\n\x1a\nrest";
+        let save = |notebook: &str, data: &[u8]| views.call("notebook_crop", &json!({ "notebook_id": notebook, "png": STANDARD.encode(data) }), |_, _| unreachable!(), |id| (id == NB).then_some(Backend::Pluto));
+        let crop = save(NB, png).unwrap()["crop"].as_str().unwrap().to_owned();
+        assert_eq!(crop.len(), 16);
+        assert_eq!(views.crop(NB, &crop).unwrap().as_slice(), png);
+        // Not another notebook's, nor a made-up id.
+        assert!(views.crop("22222222-0000-4000-8000-000000000002", &crop).is_none());
+        assert!(views.crop(NB, "0000000000000000").is_none());
+        assert!(save(NB, b"GIF89a").unwrap_err().starts_with("not_png"));
+        assert!(save("22222222-0000-4000-8000-000000000002", png).unwrap_err().starts_with("not_open"));
+        let mut big = png.to_vec();
+        big.resize(CROP_MAX + 1, 0);
+        assert!(save(NB, &big).unwrap_err().starts_with("too_large"));
+        // The view may name it, once.
+        let named = |id: &str| views.call("notebook_crop", &json!({ "notebook_id": NB, "png": STANDARD.encode(png), "crop": id }), |_, _| unreachable!(), |_| Some(Backend::Pluto));
+        assert_eq!(named("0123456789abcdef").unwrap()["crop"], "0123456789abcdef");
+        assert!(named("0123456789abcdef").unwrap_err().starts_with("taken"));
+        assert!(named("0123456789ABCDEF").is_err() && named("../x").is_err());
+        // The oldest go first, past CROPS_KEPT.
+        for _ in 0..CROPS_KEPT {
+            save(NB, png).unwrap();
+        }
+        assert!(views.crop(NB, &crop).is_none());
     }
 }
