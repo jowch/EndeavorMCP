@@ -1590,6 +1590,10 @@ impl MarimoStarter {
             if let Ok(state) = std::fs::read(&self.state).map_err(|_| ()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ())) {
                 break state;
             }
+            // The core is ending: `stop` waits for this lock, and ends the start.
+            if served.bridge.notebooks.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("python_failed::Endeavor is stopping".into());
+            }
             let now = std::time::Instant::now();
             if now > deadline {
                 let mut child = pending.take().unwrap().child;
@@ -1602,16 +1606,24 @@ impl MarimoStarter {
             }
             std::thread::sleep(Duration::from_millis(100));
         };
-        let MarimoPending { child, last_words, secret, .. } = pending.take().unwrap();
-        drop(pending);
+        // The pending start stays held until its child is in `child`, so a `stop` meanwhile finds it.
+        let MarimoPending { mut child, last_words, secret, .. } = pending.take().unwrap();
         let port = |key: &str| state[key].as_u64().and_then(|p| u16::try_from(p).ok()).ok_or_else(|| format!("python_failed::marimo's state has no {key}: {state}"));
-        let (bridge, page) = (port("bridge_port")?, port("marimo_port")?);
+        let (bridge, page) = match (port("bridge_port"), port("marimo_port")) {
+            (Ok(bridge), Ok(page)) => (bridge, page),
+            (Err(why), _) | (_, Err(why)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(why);
+            }
+        };
         *served.marimo.lock().unwrap() = Some(Page { port: page, secret });
         let (children, pid) = (self.child.clone(), child.id());
         if let Some(mut old) = self.child.lock().unwrap().replace(child) {
             let _ = old.kill();
             let _ = old.wait();
         }
+        drop(pending);
         let why_ended = move || {
             let said = last_words.as_ref().map(|words| words.after_end(Duration::from_secs(1))).unwrap_or_default();
             let status = children.lock().unwrap().as_mut().filter(|child| child.id() == pid).and_then(|child| child.try_wait().ok().flatten());
