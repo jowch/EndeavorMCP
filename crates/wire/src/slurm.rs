@@ -1,24 +1,15 @@
-//! Slurm, as the app and the helper both see it: the resources a session asks
-//! for and the `sbatch` arguments they become, a pasted `salloc` line, the
-//! partitions `sinfo` lists, a job as `squeue` shows it, and Slurm's durations.
-
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
-/// What a session's job asks for. `mem_gb` 0 leaves memory to the cluster's
-/// default (a pasted `--mem-per-cpu`, kept in `extra`, sets it instead).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Resources {
-    /// None is the cluster's default partition.
     pub partition: Option<String>,
     pub cpus: u32,
     pub mem_gb: u32,
     pub minutes: u32,
     pub gres: Option<String>,
-    /// Flags from a pasted line that Endeavor has no control for, passed to
-    /// `sbatch` as they are.
     pub extra: Vec<String>,
 }
 
@@ -28,7 +19,6 @@ impl Default for Resources {
     }
 }
 
-/// Small, Medium, Large: (name, CPUs, GB, minutes).
 pub const PRESETS: [(&str, u32, u32, u32); 3] = [("Small", 2, 8, 120), ("Medium", 8, 32, 480), ("Large", 32, 128, 1440)];
 
 impl Resources {
@@ -37,13 +27,11 @@ impl Resources {
         Resources { partition: None, cpus, mem_gb, minutes, gres: None, extra: Vec::new() }
     }
 
-    /// This, with a preset's size (partition and the rest kept).
     pub fn sized_as(&self, i: usize) -> Resources {
         let (_, cpus, mem_gb, minutes) = PRESETS[i];
         Resources { cpus, mem_gb, minutes, ..self.clone() }
     }
 
-    /// Keep within what `partition` offers (its nodes' CPUs and memory, its time limit).
     pub fn clip(&mut self, partition: Option<&Partition>) {
         self.cpus = self.cpus.max(1);
         self.minutes = self.minutes.max(1);
@@ -59,7 +47,6 @@ impl Resources {
         }
     }
 
-    /// "8 CPUs · 32 GB · 8 h"
     pub fn summary(&self) -> String {
         let cpus = if self.cpus == 1 { "1 CPU".to_owned() } else { format!("{} CPUs", self.cpus) };
         let mut parts = vec![cpus];
@@ -73,7 +60,6 @@ impl Resources {
         parts.join(" · ")
     }
 
-    /// The `sbatch` flags for these resources.
     pub fn sbatch_args(&self) -> Vec<String> {
         let mut args = Vec::new();
         if let Some(p) = &self.partition {
@@ -92,11 +78,6 @@ impl Resources {
     }
 }
 
-/// Why `flag` can't be an extra flag for `sbatch`, if it can't: it must start with `-` (a bare
-/// word would be taken as the script to run, so a flag and its value are one entry, as
-/// `--constraint=a100` or `-N2`), hold no line break or NUL, and not be `--wrap`, which gives
-/// `sbatch` a command to run in place of the script. `sbatch` takes an unambiguous start of a
-/// long option for the option, so `--wr` and `--wra` count as `--wrap`.
 pub fn check_extra_flag(flag: &str) -> Result<(), String> {
     let shown = flag.escape_debug();
     if !flag.starts_with('-') {
@@ -112,7 +93,6 @@ pub fn check_extra_flag(flag: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// "45 min", "8 h", "1 h 30 min"
 pub fn duration_text(minutes: u32) -> String {
     match (minutes / 60, minutes % 60) {
         (0, m) => format!("{m} min"),
@@ -121,19 +101,15 @@ pub fn duration_text(minutes: u32) -> String {
     }
 }
 
-/// What the app asks the helper to submit.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JobRequest {
     pub resources: Resources,
     pub account: Option<String>,
-    /// Where Julia keeps packages; None is `$SCRATCH/endeavor/depot` when the
-    /// cluster sets `$SCRATCH`, else `~/.cache/endeavor/depot`.
     pub depot: Option<String>,
 }
 
 impl JobRequest {
-    /// `sbatch_args`, or why the extra flags can't be passed on (`check_extra_flag`).
     pub fn checked_sbatch_args(&self) -> Result<Vec<String>, String> {
         self.resources.extra.iter().try_for_each(|flag| check_extra_flag(flag))?;
         Ok(self.sbatch_args())
@@ -148,27 +124,19 @@ impl JobRequest {
     }
 }
 
-/// The runtime's job, once it runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
     pub node: String,
-    /// When Slurm will end it (Unix seconds); None without a time limit.
     pub ends_at: Option<u64>,
-    /// How the login node reaches the compute node: "srun" or "ssh".
     pub route: String,
 }
 
-/// A partition as `sinfo` lists it; a partition with several kinds of node
-/// shows its largest.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Partition {
     pub name: String,
-    /// Jobs go here unless they say otherwise.
     pub default: bool,
-    /// None: no time limit.
     pub max_minutes: Option<u32>,
-    /// CPUs and memory (MB) per node.
     pub cpus: u32,
     pub mem_mb: u64,
 }
@@ -179,10 +147,8 @@ impl Partition {
     }
 }
 
-/// The `sinfo` format [`parse_sinfo`] reads.
 pub const SINFO_FORMAT: &str = "%P|%l|%c|%m";
 
-/// `sinfo -h -o SINFO_FORMAT`, one line per partition and kind of node.
 pub fn parse_sinfo(text: &str) -> Vec<Partition> {
     let mut partitions: Vec<Partition> = Vec::new();
     for line in text.lines() {
@@ -207,9 +173,6 @@ pub fn parse_sinfo(text: &str) -> Vec<Partition> {
     partitions
 }
 
-/// A Slurm duration in seconds: "minutes", "minutes:seconds",
-/// "hours:minutes:seconds", "days-hours", "days-hours:minutes",
-/// "days-hours:minutes:seconds". None for "UNLIMITED", "INVALID" and the like.
 pub fn parse_duration(text: &str) -> Option<u64> {
     let text = text.trim();
     let (days, rest) = match text.split_once('-') {
@@ -234,18 +197,13 @@ pub fn parse_duration(text: &str) -> Option<u64> {
     Some(days * 86400 + seconds)
 }
 
-/// The `squeue` format [`parse_squeue`] reads.
 pub const SQUEUE_FORMAT: &str = "%T|%r|%N|%L";
 
-/// A job as `squeue` shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Queued {
-    /// PENDING, CONFIGURING, RUNNING, COMPLETING, …
     pub state: String,
-    /// Why it's pending ("Priority", "Resources"); "None" while it runs.
     pub reason: String,
     pub node: String,
-    /// Seconds until its time limit, if it has one.
     pub left: Option<u64>,
 }
 
@@ -259,7 +217,6 @@ impl Queued {
     }
 }
 
-/// `squeue -h -j JOB -o SQUEUE_FORMAT`; None when the job isn't listed.
 pub fn parse_squeue(text: &str) -> Option<Queued> {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
     let fields: Vec<&str> = line.split('|').collect();
@@ -267,7 +224,6 @@ pub fn parse_squeue(text: &str) -> Option<Queued> {
     Some(Queued { state: state.to_owned(), reason: reason.to_owned(), node: node.to_owned(), left: parse_duration(left) })
 }
 
-/// A pending job's reason in plain words.
 pub fn reason_text(reason: &str) -> Option<String> {
     let text = match reason {
         "" | "None" => return None,
@@ -285,8 +241,6 @@ pub fn reason_text(reason: &str) -> Option<String> {
     Some(text.to_owned())
 }
 
-/// Why a job ended, in plain words, from its final state (`sacct`'s State,
-/// e.g. "TIMEOUT" or "CANCELLED by 1000").
 pub fn ended_text(state: &str) -> Option<&'static str> {
     let state = state.split_whitespace().next().unwrap_or_default().trim_end_matches('+');
     Some(match state {
@@ -302,9 +256,6 @@ pub fn ended_text(state: &str) -> Option<&'static str> {
     })
 }
 
-/// A pasted `salloc` (or `srun`, `sbatch`) line applied over `base`: the
-/// resources and the account it sets. Flags Endeavor has no control for are
-/// kept in `extra`; a command at the end (`bash`) is ignored.
 pub fn parse_salloc(line: &str, base: &Resources) -> Result<(Resources, Option<String>), String> {
     let words = shell_words(line)?;
     let mut words = words.into_iter().peekable();
@@ -318,7 +269,6 @@ pub fn parse_salloc(line: &str, base: &Resources) -> Result<(Resources, Option<S
         if !word.starts_with('-') || word == "-" {
             break;
         }
-        // --name=value, --name value, -xvalue, -x value
         let (flag, inline) = match word.split_once('=') {
             Some((f, v)) if f.starts_with("--") => (f.to_owned(), Some(v.to_owned())),
             _ if !word.starts_with("--") && word.len() > 2 => (word[..2].to_owned(), Some(word[2..].to_owned())),
@@ -347,13 +297,11 @@ pub fn parse_salloc(line: &str, base: &Resources) -> Result<(Resources, Option<S
         if ["--mem-per-cpu", "--mem-per-gpu"].contains(&flag.as_str()) {
             r.mem_gb = 0;
         }
-        // Interactive-only flags mean nothing to a batch job.
         if ["--pty", "--x11", "-I", "--immediate", "--no-shell"].contains(&flag.as_str()) {
             continue;
         }
         let boolean = BOOLEAN_FLAGS.contains(&flag.as_str());
         if inline.is_none() && !boolean && words.peek().is_some_and(|next| !next.starts_with('-')) && !looks_like_command(words.peek().unwrap()) {
-            // One entry for a flag and its value: a bare word in `extra` would be taken for the script.
             let value = words.next().unwrap();
             r.extra.push(if flag.starts_with("--") { format!("{flag}={value}") } else { format!("{flag}{value}") });
         } else {
@@ -376,7 +324,6 @@ fn looks_like_command(word: &str) -> bool {
     ["bash", "sh", "zsh", "srun", "julia", "$SHELL"].contains(&word)
 }
 
-/// "32G" -> 32, "32000" (MB, Slurm's default unit) -> 31, "1T" -> 1024.
 fn parse_mem_gb(text: &str) -> Option<u32> {
     let text = text.trim();
     let (number, unit) = text.split_at(text.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(text.len()));
@@ -391,7 +338,6 @@ fn parse_mem_gb(text: &str) -> Option<u32> {
     Some(gb.round().max(if n > 0. { 1. } else { 0. }) as u32)
 }
 
-/// Split a command line the way `sh` would, for quotes and backslashes only.
 fn shell_words(line: &str) -> Result<Vec<String>, String> {
     let mut words = Vec::new();
     let mut word = String::new();
@@ -442,25 +388,19 @@ fn shell_words(line: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-/// What a machine says about Slurm: its partitions, and where scratch space is.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Scheduler {
     pub partitions: Vec<Partition>,
-    /// `$SCRATCH`, if the cluster sets it.
     pub scratch: Option<String>,
 }
 
-/// Where `has` looks for Slurm's commands besides the PATH. The bootstrap script repeats this list
-/// (endeavor-mcp's `PICK_LAUNCHER_SH`), and a test there checks it does.
 pub const FOLDERS: [&str; 3] = ["/usr/bin", "/usr/local/bin", "/opt/slurm/bin"];
 
-/// Whether `program` is on the PATH or in one of `FOLDERS`.
 pub fn has(program: &str) -> bool {
     let on_path = std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()));
     on_path || FOLDERS.iter().any(|d| std::path::Path::new(d).join(program).is_file())
 }
 
-/// Ask this machine's Slurm about itself (for Test connection).
 pub fn probe() -> Result<Scheduler, String> {
     if !has("sinfo") {
         return Err("Slurm wasn't found here (no sinfo command).".into());
@@ -483,7 +423,6 @@ pub fn probe() -> Result<Scheduler, String> {
     Ok(Scheduler { partitions, scratch: scratch() })
 }
 
-/// `$SCRATCH`, from the environment or a login shell's.
 pub fn scratch() -> Option<String> {
     if let Some(s) = std::env::var("SCRATCH").ok().filter(|s| s.starts_with('/')) {
         return Some(s);

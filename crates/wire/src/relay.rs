@@ -1,12 +1,3 @@
-//! Many TCP streams over one frame channel, the same on both ends: the app
-//! attaches the connections it accepts, the helper the ones it dials.
-//!
-//! Each stream has a reader thread (socket → `Data` frames) and a writer thread
-//! fed by a bounded queue (frames → socket), so one slow socket never blocks the
-//! channel for the others. A queue that stays full for `stall` means its socket
-//! stopped reading: that stream is closed and the channel moves on, so memory
-//! stays bounded and other streams wait at most `stall`.
-
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -16,18 +7,13 @@ use std::time::{Duration, Instant};
 
 use crate::Frame;
 
-/// The most a `Data` frame carries.
 pub const CHUNK: usize = 64 * 1024;
-/// Bytes waiting for one socket before the channel waits on it.
 pub const QUEUE_BYTES: usize = 4 << 20;
-/// How long the channel waits on one full queue before closing that stream.
 pub const STALL: Duration = Duration::from_secs(5);
 
 pub struct Mux {
     out: Mutex<Box<dyn Write + Send>>,
     streams: Mutex<HashMap<u32, Arc<Queue>>>,
-    /// The channel ended (`close_all`), so no stream is registered from now on.
-    /// Set and read under `streams`' lock.
     ended: AtomicBool,
     next_id: AtomicU32,
     stall: Duration,
@@ -46,12 +32,8 @@ impl Mux {
         frame.write_to(&mut *self.out.lock().unwrap())
     }
 
-    /// Relay a connection the app accepted to the runtime's port on the other
-    /// end. Refused once the channel has ended: nobody would answer or close it.
     pub fn open(self: &Arc<Self>, socket: TcpStream) -> io::Result<()> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        // Registered before `Open` goes out so the first reply finds it; the
-        // reader starts after, so no `Data` precedes the `Open`.
         let queue = self.register(id)?;
         if let Err(e) = self.send(&Frame::Open { id }) {
             self.closed_here(id, false);
@@ -60,15 +42,11 @@ impl Mux {
         self.spawn(id, socket, queue)
     }
 
-    /// Relay a connection the helper dialed for the other end's `Open { id }`.
     pub fn attach(self: &Arc<Self>, id: u32, socket: TcpStream) -> io::Result<()> {
         let queue = self.register(id)?;
         self.spawn(id, socket, queue)
     }
 
-    /// Read frames from the other end until it closes, routing stream data and
-    /// handing `Open` and `Control` frames to the callbacks. Closes every
-    /// stream when the channel ends.
     pub fn run(
         self: &Arc<Self>,
         mut input: impl Read,
@@ -89,8 +67,6 @@ impl Mux {
         result
     }
 
-    /// Take a `Data` or `Close` frame for one of this end's streams; any other
-    /// frame comes back, for a caller that relays some streams elsewhere.
     pub fn take(&self, frame: Frame) -> Option<Frame> {
         match frame {
             Frame::Data { id, bytes } if self.streams.lock().unwrap().contains_key(&id) => self.deliver(id, bytes),
@@ -100,8 +76,6 @@ impl Mux {
         None
     }
 
-    /// End every stream (their sockets get what was already queued, then EOF),
-    /// and take no new one.
     pub fn close_all(&self) {
         let streams: Vec<_> = {
             let mut streams = self.streams.lock().unwrap();
@@ -113,7 +87,6 @@ impl Mux {
         }
     }
 
-    /// The channel has ended (`run` returned): no stream will be taken.
     pub fn has_ended(&self) -> bool {
         let _streams = self.streams.lock().unwrap();
         self.ended.load(Ordering::SeqCst)
@@ -151,7 +124,6 @@ impl Mux {
                 break;
             }
         }
-        // Also wakes this stream's reader, which then finds the stream gone.
         let _ = socket.shutdown(Shutdown::Both);
     }
 
@@ -181,7 +153,6 @@ impl Mux {
         }
     }
 
-    /// The other end closed `id`.
     fn closed_there(&self, id: u32) {
         let queue = self.streams.lock().unwrap().remove(&id);
         if let Some(queue) = queue {
@@ -189,7 +160,6 @@ impl Mux {
         }
     }
 
-    /// `id` ended on this end: tell the other, and flush or drop what's queued for the socket.
     fn closed_here(&self, id: u32, flush: bool) {
         let queue = self.streams.lock().unwrap().remove(&id);
         if let Some(queue) = queue {
@@ -201,9 +171,7 @@ impl Mux {
 
 #[derive(Clone, Copy, PartialEq)]
 enum End {
-    /// Write what's queued, then close.
     Finish,
-    /// Close now.
     Abort,
 }
 
@@ -218,12 +186,10 @@ struct QueueState {
     chunks: VecDeque<Vec<u8>>,
     bytes: usize,
     end: Option<End>,
-    /// For an abort to unblock a writer stuck on a socket that stopped reading.
     socket: Option<crate::Shared>,
 }
 
 impl Queue {
-    /// Queue `chunk`, waiting up to `stall` for room; false if there was none.
     fn push(&self, chunk: Vec<u8>, stall: Duration) -> bool {
         let deadline = Instant::now() + stall;
         let mut state = self.state.lock().unwrap();
@@ -245,7 +211,6 @@ impl Queue {
         }
     }
 
-    /// The next chunk for the socket; None once the stream is over.
     fn pop(&self) -> Option<Vec<u8>> {
         let mut state = self.state.lock().unwrap();
         loop {
@@ -282,8 +247,6 @@ mod tests {
     use std::net::TcpListener;
     use std::os::unix::net::UnixStream;
 
-    /// An app end and a helper end joined like the helper's stdin/stdout; the
-    /// helper dials `port` for each `Open`.
     fn channel(port: u16, stall: Duration) -> (Arc<Mux>, Arc<Mux>) {
         let (a, b) = UnixStream::pair().unwrap();
         let app = Mux::with_stall(a.try_clone().unwrap(), stall);
@@ -306,7 +269,6 @@ mod tests {
         (app, helper)
     }
 
-    /// A client socket whose other end the app relays to the helper's port.
     fn connect(app: &Arc<Mux>) -> TcpStream {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -332,7 +294,6 @@ mod tests {
         let _ = io::copy(&mut reader, &mut socket);
     }
 
-    /// 40 lines, 25 ms apart, then closes.
     fn slow(mut socket: TcpStream) {
         for i in 0..40 {
             let _ = writeln!(socket, "tick {i}");
@@ -348,8 +309,6 @@ mod tests {
     const SLOW: u8 = 1;
     const FLOOD: u8 = 2;
 
-    /// What the runtime's one port does in these tests: `slow` or `flood` when
-    /// the first byte asks for it, else `echo`.
     fn mixed(mut socket: TcpStream) {
         let mut first = [0];
         if socket.read_exact(&mut first).is_err() {
@@ -435,7 +394,6 @@ mod tests {
         for _ in 0..20 {
             assert!(round_trip(&mut quick, b"still here") < stall + Duration::from_millis(500));
         }
-        // What was delivered before the close, then an end, not a hang.
         let mut sink = Vec::new();
         let result = stuck.read_to_end(&mut sink);
         assert!(result.is_ok() || result.unwrap_err().kind() == ErrorKind::ConnectionReset);
@@ -459,8 +417,6 @@ mod tests {
         let a2 = app.clone();
         let run = std::thread::spawn(move || a2.run(a, |_, _| {}, |_| {}));
         let mut client = connect(&app);
-        // Linux resets a Unix socket whose peer closes with bytes unread, so the
-        // other end reads what it was sent before it goes, as a helper does.
         assert_eq!(Frame::read_from(&mut b).unwrap(), Some(Frame::Open { id: 1 }));
         drop(b);
         run.join().unwrap().unwrap();
@@ -468,13 +424,9 @@ mod tests {
         assert_eq!(client.read(&mut buf).unwrap(), 0);
     }
 
-    /// A connection relayed just after the channel ended, as the app's listener
-    /// can still do before it hears of the end, is refused, not left open with
-    /// nobody to answer or close it.
     #[test]
     fn a_channel_that_ended_takes_no_new_stream() {
         let (a, b) = UnixStream::pair().unwrap();
-        // The helper's input stays writable, as it does after a detach.
         let app = Mux::new(Vec::new());
         drop(b);
         app.run(a, |_, _| {}, |_| {}).unwrap();

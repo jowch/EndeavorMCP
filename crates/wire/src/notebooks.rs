@@ -1,7 +1,3 @@
-//! Notebook files on disk, read without their engine: finding them in a
-//! folder, and the first cells of one for the new-session screen's static
-//! preview. The app reads This Mac's files with these; the helper a server's.
-
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -11,17 +7,12 @@ use crate::backend::Backend;
 
 const CELL: &str = "# ╔═╡ ";
 const ORDER: &str = "# ╔═╡ Cell order:";
-/// Pluto's package cells, which hold the notebook's Project/Manifest.toml.
 const PACKAGE_CELLS: [&str; 2] = ["PLUTO_PROJECT_TOML_CONTENTS", "PLUTO_MANIFEST_TOML_CONTENTS"];
 
-/// A notebook found in a folder: its path, when it last changed, and whose
-/// notebook it is.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Found {
-    /// As text, in the rules of the machine it is on ([`crate::server_path`]).
     pub path: String,
     pub modified: SystemTime,
-    /// Missing from an older helper, which finds only Pluto's.
     #[serde(default = "pluto")]
     pub backend: Backend,
 }
@@ -35,8 +26,6 @@ const MAX_VISITED: usize = 2000;
 const MAX_FOUND: usize = 200;
 const SKIPPED: [&str; 5] = ["node_modules", ".git", "target", "venv", ".julia"];
 
-/// Notebooks of `backends` in `folder` and its subfolders (3 levels, skipping
-/// hidden and heavy folders, capped), newest first. See [`Backend::of_file`].
 pub fn scan(folder: &Path, backends: &[Backend]) -> Vec<Found> {
     let mut found = Vec::new();
     let mut visited = 0;
@@ -75,28 +64,22 @@ fn sorted(mut found: Vec<Found>) -> Vec<Found> {
     found
 }
 
-/// The start of a notebook for a static preview.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Preview {
-    /// Code of the first cells in notebook order, each cut to `LINES` lines.
     pub cells: Vec<Cell>,
-    /// Cells in the notebook, not counting Pluto's package cells.
     pub total: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
     pub code: String,
-    /// Lines were cut off the end.
     pub clipped: bool,
 }
 
 const CELLS: usize = 8;
 const LINES: usize = 12;
-/// Larger files are only their start: Pluto and Ember keep the cell order at the end.
 const MAX_READ: u64 = 16 << 20;
 
-/// The preview of the notebook file at `path`.
 pub fn read_preview(path: &Path) -> Result<Preview, String> {
     use std::io::Read;
     let mut bytes = Vec::new();
@@ -110,7 +93,6 @@ pub fn read_preview(path: &Path) -> Result<Preview, String> {
     })
 }
 
-/// The first cells of a Pluto notebook file's text, in the notebook's order.
 pub fn preview(text: &str) -> Preview {
     let mut bodies: Vec<(&str, Vec<&str>)> = Vec::new();
     let mut order: Vec<&str> = Vec::new();
@@ -125,13 +107,11 @@ pub fn preview(text: &str) -> Preview {
         } else if let Some(id) = line.strip_prefix(CELL) {
             bodies.push((id.trim(), Vec::new()));
         } else if let Some((_, body)) = bodies.last_mut()
-            // Cell metadata, e.g. `# ╠═╡ disabled = true`.
             && !line.starts_with("# ╠═╡")
         {
             body.push(line);
         }
     }
-    // A file without a Cell order list keeps the file's order.
     if order.is_empty() {
         order = bodies.iter().map(|(id, _)| *id).collect();
     }
@@ -155,11 +135,6 @@ const EMBER_CELL: &str = "# %%";
 const EMBER_BLOCK_END: &str = "# ///";
 const EMBER_ORDER: &str = "cell order";
 
-/// The first cells of an Ember notebook file's text, in the notebook's order,
-/// read as Ember's `parse_notebook` reads it: a cell runs from its `# %% id=…`
-/// line to the next cell or `# /// <name>` block; the `cell order` block gives
-/// the display order and which cells are `disabled` or `commented`, whose lines
-/// the file prefixes with `## `.
 pub fn ember_preview(text: &str) -> Preview {
     let mut bodies: Vec<(&str, Vec<&str>)> = Vec::new();
     let mut order: Vec<(&str, bool)> = Vec::new();
@@ -183,9 +158,6 @@ pub fn ember_preview(text: &str) -> Preview {
             body.push(line);
         }
     }
-    // As Ember does: ids the file has no cell for, and repeats, are skipped; a
-    // cell the block doesn't list goes after the nearest cell before it in the
-    // file that is placed, else first.
     let mut placed: Vec<(&str, bool)> = Vec::new();
     for (id, commented) in order {
         if bodies.iter().any(|(b, _)| *b == id) && !placed.iter().any(|(p, _)| *p == id) {
@@ -344,8 +316,6 @@ julia_version = "1.12.6"
         assert_eq!(found.backend, Backend::Pluto);
     }
 
-    /// As Ember writes a file: header block, cells in run order, then the
-    /// footer. The display order differs, one cell is folded and one disabled.
     const EMBER_SAMPLE: &str = "### An Ember notebook ###
 # /// environment
 # ember_version = \"0.0.0.9000\"
@@ -398,7 +368,6 @@ curves <- read.csv(\"growth.csv\")
 
     #[test]
     fn ember_places_cells_the_order_leaves_out_as_ember_does() {
-        // c and a aren't listed: a has no listed cell before it, so it goes first; c goes after b.
         let text = "### An Ember notebook ###\n# %% id=a\nA\n# %% id=b\nB\n# %% id=c\nC\n# %% id=d\nD\n# /// cell order\n# d\n# b\n# x\n# b\n# ///\n";
         let codes: Vec<String> = ember_preview(text).cells.into_iter().map(|c| c.code).collect();
         assert_eq!(codes, ["A", "D", "B", "C"]);

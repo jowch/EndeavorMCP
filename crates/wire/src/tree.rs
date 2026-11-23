@@ -1,11 +1,5 @@
-//! A folder's files as Endeavor installs them (`runtime/`, `plugin/`), and the
-//! hash that names an install. `endeavor-mcp`'s build script includes this
-//! file to embed those folders in the binary, so it uses only `std`.
-
 use std::path::Path;
 
-/// The files under `dir` as (path in the install, starting with `prefix`;
-/// contents; executable), sorted by path.
 pub fn files(dir: &Path, prefix: &str) -> Result<Vec<(String, Vec<u8>, bool)>, String> {
     let mut out = Vec::new();
     walk(dir, prefix, &mut out)?;
@@ -24,7 +18,6 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>, bool)>) -> Res
             let contents = std::fs::read(entry.path()).map_err(|e| e.to_string())?;
             #[cfg(unix)]
             let executable = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0;
-            // No file in runtime/ is executable (git records none).
             #[cfg(not(unix))]
             let executable = false;
             out.push((name, contents, executable));
@@ -33,7 +26,6 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>, bool)>) -> Res
     Ok(())
 }
 
-/// FNV-1a: stable across builds, unlike std's hasher.
 pub struct Fnv(pub u64);
 
 impl Default for Fnv {
@@ -49,7 +41,6 @@ impl Fnv {
         }
     }
 
-    /// Each file's path and contents, in order.
     pub fn add_files<'a>(&mut self, files: impl IntoIterator<Item = (&'a str, &'a [u8])>) {
         for (path, contents) in files {
             self.add(path.as_bytes());

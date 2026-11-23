@@ -1,6 +1,3 @@
-//! The notebook systems Endeavor works with, and what differs between them on
-//! the app's side: Pluto (Julia), Ember (R) and marimo (Python).
-
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -9,11 +6,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
     Pluto,
-    /// Ember, reactive notebooks for R (https://github.com/jowch/Ember). Its
-    /// files are found and previewed; the runtime can't open them yet.
     Ember,
-    /// marimo, reactive notebooks for Python (https://marimo.io). The runtime runs them; the app
-    /// doesn't show them yet, so they aren't in `ALL`.
     Marimo,
 }
 
@@ -21,10 +14,8 @@ const PLUTO_HEADER: &str = "### A Pluto.jl notebook ###";
 const EMBER_HEADER: &str = "### An Ember notebook ###";
 
 impl Backend {
-    /// The kinds the app offers and lists.
     pub const ALL: [Backend; 2] = [Backend::Pluto, Backend::Ember];
 
-    /// Its name in `notebook://<name>/…` cell URIs.
     pub fn name(self) -> &'static str {
         match self {
             Backend::Pluto => "pluto",
@@ -33,19 +24,14 @@ impl Backend {
         }
     }
 
-    /// The first line of its notebook files. Never compare text with Marimo's, which is empty, so
-    /// any text starts with it: `is_marimo` tells a marimo file.
     fn header(self) -> &'static str {
         match self {
             Backend::Pluto => PLUTO_HEADER,
             Backend::Ember => EMBER_HEADER,
-            // A marimo file has no first line of its own (`is_marimo`).
             Backend::Marimo => "",
         }
     }
 
-    /// Where its pages are on the runtime's port: Pluto at the root, later
-    /// engines under a prefix of their own.
     fn prefix(self) -> &'static str {
         match self {
             Backend::Pluto => "",
@@ -54,7 +40,6 @@ impl Backend {
         }
     }
 
-    /// The backend whose notebook the file at `path` is, from its name and first line.
     pub fn of_file(path: &Path) -> Option<Backend> {
         use std::io::Read;
         let backend = match path.extension()?.to_str()? {
@@ -69,21 +54,15 @@ impl Backend {
         (read && first == header.as_bytes()).then_some(backend)
     }
 
-    /// The page for notebook `id`, from the runtime's root URL (`http://host:port/?token=…`). marimo
-    /// names its pages by the notebook's file, not its id (`/marimo/?file=<path>`), so Marimo's is only
-    /// marimo's root, and `notebook_id` finds no id in it.
     pub fn notebook_url(self, root: &str, id: &str) -> String {
         match self {
-            // ponytail: the app has no pane for Python notebooks yet; slice 2 gives it the path.
             Backend::Marimo => root.replacen("/?", &format!("{}/?", self.prefix()), 1),
             _ => root.replacen("/?", &format!("{}/edit?id={id}&", self.prefix()), 1),
         }
     }
 
-    /// The notebook id in a notebook page's URL, not yet validated.
     pub fn notebook_id(self, url: &str) -> Option<&str> {
         let (address, query) = url.split_once('?')?;
-        // The path after `scheme://host:port`, or the whole thing when the URL has no host.
         let path = address.split_once("://").map_or(address, |(_, rest)| rest.find('/').map_or("", |slash| &rest[slash..]));
         if self == Backend::Marimo || path != format!("{}/edit", self.prefix()) {
             return None;
@@ -92,8 +71,6 @@ impl Backend {
     }
 }
 
-/// Whether the `.py` file at `path` is a marimo notebook: near its start, after any PEP 723 header
-/// and docstring, it imports marimo and makes `app = marimo.App(...)`, as marimo writes every one.
 fn is_marimo(path: &Path) -> bool {
     use std::io::Read;
     let mut start = Vec::new();
@@ -104,7 +81,6 @@ fn is_marimo(path: &Path) -> bool {
     text.lines().any(|line| line.trim_end() == "import marimo") && text.lines().any(|line| line.starts_with("app = marimo.App("))
 }
 
-/// How much of a `.py` file `is_marimo` reads: a long PEP 723 header and docstring fit.
 const MARIMO_READ: u64 = 16 << 10;
 
 #[cfg(test)]
@@ -157,7 +133,6 @@ mod tests {
 
     #[test]
     fn marimo_pages_are_under_their_own_prefix() {
-        // marimo names its pages by file, so there is no page by id.
         let url = Backend::Marimo.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc");
         assert_eq!(url, "http://127.0.0.1:1234/marimo/?token=t0k3n");
         assert_eq!(Backend::Marimo.notebook_id(&url), None);

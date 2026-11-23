@@ -12,7 +12,8 @@ the standalone `endeavor serve` / `endeavor mcp`, and the Slurm relay.
   semantics; `mcp.rs` the MCP server; `standalone*` `serve`/`mcp`/`stop`;
   `client/` ssh, channel and machines; `slurm.rs` the cluster launcher;
   `paths.rs` every on-disk folder.
-- `crates/wire/`: the protocol between the app and the helper. `backend.rs`
+- `crates/wire/`: the protocol between the app and the helper
+  ([docs/wire.md](docs/wire.md)). `backend.rs`
   is the notebook-engine enum (Pluto only today).
 - `runtime/`: the Julia side (`EndeavorRuntime`, the Pluto adapter), embedded
   into the binary by `build.rs`.

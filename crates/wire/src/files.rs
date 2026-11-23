@@ -1,11 +1,3 @@
-//! Questions about a host that the app asks before (or without) attaching to
-//! its runtime: a folder's contents, the notebooks under a folder, a
-//! notebook's first cells, Slurm's partitions, and whether a runtime or its job
-//! is there. The helper answers them, all but `Runtime` with [`answer`].
-//! Also the writes: the session's folder, made when only it is missing
-//! (`Folder`), and a file the user attached, sent in pieces into that folder
-//! (`Place`, then `Write`).
-
 use std::io::{Read, Write as _};
 use std::path::{Component, Path, PathBuf};
 
@@ -17,34 +9,15 @@ use crate::notebooks::{self, Found, Preview};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Request {
-    /// Folders and `.jl` files in `path`, hidden ones left out.
     List { path: String },
-    /// Every file and folder under `path`, a few levels deep ([`walk`]).
     Files { path: String },
-    /// Notebooks of every engine under `path` ([`notebooks::scan`]), each
-    /// with its backend. Ember's are listed on Windows too; the app leaves
-    /// them out there, where R notebooks don't run.
     Notebooks { path: String },
-    /// The first cells of the notebook at `path`.
     Preview { path: String },
-    /// Slurm's partitions here, and `$SCRATCH`.
     Slurm,
-    /// The Julia that a cluster job of this helper's starts, found here on the login node, where there
-    /// is internet to download it. With `download`, Endeavor's own is downloaded when none is found
-    /// (the user agreed); the download runs on after the answer, which says how far it is, so the
-    /// client asks again. Only the helper knows its Julia, so it answers this one itself. A job
-    /// submitted without one (no notebook needed Julia yet) is handed the path (`endeavor/use_julia`).
     Julia { download: bool },
-    /// Whether a runtime (or its job) is there, found without taking it over.
-    /// Only the helper knows its state folder, so it answers this one itself.
     Runtime,
-    /// The folder `path` as a session's folder: there, or made when the folder
-    /// it goes in is there ([`folder`]).
     Folder { path: String },
-    /// Where a file named `name` goes in `folder`'s `data/` ([`place`]).
     Place { folder: String, name: String, size: u64, sha256: String },
-    /// A piece of a file being sent to `path` in `folder`, as `Place` answered
-    /// ([`write`]). Pieces come in order; the last one puts the file in place.
     Write {
         folder: String,
         path: String,
@@ -58,28 +31,16 @@ pub enum Request {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Reply {
-    /// `path` is the folder listed, absolute and with `~` expanded. Paths in
-    /// replies follow the rules of the machine that answered: on a server,
-    /// `/` rules whatever the app's computer uses ([`crate::server_path`]).
     List { path: String, entries: Vec<Entry> },
-    /// Paths relative to the folder asked about; folders end with `/`.
     Files { paths: Vec<String> },
     Notebooks { found: Vec<Found> },
     Preview { preview: Preview },
     Slurm { scheduler: crate::slurm::Scheduler },
     Runtime { runtime: RuntimeState },
-    /// `path` is the folder, absolute and with `~` expanded; `created`: it was
-    /// made just now.
     Folder { path: String, created: bool },
-    /// Neither the folder nor the one it would go in, `parent`, is there, so
-    /// nothing was made.
     NoFolder { path: String, parent: String },
-    /// `path` is relative to the folder; `have`: a file with the same contents
-    /// is already there, so there's nothing to send.
     Place { path: String, have: bool },
     Written,
-    /// What `Julia` found: `ready` with its `path` and `version`; `downloading` with the `step` it is at;
-    /// or `missing`, with what a download would get (`item`), when there was no leave to download.
     Julia { julia: JuliaState },
     Error { message: String },
 }
@@ -92,19 +53,12 @@ pub enum JuliaState {
     Missing { item: crate::Item },
 }
 
-/// What runs from a host's state folder.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "is")]
 pub enum RuntimeState {
     NotRunning,
-    /// `notebooks` is how many are open, when the helper could ask (not through
-    /// a cluster job's node); `job` is the cluster job it runs in.
     Running { node: String, notebooks: Option<u32>, job: Option<crate::slurm::Job> },
-    /// A cluster job for it waits in the queue (`state` PENDING and the like),
-    /// or has a node (`state` RUNNING) and Julia is starting there.
     Queued { job: String, state: String, reason: String },
-    /// Julia is starting here and has not recorded itself yet: no start is needed, and asking for one
-    /// waits for it.
     Starting,
 }
 
@@ -131,14 +85,10 @@ pub fn answer(request: &Request) -> Reply {
     result.unwrap_or_else(|message| Reply::Error { message })
 }
 
-/// This machine's home folder. `$HOME` on Unix; on Windows, the user profile
-/// folder (not an env var: `HOME` is usually unset there).
 pub fn home() -> PathBuf {
     std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// `path` resolved through links, as Julia's `realpath` gives it: on Windows
-/// as `C:\…`, where `fs::canonicalize` gives `\\?\C:\…`.
 #[cfg(not(windows))]
 pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
     path.canonicalize()
@@ -149,13 +99,10 @@ pub fn real_path(path: &Path) -> std::io::Result<PathBuf> {
     dunce::canonicalize(path)
 }
 
-/// A path of this machine as a reply carries it. Lossy: a name that isn't
-/// UTF-8 goes out with U+FFFD in it (a `PathBuf` field failed to serialize).
 pub fn text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// `~` and `~/…` as the home folder; anything relative is taken from there.
 pub fn expand(path: &str) -> PathBuf {
     match path.strip_prefix('~') {
         Some("") => home(),
@@ -164,15 +111,10 @@ pub fn expand(path: &str) -> PathBuf {
     }
 }
 
-/// `~user` or `~user/…`, which `expand` would take as a folder named `~user`
-/// in this user's home.
 fn other_users_home(path: &str) -> bool {
     path.strip_prefix('~').is_some_and(|rest| !(rest.is_empty() || rest.starts_with('/') || cfg!(windows) && rest.starts_with('\\')))
 }
 
-/// `dir` as a session's folder: there already, or made when the folder it goes
-/// in is there. When that one is missing too, nothing is made: the path is more
-/// likely mistyped, or another computer's, than new.
 fn folder(dir: &Path) -> Result<Reply, String> {
     match std::fs::metadata(dir) {
         Ok(meta) if meta.is_dir() => return Ok(Reply::Folder { path: text(dir), created: false }),
@@ -186,7 +128,6 @@ fn folder(dir: &Path) -> Result<Reply, String> {
     }
     match std::fs::create_dir(dir) {
         Ok(()) => Ok(Reply::Folder { path: text(dir), created: true }),
-        // Another session made it meanwhile.
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(Reply::Folder { path: text(dir), created: false }),
         Err(e) => Err(format!("Couldn't make the folder {}: {}", dir.display(), plain(&e))),
     }
@@ -198,7 +139,6 @@ fn list(dir: &Path) -> Result<Reply, String> {
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
-            // Links count as what they point to.
             let dir = std::fs::metadata(entry.path()).ok()?.is_dir();
             (!name.starts_with('.') && (dir || name.ends_with(".jl"))).then_some(Entry { name, dir })
         })
@@ -211,9 +151,6 @@ fn list(dir: &Path) -> Result<Reply, String> {
 const WALK_DEPTH: usize = 4;
 const WALK_LIMIT: usize = 5000;
 
-/// Files and folders under `root`, down to `depth` levels, hidden ones (and
-/// what's inside them) left out, at most `limit` of them: shallower first, then
-/// by name. Paths are relative to `root`; folders end with `/`.
 pub fn walk(root: &Path, depth: usize, limit: usize) -> Vec<String> {
     let mut found = Vec::new();
     let mut level = vec![String::new()];
@@ -225,7 +162,6 @@ pub fn walk(root: &Path, depth: usize, limit: usize) -> Vec<String> {
                 .flatten()
                 .filter_map(|entry| {
                     let name = entry.file_name().to_string_lossy().into_owned();
-                    // Links count as what they point to.
                     let dir = std::fs::metadata(entry.path()).ok()?.is_dir();
                     (!name.starts_with('.')).then_some((name, dir))
                 })
@@ -249,10 +185,8 @@ pub fn walk(root: &Path, depth: usize, limit: usize) -> Vec<String> {
     found
 }
 
-/// Where attached files go, inside a session's folder.
 pub const DATA: &str = "data";
 
-/// The name for the `n`th file of this name: `decay.csv`, `decay (2).csv`, …
 pub fn numbered(name: &str, n: u32) -> String {
     if n == 1 {
         return name.to_string();
@@ -263,7 +197,6 @@ pub fn numbered(name: &str, n: u32) -> String {
     }
 }
 
-/// A file's SHA-256, in lowercase hex.
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     use sha2::Digest;
     let mut file = std::fs::File::open(path)?;
@@ -279,9 +212,6 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Where a file named `name` goes in `folder`'s `data/` (made if missing):
-/// `data/<name>` if that's free or holds the same contents (size and SHA-256),
-/// else the first numbered name that is.
 pub fn place(folder: &Path, name: &str, size: u64, sha256: &str) -> Result<Reply, String> {
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
         return Err(format!("{name:?} isn't a file name"));
@@ -305,17 +235,12 @@ pub fn place(folder: &Path, name: &str, size: u64, sha256: &str) -> Result<Reply
                     return Ok(Reply::Place { path, have: true });
                 }
             }
-            // Different contents, a folder, or a link: taken.
             Ok(_) => {}
         }
     }
     unreachable!("some numbered name is free")
 }
 
-/// Windows can't hold a file named `name`: one with `\`, a `:` (which names
-/// another stream of a file) or another character it refuses, one ending in a
-/// dot or a space, or a device's name such as `CON` or `com1.txt`. Linux and
-/// macOS can, so only a Windows machine refuses these.
 fn windows_name(name: &str) -> bool {
     const DEVICES: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
     let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
@@ -328,8 +253,6 @@ fn not_on_windows(name: &str) -> String {
     format!("{name:?} can't be a file's name on Windows; rename it and attach it again")
 }
 
-/// `rel`, a relative path without `..`, inside `folder` once links are
-/// resolved (as the app's `relative_inside` checks); it must exist.
 fn inside(folder: &Path, rel: &Path) -> Result<PathBuf, String> {
     let outside = || format!("{} isn't inside the session's folder", rel.display());
     if !rel.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir)) {
@@ -340,9 +263,6 @@ fn inside(folder: &Path, rel: &Path) -> Result<PathBuf, String> {
     if resolved.starts_with(&root) { Ok(resolved) } else { Err(outside()) }
 }
 
-/// Where a file sent to `path` (relative to `folder`, in a folder that
-/// exists) is written while it comes, a hidden `.<name>.part` beside it, and
-/// where it ends up.
 pub fn upload_paths(folder: &Path, path: &str) -> Result<(PathBuf, PathBuf), String> {
     let rel = Path::new(path);
     let Some(Component::Normal(name)) = rel.components().next_back() else {
@@ -356,10 +276,6 @@ pub fn upload_paths(folder: &Path, path: &str) -> Result<(PathBuf, PathBuf), Str
     Ok((dir.join(format!(".{name}.part")), dir.join(name)))
 }
 
-/// Write a piece of a file being sent to `path` in `folder`: `bytes` at
-/// `offset` of its part (`upload_paths`), which the first piece (offset 0)
-/// starts over. The last piece renames the part to `path`, so a file cut short
-/// never looks finished. A piece that fails deletes the part.
 pub fn write(folder: &Path, path: &str, offset: u64, bytes: &[u8], last: bool) -> Result<(), String> {
     let (part, dest) = upload_paths(folder, path)?;
     let result = write_part(&part, &dest, path, offset, bytes, last);
@@ -376,7 +292,6 @@ fn write_part(part: &Path, dest: &Path, path: &str, offset: u64, bytes: &[u8], l
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed(e)),
             _ => {}
         }
-        // create_new doesn't follow a link planted at the part's name.
         std::fs::OpenOptions::new().write(true).create_new(true).open(part).map_err(failed)?
     } else {
         if !std::fs::symlink_metadata(part).is_ok_and(|m| m.is_file() && m.len() == offset) {
@@ -395,7 +310,6 @@ fn write_part(part: &Path, dest: &Path, path: &str, offset: u64, bytes: &[u8], l
     Ok(())
 }
 
-/// Bytes as base64 in JSON.
 mod base64_bytes {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
@@ -437,7 +351,6 @@ mod tests {
         assert!(!dir.join("missing").exists(), "nothing is made when the parent is missing");
         std::fs::write(dir.join("notes.txt"), "").unwrap();
         assert!(folder(&dir.join("notes.txt")).unwrap_err().contains("is a file"));
-        // `~` is the home folder, as for the other requests; another user's home isn't made as a folder in this one.
         assert!(matches!(answer(&Request::Folder { path: "~".into() }), Reply::Folder { created: false, .. }));
         assert!(matches!(answer(&Request::Folder { path: "~bob/study".into() }), Reply::Error { message } if message.contains("another user's home")));
         assert!(!home().join("~bob").exists());
@@ -495,7 +408,6 @@ mod tests {
         sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// Send `bytes` as the app does, in pieces of `piece` bytes.
     fn send(folder: &Path, name: &str, bytes: &[u8], piece: usize) -> Reply {
         let ask = |request| answer(&request);
         let folder = folder.display().to_string();
@@ -552,12 +464,10 @@ mod tests {
             assert!(place(&folder, name, 1, &sha(b"x")).is_err(), "{name:?}");
         }
 
-        // A data folder that is a link out of the session's folder is refused too.
         let linked = dir.join("linked");
         std::fs::create_dir_all(&linked).unwrap();
         std::os::unix::fs::symlink(dir.join("elsewhere"), linked.join("data")).unwrap();
         assert!(place(&linked, "x.csv", 1, &sha(b"x")).unwrap_err().contains("isn't inside"));
-        // A link that stays inside is fine, as is the folder itself through /tmp → /private/tmp.
         std::fs::create_dir_all(folder.join("shared")).unwrap();
         std::os::unix::fs::symlink(folder.join("shared"), folder.join("data/shared")).unwrap();
         assert_eq!(write(&folder, "data/shared/y", 0, b"y", true), Ok(()));
@@ -577,19 +487,16 @@ mod tests {
         assert!(part.exists() && !dest.exists(), "unfinished: only the part");
         assert_eq!(walk(&folder, 2, 10), ["data/"], "the part is hidden from @ and the agent's listing");
 
-        // A piece that doesn't follow on (one got lost) fails and discards the part.
         let why = write(&folder, "data/big.csv", 12, b"89", true).unwrap_err();
         assert_eq!(why, "Sending data/big.csv was cut short; send it again");
         assert!(!part.exists() && !dest.exists());
 
-        // Sending again starts over at offset 0, over any stale part.
         std::fs::write(&part, "stale").unwrap();
         assert_eq!(write(&folder, "data/big.csv", 0, b"ab", false), Ok(()));
         assert_eq!(write(&folder, "data/big.csv", 2, b"cd", true), Ok(()));
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "abcd");
         assert!(!part.exists());
 
-        // A file that turned up at the name meanwhile isn't overwritten.
         assert_eq!(write(&folder, "data/big.csv", 0, b"new", true).unwrap_err(), "data/big.csv appeared while it was being sent; send it again");
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "abcd");
         assert!(!part.exists());
@@ -604,7 +511,6 @@ mod tests {
         for name in ["run 1.csv", "decay.csv", "console.txt", "COM0.csv", "COM10", "LPT", ".env", "über.csv", "a€.csv", "😀.png", "a中.txt"] {
             assert!(windows_name(name), "{name:?}");
         }
-        // Only a Windows machine refuses them: a Linux server holds "run:1.csv" fine.
         let dir = session("windows-names");
         let placed = place(&dir, "run:1.csv", 1, &sha(b"x"));
         let sent = write(&dir, "data/run:1.csv", 0, b"x", true);

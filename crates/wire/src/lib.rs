@@ -1,24 +1,3 @@
-//! What the app and its helper (`endeavor`) say to each other over the helper's
-//! stdin/stdout: TCP streams to the runtime's port, multiplexed byte for byte,
-//! plus JSON control messages.
-//!
-//! # Frame layout
-//!
-//! Every frame is a 4-byte big-endian length `n`, then `n` bytes: a kind byte
-//! and its body.
-//!
-//! | kind | frame     | body                                          |
-//! |------|-----------|-----------------------------------------------|
-//! | 0    | `Open`    | stream id (u32 BE)                            |
-//! | 1    | `Data`    | stream id (u32 BE), the bytes                 |
-//! | 2    | `Close`   | stream id (u32 BE)                            |
-//! | 3    | `Control` | one JSON message ([`ToApp`] or [`ToHelper`])  |
-//!
-//! Only the app opens streams, so it picks the ids. `Close` ends a stream in
-//! both directions; either side may send it, and frames for an id that's
-//! already closed are dropped.
-
-// Tests may copy sockets with `try_clone` (clippy.toml forbids it outside tests, #157).
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod askpass;
@@ -34,55 +13,36 @@ use std::io::{self, ErrorKind, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
-/// A frame larger than this is corrupt input, not a message.
 pub const MAX_FRAME: usize = 16 << 20;
 
-/// The number of this protocol: the frames, [`ToApp`] and [`ToHelper`]. The
-/// helper says it in [`ToApp::Hello`], and a client refuses a helper whose number
-/// differs from its own. Raise it when a client and a helper of the previous
-/// number can no longer work together: a message or field one of them needs and
-/// the other would not understand, or one whose meaning changed. Adding an
-/// optional field or a message that a peer may ignore does not raise it. A
-/// helper that says no number (`Hello` without `protocol`) is 0.
 pub const PROTOCOL: u32 = 1;
 
-/// `StartRuntime::engine` for Pluto notebooks, the only engine so far.
 pub const ENGINE_PLUTO: &str = "pluto";
 
-/// [`Item::kind`] of a language runtime, such as Julia.
 pub const KIND_RUNTIME: &str = "runtime";
-/// [`Item::kind`] of Endeavor's own files on a machine.
 pub const KIND_HELPER: &str = "helper";
 
-/// Something that has to be installed on a machine before a start can go on.
-/// `kind` is a plain string, so that a kind a peer doesn't know still reads.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub kind: String,
-    /// What a person calls it, with its version: "Julia 1.12.6".
     pub name: String,
-    /// About how much would be downloaded or copied, in MB, when known.
     pub size_mb: Option<u64>,
-    /// The folder it would go in, when known.
     pub place: Option<String>,
 }
 
 impl Item {
-    /// "about 289 MB, into /home/ada/.cache/endeavor/julia-1.12.6", or nothing of what isn't known.
     fn details(&self) -> String {
         self.size_mb.map(|mb| format!("about {mb} MB")).into_iter().chain(self.place.as_ref().map(|place| format!("into {place}"))).collect::<Vec<_>>().join(", ")
     }
 }
 
 impl std::fmt::Display for Item {
-    /// "Julia 1.12.6 (about 289 MB, into /home/ada/.cache/endeavor/julia-1.12.6)".
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let details = self.details();
         if details.is_empty() { write!(f, "{}", self.name) } else { write!(f, "{} ({details})", self.name) }
     }
 }
 
-/// The items as a sentence part: "Julia 1.12.6 (about 289 MB, into /x) and Endeavor's helper (about 20 MB)".
 pub fn items_text(items: &[Item]) -> String {
     match items {
         [] => String::new(),
@@ -91,9 +51,6 @@ pub fn items_text(items: &[Item]) -> String {
     }
 }
 
-/// What is missing on `machine`, a sentence for each item. A runtime that wasn't found: "Julia 1.12.6
-/// wasn't found on lab. Endeavor can download its own copy (about 289 MB, into /x)." Any other:
-/// "Endeavor needs to install R 4.5.1 (about 120 MB) on lab."
 pub fn needs_text(items: &[Item], machine: &str) -> String {
     let sentence = |item: &Item| match (item.kind == KIND_RUNTIME, item.details()) {
         (true, details) if details.is_empty() => format!("{} wasn't found on {machine}. Endeavor can download its own copy.", item.name),
@@ -143,7 +100,6 @@ impl Frame {
         w.flush()
     }
 
-    /// The next frame, or None at a clean end of input (between frames).
     pub fn read_from(r: &mut impl Read) -> io::Result<Option<Frame>> {
         let mut len = [0; 4];
         let mut got = 0;
@@ -181,124 +137,59 @@ fn invalid(message: String) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
 }
 
-/// Helper → app. The helper says `Hello` as soon as it runs; the runtime starts
-/// (or is attached to) only when the app sends `StartRuntime`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ToApp {
-    /// The helper is up. File requests work from now on.
     Hello {
-        /// The helper's [`PROTOCOL`]; absent from a helper that predates it, so 0.
         #[serde(default)]
         protocol: u32,
         version: String,
-        /// The machine the helper runs on.
         node: String,
         home: String,
-        /// Slurm's commands are here: probably a cluster's login node.
         #[serde(default)]
         slurm: bool,
-        /// It takes `files::Request::Place` and `Write`; an older helper
-        /// doesn't say so and would ignore them.
         #[serde(default)]
         uploads: bool,
-        /// How this helper runs the runtime, for the whole connection: "process" or "slurm" (what
-        /// `--launcher auto` became). Empty from a helper that predates it.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         launcher: String,
     },
-    /// A line of the runtime's log while it starts, or of an install. A
-    /// start's progress (this, `Found`, `Submitted`, `Queued`) names no
-    /// id: only one start is under way at a time, and the answer that ends it names it.
     Progress { line: String },
-    /// What the helper starts the runtime with, such as Julia: its `name`
-    /// ("Julia"), `version` and `path` (sent only when it starts one).
     Found { name: String, version: String, path: String },
-    /// A cluster job for the runtime was submitted (`summary`: "8 CPUs · 32 GB · 8 h").
     Submitted { job: String, summary: String },
-    /// The job waits in the queue: its state (PENDING, CONFIGURING) and Slurm's
-    /// reason; then once, state RUNNING and (as `reason`) the node it got.
     Queued { job: String, state: String, reason: String },
-    /// The runtime is up and streams can open: the answer to the `StartRuntime`
-    /// with this id. (The relay on a job's node, which has no request, says it with id 0.)
     Ready {
         id: u32,
-        /// How the runtime was started: "process" or "slurm".
         launcher: String,
-        /// The machine the runtime runs on.
         node: String,
         pid: u32,
-        /// The runtime's bearer token, for every path on its port but the pages.
         token: String,
-        /// The token for its pages (Pluto's and Ember's), in the start page's URL; none from a runtime or
-        /// helper from before the pages had their own, whose pages take `token`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         page_token: Option<String>,
-        /// The runtime was already running; this connect didn't start it.
         reattached: bool,
-        /// The cluster job it runs in.
         #[serde(default)]
         job: Option<slurm::Job>,
-        /// The runtime's own port on `node`. A helper that doesn't say leaves it unknown.
         #[serde(default)]
         port: Option<u16>,
-        /// The build that started the runtime, as its record says; none when it doesn't, or the helper doesn't say.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         build: Option<String>,
-        /// The number for what the runtime's core offers its callers (`endeavor_mcp::CORE_INTERFACE`), as its
-        /// record says; none when it doesn't, or the helper doesn't say.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         interface: Option<u32>,
     },
-    /// The runtime couldn't start (running on another node, …): the answer to the
-    /// `StartRuntime` with this id. The helper stays connected, so
-    /// `StartRuntime` can try again.
     StartFailed { id: u32, message: String },
-    /// The `StartRuntime` with this id needs `items` installed and didn't
-    /// allow installing: nothing was started or installed. The helper stays
-    /// connected, so `StartRuntime` can try again with `install` true.
     NeedsInstall { id: u32, items: Vec<Item> },
-    /// The runtime exited while the `StartRuntime` with this id waited for it:
-    /// that start's answer. A runtime that exits later is `Died`.
     StartDied { id: u32, status: String, log_tail: Vec<String> },
-    /// A `Stop` ended the `StartRuntime` with this id before it was ready: that
-    /// start's answer, sent before the `Stopped` that answers the `Stop`.
     StartCancelled { id: u32 },
-    /// The `StartRuntime` with this id had `attach_only`, and no runtime runs or starts: nothing was started.
     NotRunning { id: u32 },
-    /// The runtime exited, with no request waiting for it; the helper stays connected.
     Died { status: String, log_tail: Vec<String> },
-    /// The runtime stopped as the `Stop` with this id asked; the helper stays connected.
     Stopped { id: u32 },
-    /// The runtime did not stop, and why; it is as it was and the helper stays
-    /// connected. The helper answers each `Stop` with one `Stopped` or one
-    /// `NotStopped`, naming its id.
     NotStopped { id: u32, message: String },
-    /// The answer to `ToHelper::Files` with the same id.
     Files { id: u32, reply: files::Reply },
-    /// The helper couldn't go on; it exits.
     Error { message: String },
 }
 
-/// App → helper.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ToHelper {
-    /// Attach to the runtime, starting it if it isn't running. On a cluster,
-    /// `job` says what to submit.
-    ///
-    /// `id` is the client's own; the answer names it (see `ToApp`), and the helper
-    /// answers each request once. Ids are the client's to keep apart: one in use
-    /// by a request still waiting must not be used again.
-    ///
-    /// `engine` names the notebook system to start ([`ENGINE_PLUTO`]). `install`
-    /// says the helper may install whatever this start needs (such as a
-    /// language runtime); without it, a start that needs something is answered
-    /// `NeedsInstall` and installs nothing. `attach_only` says never to start
-    /// one: the helper attaches to the runtime that runs, waits for a start
-    /// under way and attaches to what it records, and answers `NotRunning` when
-    /// there is none or the start ended without one. Absent, as from a client
-    /// that predates it, it is false.
     StartRuntime {
         id: u32,
         #[serde(default)]
@@ -308,18 +199,6 @@ pub enum ToHelper {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         attach_only: bool,
     },
-    /// Stop the runtime and stay connected: the attached one, else the one
-    /// recorded in the state folder, or on a cluster the job waiting for it.
-    /// A start under way ends with its own answer, then this is answered;
-    /// that includes this connection's wait for a start another connection
-    /// began. Without `force`, that other start is left to finish and the
-    /// answer is `NotStopped`; with it, it is cancelled as
-    /// `endeavor stop --force` cancels it. Absent, as from a client that
-    /// predates it, it is false; a helper that predates it ignores it.
-    /// `unless_shared` is the app quitting: a runtime the plugin also works in
-    /// is left running for it, and ends itself once idle, and the helper exits
-    /// as after `Detach` without answering. Absent, it is false, and a helper
-    /// that predates it stops the runtime.
     Stop {
         id: u32,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -327,17 +206,12 @@ pub enum ToHelper {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         unless_shared: bool,
     },
-    /// Exit and leave the runtime running.
     Detach,
-    /// What `--own-with-client` is from now on: the app's "Keep notebooks running after Endeavor quits"
-    /// changed (on = the setting is off), so an app that goes without saying leaves the runtime, or stops
-    /// one this connection started, as the setting says now (app #245). A helper that predates it ignores it.
     OwnWithClient { on: bool },
     Files { id: u32, request: files::Request },
 }
 
 impl ToApp {
-    /// The id of the request this answers, if it answers one.
     pub fn answers(&self) -> Option<u32> {
         match self {
             ToApp::Ready { id, .. } | ToApp::StartFailed { id, .. } | ToApp::NeedsInstall { id, .. } | ToApp::StartDied { id, .. } | ToApp::StartCancelled { id } | ToApp::NotRunning { id } | ToApp::Stopped { id } | ToApp::NotStopped { id, .. } => Some(*id),
@@ -356,12 +230,6 @@ impl ToHelper {
     }
 }
 
-/// One connection shared between its reader and writer, or between threads, through one handle. On
-/// Windows std's `try_clone` makes an inheritable copy of a socket, so a child started while the copy
-/// was open (Julia, or `julia --version` while finding it) kept the connection open after we closed
-/// it: a page waited for its end for as long as Julia ran, or was reset when a short-lived child
-/// ended. Sharing the one handle, which std opens non-inheritable, leaves no copy to inherit. The
-/// connection closes when the last share is dropped, as it did with the last copy.
 #[derive(Clone, Debug)]
 pub struct Shared(std::sync::Arc<std::net::TcpStream>);
 
@@ -415,8 +283,6 @@ impl Write for &Shared {
 mod tests {
     use super::*;
 
-    /// See `Shared`: std's copy of a socket is inheritable, so a connection is shared rather than
-    /// copied, and closing it ends it even while a child started meanwhile runs.
     #[test]
     #[cfg(windows)]
     fn a_child_started_while_a_shared_connection_is_open_doesnt_keep_it_open() {
@@ -452,7 +318,6 @@ mod tests {
         assert!(ended.is_ok() && said == b"x", "the connection didn't end while the child ran: {ended:?}, {said:?}");
     }
 
-    /// Hands out at most `step` bytes per read, like a pipe under load.
     struct Trickle<'a> {
         data: &'a [u8],
         step: usize,
@@ -537,7 +402,6 @@ mod tests {
         assert_eq!(serde_json::to_string(&ToHelper::Stop { id: 2, force: false, unless_shared: false }).unwrap(), r#"{"type":"Stop","id":2}"#, "an unforced stop reads as it did before `force`");
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"Stop","id":2}"#).unwrap(), ToHelper::Stop { id: 2, force: false, unless_shared: false });
         assert_eq!(serde_json::to_string(&ToHelper::Stop { id: 2, force: true, unless_shared: false }).unwrap(), r#"{"type":"Stop","id":2,"force":true}"#);
-        // The app's quit: absent from an ordinary stop, and false when a client that predates it says nothing.
         assert_eq!(serde_json::to_string(&ToHelper::Stop { id: 3, force: false, unless_shared: true }).unwrap(), r#"{"type":"Stop","id":3,"unless_shared":true}"#);
         assert_eq!(serde_json::from_str::<ToHelper>(r#"{"type":"Stop","id":3}"#).unwrap(), ToHelper::Stop { id: 3, force: false, unless_shared: false });
         assert_eq!(serde_json::to_string(&ToHelper::OwnWithClient { on: false }).unwrap(), r#"{"type":"OwnWithClient","on":false}"#);
