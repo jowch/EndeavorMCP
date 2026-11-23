@@ -979,6 +979,22 @@ end
             ran = run_asking([pkg])
             @test !haskey(ran, "asking") && title in ran["completed"]
             @test nb.cells_dict[UUID(title)].output.last_run_timestamp > 0
+            # Released, then run some other way before the agent's next run: it doesn't run again.
+            hold_title() = (result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "using Example")));
+                            @test run_asking([pkg, title])["asking"] == ["Example"];
+                            result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "nothing")));
+                            @test result("snapshot", Dict("notebook_id" => nid))["packages"] === nothing)
+            hold_title()
+            before_page = nb.cells_dict[UUID(title)].output.last_run_timestamp
+            # Run from Pluto's page, which doesn't go through the adapter's run.
+            Pluto.update_save_run!(EndeavorRuntime.standalone_session(), nb, [nb.cells_dict[UUID(title)]]; run_async=false, save=true)
+            ran_at = nb.cells_dict[UUID(title)].output.last_run_timestamp
+            @test ran_at > before_page
+            @test !(title in run_asking([array])["completed"]) && nb.cells_dict[UUID(title)].output.last_run_timestamp == ran_at
+            # Released, then a Stop: it doesn't run with the next run either.
+            hold_title()
+            result("interrupt", Dict("notebook_id" => nid))
+            @test !(title in run_asking([array])["completed"]) && nb.cells_dict[UUID(title)].output.last_run_timestamp == ran_at
             result("apply", ops(Dict("op" => "delete", "cell_id" => title)))
             # Asked again, and stopped: the cell isn't queued any more.
             result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "using Example")))

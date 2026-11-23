@@ -241,6 +241,8 @@ function interrupt!(session, nb)
         _forget_asking!(nb)
         _notify_browser(session, nb)
     end
+    # Cells released from a wait (#523) don't run with the next run after a Stop either.
+    lock(() -> delete!(_LEFT, nb.notebook_id), _ASKING_LOCK)
     stopped = _interrupt_run!(session, nb)
     asked && (stopped["interrupted"] = true; delete!(stopped, "pending"))
     return stopped

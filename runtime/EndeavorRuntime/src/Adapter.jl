@@ -289,7 +289,9 @@ const _APPROVED = Dict{UUID,Set{String}}()  # notebook => packages the user said
 const _ASKING_LOCK = ReentrantLock()
 # Cells that waited for an OK no longer needed (an edit dropped the package, or it came another
 # way): released, they run with the notebook's next run, which is what was asked of them (#523).
-const _LEFT = Dict{UUID,Vector{Pluto.Cell}}()
+# Each with its last run's time then: one that has run since (the user's run, or as a dependent)
+# isn't run again.
+const _LEFT = Dict{UUID,Vector{Tuple{Pluto.Cell,Float64}}}()
 
 function new_packages(nb)
     ctx = nb.nbpkg_ctx
@@ -308,7 +310,7 @@ function _forget_asking!(nb; keep::Bool=false)
     held = lock(_ASKING_LOCK) do
         a = pop!(_ASKING, nb.notebook_id, nothing)
         held = a === nothing ? Pluto.Cell[] : a.cells
-        keep ? append!(get!(Vector{Pluto.Cell}, _LEFT, nb.notebook_id), held) : delete!(_LEFT, nb.notebook_id)
+        keep ? append!(get!(Vector{Tuple{Pluto.Cell,Float64}}, _LEFT, nb.notebook_id), [(c, c.output.last_run_timestamp) for c in held]) : delete!(_LEFT, nb.notebook_id)
         held
     end
     isempty(held) || _release_cells!(nb, held)
@@ -498,8 +500,9 @@ function run_cells!(session, nb, cells; wait::Bool, timeout::Real, ask_new::Bool
     accepted = Pluto.will_run_code(nb)
     # Cells released from a wait for an OK no longer needed run with this run (#523).
     if accepted
-        left = lock(() -> pop!(_LEFT, nb.notebook_id, Pluto.Cell[]), _ASKING_LOCK)
-        cells = unique!(filter(c -> haskey(nb.cells_dict, c.cell_id), vcat(collect(cells), left)))
+        left = lock(() -> pop!(_LEFT, nb.notebook_id, Tuple{Pluto.Cell,Float64}[]), _ASKING_LOCK)
+        due = [c for (c, ran) in left if haskey(nb.cells_dict, c.cell_id) && c.output.last_run_timestamp == ran && !_unfinished(c)]
+        cells = unique!(vcat(collect(cells), due))
     end
     # A notebook that asks already holds these cells too, and asks again with
     # what is new now (an edit may have dropped or added a package).
