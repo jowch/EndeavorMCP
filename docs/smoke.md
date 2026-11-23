@@ -273,7 +273,7 @@ something subtle, make it soft.
 
 | Task | Asks | Covers |
 |---|---|---|
-| `N1-new` | a small simulation shown as a table, in a new notebook | `new_notebook`, read, stage, run; no edits to the file. If the agent picks DataFrames or PrettyTables for the table, the harness says yes when asked (N8 too) |
+| `N1-new` | a small simulation shown as a table, in a new notebook | `new_notebook`, read, stage, run; no edits to the file. If the agent picks DataFrames or PrettyTables for the table, the harness says yes when asked (N8 too). The prompt names no language, and an agent may pick Python (#361), so the harness says yes to P1's table packages too: the task then fails only on what it checks |
 | `N2-fix` | fix the error in a notebook that is already open | joining an open notebook (`already_open`), errors, the cells that depend on the fix |
 | `N3-preview` | open a notebook from disk and say what it computes | safe preview: nothing runs, and the agent says so |
 | `N4-long-run` | a cell that takes 70 s | `execution.still_running`: the cell isn't run again, and a result reported came from the notebook |

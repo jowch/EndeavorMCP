@@ -1,1 +1,1 @@
-{ "dialog": { "new_packages": ["DataFrames", "PrettyTables"] } }
+{ "dialog": { "new_packages": ["DataFrames", "PrettyTables", "numpy", "pandas", "polars", "pyarrow", "tabulate"] } }
