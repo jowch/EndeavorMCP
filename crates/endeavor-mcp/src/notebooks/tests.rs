@@ -2324,9 +2324,14 @@ fn view_cell_output_says_an_interactive_output_was_not_seen_working() {
     // HTML with no scripts or controls, such as Markdown, says nothing of the kind.
     assert_eq!(view(Z).err(), Some(format!("ArgumentError: no_image::Cell {Z}: its output (text/html) has no PNG rendering; read_cell shows it as text")));
     // The app's picture of the notebook in place of either keeps the warning.
-    let shot = super::tools::screenshot_result(Y, "iVBORw==".into(), &error).unwrap();
+    let shot = super::tools::screenshot_result(Y, "iVBORw==".to_owned().into(), &error).unwrap();
     let said: Value = serde_json::from_str(shot["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!((said["interactive"].clone(), said["message"].clone(), said["shown_as"].clone()), (json!(true), json!(super::tools::INTERACTIVE_PICTURE), json!("text/html")));
+    assert_eq!(said["cut"], Value::Null, "a whole output says nothing of the kind");
+    // A picture of a tall output that stops at the window says so (Endeavor #163).
+    let cut = super::tools::screenshot_result(Y, crate::Picture { png: "iVBORw==".into(), cut: Some((855, 920)) }, &error).unwrap();
+    let said: Value = serde_json::from_str(cut["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(said["cut"], "The picture shows 855 px of an output 920 px tall; the rest is missing.");
 }
 
 #[test]

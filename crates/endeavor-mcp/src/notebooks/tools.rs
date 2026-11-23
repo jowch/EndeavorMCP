@@ -2447,7 +2447,8 @@ pub(crate) fn snapshot_may_help(result: &Value) -> bool {
 /// `view_cell_output`'s result for `png` (base64), a picture of cell `cell` as the notebook draws it,
 /// in place of the runtime's `result`, or None if it is over the size an agent takes. It keeps the
 /// output's MIME type when the runtime's result named it.
-pub(crate) fn screenshot_result(cell: &str, png: String, result: &Value) -> Option<Value> {
+pub(crate) fn screenshot_result(cell: &str, picture: crate::Picture, result: &Value) -> Option<Value> {
+    let crate::Picture { png, cut } = picture;
     let bytes = base64_len(&png);
     if bytes > MAX_IMAGE_BYTES {
         return None;
@@ -2462,6 +2463,9 @@ pub(crate) fn screenshot_result(cell: &str, png: String, result: &Value) -> Opti
     let mut meta = json!({ "cell_id": cell, "source": "screenshot", "png_bytes": bytes });
     if let Some(shown_as) = shown_as {
         meta["shown_as"] = json!(shown_as);
+    }
+    if let Some((shown, whole)) = cut {
+        meta["cut"] = json!(format!("The picture shows {shown} px of an output {whole} px tall; the rest is missing."));
     }
     // A picture of the notebook shows how it looks, still not that its controls work.
     if said["interactive"] == true || said["message"].as_str().is_some_and(|m| m.contains(INTERACTIVE_UNSEEN)) {
