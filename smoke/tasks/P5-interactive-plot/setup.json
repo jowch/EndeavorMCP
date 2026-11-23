@@ -1,0 +1,1 @@
+{ "dialog": { "new_packages": ["altair", "pandas", "numpy", "polars", "pyarrow", "vegafusion", "vl-convert-python"] } }

@@ -807,11 +807,14 @@ def bundle_of(out):
 
 
 # What makes HTML interactive, as the Julia runtime decides it (`_INTERACTIVE` in Output.jl): a script,
-# a canvas or a control. A plotly figure comes as an iframe with scripts; marimo's own elements
-# (`mo.ui.slider`, `mo.ui.plotly`) are `<marimo-…>` ones, but not a table, math or a JSON tree, which
-# show as text.
+# a canvas or a control. A plotly figure comes as an iframe with scripts; marimo's own controls
+# (`mo.ui.slider`, `mo.ui.plotly`) are `<marimo-…>` elements. Not a table, math or a JSON tree, which
+# show as text, nor a layout or a static display (an accordion, tabs, a carousel, a sidebar, a
+# dictionary of controls, a stat, a diagram, a progress bar, a menu): marimo puts their content in
+# the HTML, so that decides. A lazy element's content isn't in it, so it counts.
 INTERACTIVE = re.compile(r"<(script|canvas|input|select|button|textarea|iframe)\b"
-                         r"|<marimo-(?!ui-element\b|table\b|tex\b|json-output\b|callout-output\b)[a-z]", re.I)
+                         r"|<marimo-(?!(ui-element|table|tex|json-output|callout-output|accordion|tabs|carousel|sidebar"
+                         r"|dict|stat|mermaid|progress|nav-menu)\b)[a-z]", re.I)
 
 
 def interactive_bundle(bundle):

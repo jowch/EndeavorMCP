@@ -44,6 +44,12 @@ fn plots_and_controls_are_interactive_and_tables_math_and_pictures_arent() {
         // A DataFrame: read_cell shows it as text.
         ("a table", json!({ "text/html": "<marimo-ui-element object-id='48' random-id='48'><marimo-table data-initial-value='[]' data-data='[]'></marimo-table></marimo-ui-element>" }), false),
         ("mo.md with math", json!({ "text/markdown": "<span class=\"markdown prose\"><span class=\"paragraph\">hi <marimo-tex class=\"arithmatex\">||(x||)</marimo-tex> <strong>b</strong></span></span>" }), false),
+        // Layouts: their content decides (#530's review).
+        ("an accordion of markdown", json!({ "text/html": "<marimo-accordion data-labels='[&quot;A&quot;]' data-multiple='false' data-expanded='[]'><div><span class=\"markdown prose\"><span class=\"paragraph\"><strong>hi</strong></span></span></div></marimo-accordion>" }), false),
+        ("an accordion with a slider", json!({ "text/html": "<marimo-accordion data-labels='[&quot;A&quot;]' data-multiple='false' data-expanded='[]'><div><marimo-ui-element object-id='11' random-id='11'><marimo-slider data-initial-value='1'></marimo-slider></marimo-ui-element></div></marimo-accordion>" }), true),
+        ("tabs of markdown", json!({ "text/html": "<marimo-ui-element object-id='cf' random-id='cf'><marimo-tabs data-initial-value='&quot;&quot;' data-tabs='[&quot;a&quot;]'><div data-kind='tab'><span class=\"markdown\">x</span></div></marimo-tabs></marimo-ui-element>" }), false),
+        // mo.lazy: its content isn't in the HTML.
+        ("mo.lazy", json!({ "text/html": "<marimo-ui-element object-id='ca' random-id='ca'><marimo-lazy data-initial-value='false' data-label='null' data-show-loading-indicator='false'></marimo-lazy></marimo-ui-element>" }), true),
         ("a matplotlib picture", json!({ "image/png": "data:image/png;base64,iVBORw0KGgo=" }), false),
         ("plain text", json!({ "text/plain": "<script> is a word here" }), false),
         ("no output", json!({}), false),

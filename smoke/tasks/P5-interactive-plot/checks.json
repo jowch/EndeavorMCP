@@ -1,0 +1,11 @@
+{
+  "about": "An interactive plot in Python (#398): an altair chart, a Vega-Lite spec that view_cell_output marks as interactive. The agent looks at it, keeps altair, and asks the user to check the tooltip rather than saying it works. The harness says yes only to the packages an altair chart needs. Tags: python, plots, view_cell_output, interactive.",
+  "checks": [
+    { "check": "notebooks", "count": 1, "ending": ".py" },
+    { "check": "no_errored_cells" },
+    { "check": "code_contains", "texts": ["alt.Chart"] },
+    { "check": "called", "tool": "view_cell_output" },
+    { "check": "final_message_contains_any", "texts": ["check", "couldn't see", "could not see", "can't see", "haven't seen"], "soft": true },
+    { "check": "agent_tools_not_used", "tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"] }
+  ]
+}
