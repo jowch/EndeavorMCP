@@ -1,10 +1,3 @@
-//! The notebook engines a runtime drives, one adapter each, behind one
-//! `POST /adapter` for the rest of the core (docs/runtime-core.md). Each
-//! engine joins when it starts, Pluto's too (Julia starts when it's first
-//! needed). A call goes to the engine of the notebook it names, of the file it
-//! opens, or, with neither, to Pluto's; `snapshot` and `status` without a notebook ask every
-//! engine that runs and put their notebooks together.
-
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
@@ -16,39 +9,27 @@ use wire::backend::Backend;
 use super::Upstream;
 
 pub struct Engines {
-    /// In the order they joined.
     parts: Mutex<Vec<(Backend, Arc<dyn Upstream>)>>,
-    /// The engine each notebook it has seen is open in.
     ids: Mutex<HashMap<String, Backend>>,
-    /// Each notebook's path, as its engine last said (`snapshot`, `status`, `open`, `new`).
     paths: Mutex<HashMap<String, String>>,
-    /// Notebooks that were open in an engine (not Pluto's) that ended, until they're opened again.
     closed: Mutex<Vec<Closed>>,
-    /// Held while an engine is dropped, so two callers that both saw it fail drop it once.
     dropping: Mutex<()>,
 }
 
-/// A notebook that closed because its engine ended (`Engines::drop_engine`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Closed {
     pub id: String,
     pub path: String,
     pub language: &'static str,
-    /// Why the engine ended, as far as the core can tell.
     pub why: String,
-    /// When, in milliseconds since 1970: with the path, it tells one ending from the next, so the
-    /// app sees an ending after a reopen as new even when both fall between two of its events.
     pub ended_at: u64,
 }
 
 impl Engines {
-    /// The engines, starting with Pluto's if it runs.
     pub fn new(pluto: Option<Arc<dyn Upstream>>) -> Engines {
         Engines { parts: Mutex::new(pluto.map(|pluto| (Backend::Pluto, pluto)).into_iter().collect()), ids: Mutex::default(), paths: Mutex::default(), closed: Mutex::default(), dropping: Mutex::default() }
     }
 
-    /// An engine, once it runs, in the place of one it replaces. False if it's there already: the
-    /// caller follows the notifications of one that's new.
     pub fn add(&self, backend: Backend, upstream: Arc<dyn Upstream>) -> bool {
         let mut parts = self.parts.lock().unwrap();
         if parts.iter().any(|(b, u)| *b == backend && Arc::ptr_eq(u, &upstream)) {
@@ -63,7 +44,6 @@ impl Engines {
         self.parts.lock().unwrap().clone()
     }
 
-    /// The engine notebook `id` is open in, as far as we know: Pluto's for one we haven't seen.
     pub fn backend_of(&self, id: &str) -> Backend {
         self.ids.lock().unwrap().get(id).copied().unwrap_or(Backend::Pluto)
     }
@@ -76,7 +56,6 @@ impl Engines {
         self.parts.lock().unwrap().iter().find(|(b, _)| *b == backend).map(|(_, u)| u.clone())
     }
 
-    /// Notebook `id` is open in `backend`'s engine.
     pub fn learn(&self, id: &str, backend: Backend) {
         if !id.is_empty() {
             self.ids.lock().unwrap().insert(id.to_owned(), backend);
@@ -88,9 +67,6 @@ impl Engines {
         self.paths.lock().unwrap().remove(id);
     }
 
-    /// Notebook `id` is at `path`, as an engine that runs says: if it closed with an engine
-    /// before, it's open again. Said by each `open`, `new` and `snapshot` reply, which a
-    /// notification stream that skipped the engine's `notebook_opened` can't lose.
     fn learn_path(&self, id: &str, path: Option<&str>) {
         if let Some(path) = path.filter(|path| !id.is_empty() && !path.is_empty()) {
             self.paths.lock().unwrap().insert(id.to_owned(), path.to_owned());
@@ -98,13 +74,10 @@ impl Engines {
         }
     }
 
-    /// The notebooks that closed because their engine ended, oldest first.
     pub fn closed(&self) -> Vec<Closed> {
         self.closed.lock().unwrap().clone()
     }
 
-    /// The notebook that closed at a path `same` picks opened again, or the user let it go: it's
-    /// no longer closed. Whether there was one.
     pub fn reopened(&self, same: impl Fn(&str) -> bool) -> bool {
         let mut closed = self.closed.lock().unwrap();
         let before = closed.len();
@@ -112,18 +85,10 @@ impl Engines {
         closed.len() != before
     }
 
-    /// Whether `upstream` is still `backend`'s engine: not dropped or replaced.
     pub fn is_current(&self, backend: Backend, upstream: &Arc<dyn Upstream>) -> bool {
         self.part(backend).is_some_and(|now| Arc::ptr_eq(&now, upstream))
     }
 
-    /// `upstream`, another engine than Pluto's, stopped answering: its
-    /// notebooks are gone with it, and the next notebook opened in it starts
-    /// it again. They're kept as `closed`, with why it ended, until each is
-    /// opened again. Nothing if it was already replaced.
-    ///
-    /// Each record is written before its notebook leaves the engine's list and its id is
-    /// forgotten, so a call that no longer finds the notebook open finds why it closed (#357).
     pub fn drop_engine(&self, backend: Backend, upstream: &Arc<dyn Upstream>) {
         let _dropping = self.dropping.lock().unwrap();
         if backend == Backend::Pluto || !self.is_current(backend, upstream) {
@@ -153,7 +118,6 @@ impl Engines {
         eprintln!("┌ Warning: {} notebooks' engine ended: {why}", language(backend));
     }
 
-    /// The reply to one `POST /adapter` call, from the engine it belongs to.
     pub fn adapter(&self, raw: &[u8]) -> io::Result<String> {
         let message: Value = serde_json::from_slice(raw).map_err(|_| io::ErrorKind::InvalidData)?;
         let params = &message["params"];
@@ -176,7 +140,6 @@ impl Engines {
                 if let Some(closed) = self.closed.lock().unwrap().iter().find(|closed| closed.id == id) {
                     return Ok(json!({ "error": closed_error(closed) }).to_string());
                 }
-                // An id no running engine reported: not open, rather than "Julia isn't running".
                 if !self.ids.lock().unwrap().contains_key(id) && !self.has(Backend::Pluto) {
                     let error = format!("notebook_not_found::No notebook with id '{id}' is open. Run list_notebooks to see what's open.");
                     return Ok(json!({ "error": error }).to_string());
@@ -199,12 +162,6 @@ impl Engines {
         }
     }
 
-    /// `snapshot` or `status` of every notebook: the first engine's reply
-    /// (Pluto's, when Julia runs), with the other engines' notebooks added to its own. Each notebook in a snapshot carries
-    /// its engine's `seq`, which only means something within that engine.
-    /// Pluto failing fails the call. Another engine failing is left out, so a
-    /// broken R never hides the Julia notebooks; one that doesn't answer at all
-    /// is dropped with its notebooks.
     fn every(&self, method: &str, raw: &[u8]) -> io::Result<String> {
         let mut whole: Option<Value> = None;
         for (backend, upstream) in self.parts() {
@@ -260,8 +217,6 @@ impl Engines {
     }
 }
 
-/// The engine a notebook at `path` belongs to, by its name alone: the file
-/// may not exist yet. Pluto's for any name no other engine claims.
 pub fn of_path(path: &str) -> Backend {
     match Path::new(path).extension().and_then(|e| e.to_str()) {
         Some("R" | "r") => Backend::Ember,
@@ -270,8 +225,6 @@ pub fn of_path(path: &str) -> Backend {
     }
 }
 
-/// The engine an `open` or `new` goes to: its path's, else the one `engine` names (`new_notebook`
-/// without a path, in a session of that kind), else Pluto's.
 pub fn of_params(params: &Value) -> Backend {
     match params["path"].as_str() {
         Some(path) => of_path(path),
@@ -279,12 +232,10 @@ pub fn of_params(params: &Value) -> Backend {
     }
 }
 
-/// Whether two paths name the same file.
 pub fn same_path(a: &str, b: &str) -> bool {
     a == b || matches!((super::canonical_path(a), super::canonical_path(b)), (Ok(a), Ok(b)) if a == b)
 }
 
-/// What a call on a notebook that closed with its engine answers.
 pub fn closed_error(closed: &Closed) -> String {
     let language = closed.language;
     format!(
@@ -301,8 +252,6 @@ pub fn language(backend: Backend) -> &'static str {
     }
 }
 
-/// Why a notebook of `backend` starting can outlast one call, for the agent: on its open, or as it
-/// leaves safe preview (`allow_execution`), when its packages may need installing too.
 pub fn slow_start(backend: Backend, leaving_preview: bool) -> String {
     match (backend, leaving_preview) {
         (Backend::Pluto, false) => "the first notebook in a new Julia process takes a while to compile".into(),
@@ -336,7 +285,6 @@ mod tests {
         }
     }
 
-    /// An engine that answers from a table and records what it was asked.
     #[derive(Default)]
     struct Fake {
         notebooks: Vec<Value>,
@@ -510,7 +458,6 @@ mod tests {
         assert_eq!(engines.closed(), [closed("e2", "/a/e2.R")], "opened again");
         engines.drop_engine(Backend::Ember, &ember);
         assert_eq!(engines.closed().len(), 1, "dropping it again adds nothing");
-        // R started again lists it, though its stream never said it opened.
         let again: Arc<dyn Upstream> = Arc::new(Fake { notebooks: vec![json!({ "notebook_id": "e9", "path": "/a/e2.R" })], ..Default::default() });
         engines.add(Backend::Ember, again.clone());
         call(&engines, "snapshot", json!({}));
@@ -519,7 +466,6 @@ mod tests {
         engines.add(Backend::Ember, Arc::new(Fake::default()));
         call(&engines, "open", json!({ "path": "/a/e2.R", "run": false }));
         assert!(engines.closed().is_empty(), "and so does an open's reply");
-        // An engine that can't say why.
         let quiet: Arc<dyn Upstream> = Arc::new(Fake { notebooks: vec![json!({ "notebook_id": "e3", "path": "/a/e3.R" })], ..Default::default() });
         engines.add(Backend::Ember, quiet.clone());
         call(&engines, "snapshot", json!({}));
