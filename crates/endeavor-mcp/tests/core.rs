@@ -16,7 +16,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::*;
 
@@ -1828,6 +1828,45 @@ fn a_stop_signal_julia_goes_on_through_is_followed_by_a_shutdown_and_then_a_kill
     assert!(!pid_alive(core.julia_pid));
     assert!(bridge.seen().iter().any(|s| String::from_utf8_lossy(&s.body).contains("endeavor/shutdown")), "it asked Julia to shut down first");
     assert!(!dir.join("runtime.json").exists());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_julia_that_goes_on_through_the_signal_its_dead_core_left_it_is_killed_a_grace_later() {
+    // Julia's SIGTERM from PR_SET_PDEATHSIG can leave it hung, with no core left to escalate (#509).
+    let dir = state_dir("core-died-deaf");
+    std::fs::write(dir.join("deaf"), "").unwrap();
+    let bridge = FakeBridge::start(&dir);
+    let mut core = Core::start_with_env(&dir, &bridge, &[("ENDEAVOR_TEST_STOP_GRACE_SECS", "0.5")]);
+    // SAFETY: plain syscall, on the core alone, as an OOM kill would end it.
+    unsafe { libc::kill(core.process.id() as i32, libc::SIGKILL) };
+    core.exits();
+    let died = Instant::now();
+    wait_for("Julia to be killed", || !pid_alive(core.julia_pid));
+    assert!(died.elapsed() >= Duration::from_millis(400), "it had its grace first: {:?}", died.elapsed());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_julia_that_ends_while_its_core_runs_leaves_no_watcher_behind() {
+    let dir = state_dir("core-julia-ends-watcher");
+    let bridge = FakeBridge::start(&dir);
+    let mut core = Core::start(&dir, &bridge);
+    let julia = core.julia_pid.to_string();
+    // The shell that watches for the core's end, by its arguments (`sh -c <script> sh <pid> <grace>`).
+    let watchers = || {
+        let procs = std::fs::read_dir("/proc").unwrap().filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok());
+        procs.filter(|&pid| {
+            let args = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            let args: Vec<_> = args.split(|&b| b == 0).map(String::from_utf8_lossy).collect();
+            args.len() >= 5 && args[0] == "sh" && args[3] == "sh" && args[4] == julia && pid_alive(pid)
+        }).count()
+    };
+    assert_eq!(watchers(), 1);
+    // SAFETY: plain syscall, on the fake Julia this core started.
+    unsafe { libc::kill(core.julia_pid, libc::SIGKILL) };
+    core.exits();
+    assert_eq!(watchers(), 0, "the watcher ended with Julia");
 }
 
 #[test]

@@ -448,8 +448,37 @@ function page_bundle()
     return Dict{String,Any}("pluto_version" => string(pkgversion(Pluto)), "html" => html)
 end
 
-# How `endeavor/shutdown` ends the process; tests replace it.
-const _SHUTDOWN = Ref{Function}(() -> exit(0))
+# How long `endeavor/shutdown` gives each notebook's process to take its exit, and then
+# its SIGTERM, before Malt kills it. A process busy in a cell can't take the exit until
+# the cell yields, and Malt's own stop at exit waits 15 s for that, one process at a
+# time: longer than the core waits before it signals Julia (#509).
+const _WORKER_STOP_GRACE = Ref(1.0)
+
+"Stop these notebook processes at once, together, each within about `2 * _WORKER_STOP_GRACE[]` s."
+function _stop_workers!(workers)
+    @sync for worker in workers
+        @async try
+            Pluto.Malt.stop(worker; exit_timeout=_WORKER_STOP_GRACE[], term_timeout=_WORKER_STOP_GRACE[])
+        catch e
+            @warn "Couldn't stop a notebook's process" exception = e
+        end
+    end
+end
+
+# The notebook processes that have started. One still starting is left to Malt's stop at exit.
+function _notebook_workers()
+    workers = Pluto.Malt.Worker[]
+    for task in collect(values(Pluto.WorkspaceManager.active_workspaces))
+        (istaskdone(task) && !istaskfailed(task)) || continue
+        worker = fetch(task).worker
+        worker isa Pluto.Malt.Worker && push!(workers, worker)
+    end
+    return workers
+end
+
+# How `endeavor/shutdown` ends the process; tests replace it. Pluto has saved every
+# notebook file, so a notebook's process has nothing left to lose.
+const _SHUTDOWN = Ref{Function}(() -> (_stop_workers!(_notebook_workers()); exit(0)))
 
 """Test helper: bind an in-memory session as the standalone Pluto session."""
 function bind_standalone_session!(sess)

@@ -649,12 +649,21 @@ Next:
   a Ctrl-C had stopped the core.
 - A stop signal to the core (SIGTERM, SIGINT, SIGHUP) asks a ready Julia to shut
   down through its bridge, and passes the signal on only if that fails or Julia
-  still runs 10 s later; 10 s after that it kills Julia. A SIGTERM that reaches
-  Julia while it compiles can hang its exit for good, so before, a stop during a
-  long cell took 12 to 15 s in two tries of three. Now five stops of six took 1.3 to 3.1 s,
-  and one 10.6 s, when the shutdown didn't end Julia and the signal did (#509).
-  A Julia still starting has no bridge yet and gets the signal. The core still
-  ends as the signal would end it.
+  still runs 10 s later; 10 s after that it kills Julia. A second signal is passed
+  straight on. A SIGTERM that reaches Julia while it compiles can hang its exit for
+  good (#509). A Julia still starting has no bridge yet and gets the signal. The
+  core still ends as the signal would end it.
+- The shutdown stops every notebook's process itself, all at once, each within
+  about 2 s (an exit, then SIGTERM, then SIGKILL), before Julia exits. Malt's own
+  stop at exit gives a process busy in a cell 15 s to take its exit, one process at
+  a time, so a stop during a long cell took 12 to 15 s in two tries of three. Now
+  eight stops of eight took 1.3 to 2.7 s.
+- On Linux, when the core dies abruptly (an OOM kill, `kill -9`), Julia gets SIGTERM
+  (`PR_SET_PDEATHSIG`), and a small shell the core started with Julia kills it 10 s
+  later if it still runs. It waits on a pipe only the core holds, so it costs
+  nothing while the core lives and ends with Julia. A notebook's process busy in a
+  cell then goes on until the cell ends, as before. On macOS nothing ends Julia
+  with its core; the next start stops it.
 - Stop on a Julia cell that waits (`sleep`, a download, a lock) stops the cell and keeps the
   notebook's process and its values (#139). On Julia 1.12 a Ctrl+C sent to the process
   never reaches a waiting cell, so Pluto pressed it until Julia ended, which lost every value

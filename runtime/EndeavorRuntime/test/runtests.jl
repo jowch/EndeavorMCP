@@ -667,6 +667,7 @@ end
         list = JSON.json(Dict("jsonrpc" => "2.0", "id" => 1, "method" => "tools/list", "params" => Dict()))
         call(headers) = HTTP.post("http://127.0.0.1:$mcp_port/call", ["Content-Type" => "application/json", headers...], list;
             status_exception=false, readtimeout=5)
+        default_shutdown = EndeavorRuntime._SHUTDOWN[]
         try
             EndeavorRuntime.start_pluto_stack!(; pluto_port, mcp_port, launch_browser=false, http_async=true)
             @test call([]).status == 401
@@ -700,9 +701,28 @@ end
             @test JSON.parse(String(reply.body))["result"] == Dict()
             @test timedwait(() -> isready(shut_down), 5.0) == :ok
         finally
-            EndeavorRuntime._SHUTDOWN[] = () -> exit(0)
+            EndeavorRuntime._SHUTDOWN[] = default_shutdown
             EndeavorRuntime.stop_pluto_stack!()
             EndeavorRuntime.configure_standalone!(; token="")
+        end
+    end
+
+    @testset "shutdown stops a notebook process busy in a cell within seconds" begin
+        # Malt's own stop at exit would wait 15 s for it to take its exit (#509).
+        worker = Pluto.Malt.Worker()
+        try
+            Pluto.Malt.remote_do(worker) do
+                t = time(); s = 0.0
+                while time() - t < 120; s += sin(s); end
+                s
+            end
+            sleep(1)
+            @test Pluto.Malt.isrunning(worker)
+            took = @elapsed EndeavorRuntime._stop_workers!([worker])
+            @test !Pluto.Malt.isrunning(worker)
+            @test took < 2 * EndeavorRuntime._WORKER_STOP_GRACE[] + 3
+        finally
+            Pluto.Malt.isrunning(worker) && kill(worker, Base.SIGKILL)
         end
     end
 
