@@ -378,7 +378,8 @@ hand out the same port twice).
 ### R
 
 R's adapter (`runtime/r/adapter.R`, with Ember) starts the first time an R
-notebook is opened.
+notebook is opened. How it and Ember's install work is in
+[ember-adapter.md](ember-adapter.md).
 
 - **Ember** comes from its r-universe repository, which builds Ember's latest
   main, into a folder of Endeavor's own (one for Endeavor's own R, kept apart

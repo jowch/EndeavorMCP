@@ -1,21 +1,3 @@
-# Install Ember for R notebooks from Ember's r-universe repository, or update
-# it when a newer build is there. The core runs it each time it starts R for an
-# R notebook, before R's adapter:
-#
-#   Rscript --vanilla runtime/r/install.R <folder> <repository>
-#
-# <folder> holds one library per Ember build, named by the first 12 characters
-# of the SHA256 the repository lists for the file (r-universe's PACKAGES has no
-# commit; the installed package's DESCRIPTION has it, as RemoteSha); `deps`, a library
-# with the packages Ember needs that R lacks or can't load; and `ember.dcf`,
-# which names the build in use (Current), the one before it (Previous) and the
-# builds that failed to install or load here (Failed). R's adapter runs with
-# R_LIBS=<folder>/<Current>:<folder>/deps.
-#
-# It exits with 0 when Current is ready: updated, already the newest, or an
-# Ember is installed and the newest couldn't be reached or downloaded. With 3
-# when the newest build failed to install or load and Current is the one before it.
-# With 1 when there's no Ember to use. CRAN is ENDEAVOR_CRAN when set.
 
 args <- commandArgs(TRUE)
 folder <- args[[1]]
@@ -40,13 +22,6 @@ installed <- function(build) nzchar(build) && dir.exists(file.path(folder, build
 state <- read_state()
 failed <- strsplit(state$Failed, " ", fixed = TRUE)[[1]]
 
-# The newest build, from the first of these places that lists one: a binary
-# where r-universe has one for this platform and R, else the source package.
-# Its row of the index, which the download uses too, so it gets the build
-# chosen here even if the index changes meanwhile.
-# NULL when ember isn't listed (or a repository didn't answer, which R only
-# warns about), NA when R couldn't ask.
-# `reached` when one of them answered with an index.
 options(timeout = 20)
 reached <- FALSE
 newest <- function(where) tryCatch({
@@ -61,16 +36,9 @@ binary <- .Platform$pkgType
 places <- list(list(contriburl = contrib.url(universe, "source"), type = "source"))
 if (binary != "source") places <- c(list(list(contriburl = contrib.url(universe, binary), type = binary)), places)
 if (binary != "source" && startsWith(R.version$platform, "aarch64-apple-darwin")) {
-  # Without the developer tools, r-universe's source can't be built here. When
-  # its binary can't be reached and an Ember is installed, trying the source
-  # would only fail and say the newest Ember didn't work, so keep the installed one.
   tools_here <- suppressWarnings(system2("xcode-select", "-p", stdout = FALSE, stderr = FALSE)) == 0
   if (installed(state$Current) && !tools_here) places <- Filter(function(where) where$type != "source", places)
 }
-# Where outbound connections hang rather than being refused, as on some compute
-# nodes, each place waits out the timeout, and R would start that much later each
-# time. So when none answered within the last hour, `unreachable` says so, and
-# with an Ember installed R starts with it without asking again (#90).
 unreachable <- file.path(folder, "unreachable")
 if (installed(state$Current) && file.exists(unreachable) && difftime(Sys.time(), file.mtime(unreachable), units = "hours") < 1) {
   message("Ember's repositories didn't answer within the last hour; R notebooks use the installed Ember, ", state$Current, ".")
@@ -100,9 +68,6 @@ if (name %in% failed && installed(state$Current)) {
 }
 
 part <- file.path(folder, paste0(name, ".part.", Sys.getpid()))
-# Why not. `blame` when it's this build's fault: it isn't tried again until
-# there's a newer one, and the core tells the agent. Otherwise (no network, or a
-# package Ember needs didn't install) the next start tries again.
 fail <- function(why, blame = TRUE) {
   message(why)
   unlink(part, recursive = TRUE)
@@ -118,11 +83,6 @@ fail <- function(why, blame = TRUE) {
   quit(status = 1)
 }
 
-# Ember's dependencies, all the way down, that this R can't load: missing ones,
-# ones in a library that were built for another R, and ones that load but are
-# older than Ember or a package in the tree needs (#90): `install.packages`
-# brings a newer one along only for the packages it installs. They go into `deps`, which
-# comes first, so a broken or old copy elsewhere is shadowed.
 options(timeout = max(600, getOption("timeout")), Ncpus = max(1L, parallel::detectCores() - 1L))
 dir.create(deps, showWarnings = FALSE)
 .libPaths(c(deps, .libPaths()))
@@ -131,8 +91,6 @@ direct <- unique(unlist(lapply(c("Depends", "Imports", "LinkingTo"), function(fi
 on_cran <- tryCatch(available.packages(repos = cran), error = function(e) fail(paste("Couldn't reach CRAN:", conditionMessage(e)), blame = FALSE))
 tree <- unique(c(direct, unlist(tools::package_dependencies(direct, db = on_cran, which = c("Depends", "Imports", "LinkingTo"), recursive = TRUE))))
 tree <- setdiff(tree, c("R", rownames(installed.packages(priority = "base"))))
-# The lowest version of each package that Ember and the tree, as CRAN lists
-# it, ask for with `>=` or `>`.
 wanted <- list()
 needs <- function(field) {
   if (is.na(field)) return()
@@ -148,19 +106,12 @@ for (field in c("Depends", "Imports", "LinkingTo")) {
   needs(build[[field]])
   for (pkg in intersect(tree, rownames(on_cran))) needs(on_cran[pkg, field])
 }
-# The version R would load, read from its DESCRIPTION: a namespace loaded
-# here may be an older copy than the one just installed.
 too_old <- function(pkg) {
   if (is.null(wanted[[pkg]])) return(FALSE)
   found <- suppressWarnings(packageDescription(pkg, lib.loc = .libPaths(), fields = "Version"))
   !is.na(found) && package_version(found) < wanted[[pkg]]
 }
 loads <- function(pkg) !too_old(pkg) && suppressWarnings(requireNamespace(pkg, quietly = TRUE))
-# Which of `pkgs` don't load in a new R with `lib` as its library path, as R's
-# adapter will start. Not checked in this process: the checks above loaded
-# whatever copies they found, and an old one stays loaded even once a newer
-# copy is installed into `deps`, so a package that needs the newer one would
-# fail here but load in the adapter (#216). R's reasons go to stderr.
 fails_fresh <- function(pkgs, lib) {
   script <- tempfile("ember-check", fileext = ".R")
   on.exit(unlink(script))
@@ -172,7 +123,6 @@ fails_fresh <- function(pkgs, lib) {
     "})",
     "cat(\"checked\\n\")"), script)
   out <- suppressWarnings(system2(file.path(R.home("bin"), "Rscript"), c("--vanilla", shQuote(script)), stdout = TRUE))
-  # An R that ended before it was through counts every package as failed.
   if (!("checked" %in% trimws(out))) return(pkgs)
   intersect(pkgs, sub("^failed ", "", trimws(grep("^failed ", out, value = TRUE))))
 }
@@ -187,7 +137,6 @@ if (length(missing)) {
 message(if (installed(state$Current)) paste("Updating Ember for R notebooks from", state$Current, "to", name) else paste("Installing Ember", name, "for R notebooks"))
 unlink(part, recursive = TRUE)
 dir.create(part)
-# Downloaded first, so a download that fails isn't counted against the build.
 downloads <- tempfile("ember")
 dir.create(downloads)
 file <- tryCatch(download.packages("ember", downloads, available = listed, contriburl = where$contriburl, type = type, quiet = TRUE)[1, 2], error = function(e) {
@@ -195,8 +144,6 @@ file <- tryCatch(download.packages("ember", downloads, available = listed, contr
   NA
 })
 if (is.na(file)) fail(paste("Couldn't download Ember", name, "from", where$contriburl), blame = FALSE)
-# The file is the build the index lists, not one cut short or changed on the
-# way. tools::sha256sum came with R 4.5; before it, coreutils' sha256sum.
 sha256_of <- function(file) {
   if (exists("sha256sum", asNamespace("tools"))) return(unname(tools::sha256sum(file)))
   if (!nzchar(Sys.which("sha256sum"))) return(NA)
@@ -207,22 +154,17 @@ if (!is.na(got) && got != build[["SHA256"]]) fail(paste0("The download of Ember 
 install.packages(file, lib = part, repos = NULL, type = type)
 loaded <- length(fails_fresh("ember", c(part, .libPaths()))) == 0
 if (!loaded || !dir.exists(file.path(part, "ember"))) fail(paste("Ember", name, "didn't install or load; R's messages are above."))
-# Another start may have installed it first.
 if (!file.rename(part, file.path(folder, name))) unlink(part, recursive = TRUE)
 message("Installed Ember ", name, " (commit ", packageDescription("ember", lib.loc = file.path(folder, name))$RemoteSha, ") for R notebooks")
 
 state <- read_state()
 if (state$Current != name) {
-  # The build that stops being Previous is dated from now, for the cleanup below.
   if (nzchar(state$Previous) && state$Previous != name) invisible(Sys.setFileTime(file.path(folder, state$Previous), Sys.time()))
   state$Previous <- if (installed(state$Current)) state$Current else ""
   state$Current <- name
   write_state(state)
 }
 
-# Builds that are neither Current nor Previous, a week after they stopped being
-# either: a runtime started before then may still have one loaded. And
-# unfinished installs a day old.
 others <- setdiff(list.files(folder), c("deps", "ember.dcf", state$Current, state$Previous))
 age <- difftime(Sys.time(), file.mtime(file.path(folder, others)), units = "days")
 unlink(file.path(folder, others[!grepl(".", others, fixed = TRUE) & age > 7]), recursive = TRUE)
