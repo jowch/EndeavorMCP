@@ -55,6 +55,9 @@ const DEPENDENT_TEXT_MAX: usize = 200;
 /// others; `read_cell` has them. A `markdown_in_file` note is about the cell's own code, which
 /// that run didn't change, so it is said only when the cell itself was asked for.
 const QUIET_NOTES: [&str; 3] = ["printed", "logged_info", "markdown_in_file"];
+/// The notes that come from a cell's code rather than its last run: while an edited cell waits
+/// to run, they stay `notes` in the edit's reply, and the others become `previous_notes`.
+const CODE_NOTES: [&str; 1] = ["markdown_in_file"];
 /// How many notes a run's reply carries, and how many bytes of them: a run of every cell
 /// (`run_all_cells`) would otherwise send back what each one printed.
 const RUN_NOTES_MAX: usize = 10;
@@ -810,6 +813,16 @@ impl Call<'_> {
             for key in ["output", "errored", "error", "notes"] {
                 if let Some(previous) = out.remove(key) {
                     out.insert(format!("previous_{key}"), previous);
+                }
+            }
+            // A note on the cell's code is about the code the agent just sent, not the last run (#449).
+            if let Some(Value::Array(previous)) = out.remove("previous_notes") {
+                let (now, before): (Vec<Value>, Vec<Value>) = previous.into_iter().partition(|n| n.as_str().is_some_and(|n| CODE_NOTES.iter().any(|kind| n.starts_with(&format!("{kind}::")))));
+                if !now.is_empty() {
+                    out.insert("notes".into(), Value::Array(now));
+                }
+                if !before.is_empty() {
+                    out.insert("previous_notes".into(), Value::Array(before));
                 }
             }
         }
