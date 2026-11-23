@@ -576,19 +576,28 @@ end
         first_set = only(filter(endswith(".ji"), readdir(dir)))
         @test success(julia("using EndeavorRuntimeWarm", new))
         @test length(filter(endswith(".ji"), readdir(dir))) == 2
-        # While both folders are there, both sets are kept.
+        # While both folders are there, both sets are kept, and each is marked as seen.
         @test endeavor_drop_unreadable_caches(depot; log=devnull) == String[]
+        @test count(endswith(ENDEAVOR_USED_EXT), readdir(dir)) == 2
         rm(old; recursive=true)
         stem = splitext(first_set)[1]
         mkpath(joinpath(dir, stem * ".dylib.dSYM"))
-        removed = endeavor_drop_unreadable_caches(depot; log=devnull)
+        # Its source may still be on another machine that shares this depot (#528): a set seen
+        # lately is kept.
+        @test endeavor_drop_unreadable_caches(depot; log=devnull) == String[]
+        @test isfile(joinpath(dir, first_set))
+        later = time() + ENDEAVOR_UNUSED_AGE + 60
+        removed = endeavor_drop_unreadable_caches(depot; log=devnull, now=later)
         @test !isempty(removed) && all(p -> startswith(basename(p), stem * "."), removed)
         @test !any(n -> startswith(n, stem * "."), readdir(dir))
         @test length(filter(endswith(".ji"), readdir(dir))) == 1
         @test success(julia(check, new))
-        # A file that isn't a compiled set, by a .ji's name, is kept.
+        # A file that isn't a compiled set, by a .ji's name, is kept, and a mark whose set Julia
+        # removed goes without a word.
         write(joinpath(dir, "junk.ji"), "x")
-        @test endeavor_drop_unreadable_caches(depot; log=devnull) == String[]
+        write(joinpath(dir, "evicted" * ENDEAVOR_USED_EXT), "")
+        @test endeavor_drop_unreadable_caches(depot; log=devnull, now=later) == String[]
+        @test isfile(joinpath(dir, "junk.ji")) && !isfile(joinpath(dir, "evicted" * ENDEAVOR_USED_EXT))
     end
 
     @testset "lifecycle: a compiled file of ours that can't be read is removed, then compiled again" begin

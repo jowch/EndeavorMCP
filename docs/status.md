@@ -593,11 +593,11 @@ Next:
   when it's done. The same check removes a native image of those packages with
   no `.ji` beside it, once it is an hour old: Julia never uses or removes one
   (#382). Each runtime folder (one per build) compiles its own set; once the
-  folder is gone (a day after its last use), the next start removes the set
-  whose `.ji` names its source, so old sets don't pile up to Julia's limit of
-  10 per package. A cluster whose cache folder is per node but whose depot is
-  shared would remove another node's set, and that node compiles it again
-  (#528).
+  folder is gone (a day after its last use), a start removes the set whose
+  `.ji` names its source, so old sets don't pile up to Julia's limit of 10 per
+  package. Each start marks the sets whose source it sees, and a set is removed
+  only after 3 days with no mark, so a cluster whose cache folder is per node
+  but whose depot is shared keeps the sets another node still uses (#528).
 - Julia starts only when it's needed (#76). With `--julia-when-needed` the
   core writes `runtime.json` and answers at once, finds Julia itself (and
   downloads it only with `--install-julia`) the first time a Julia notebook is
