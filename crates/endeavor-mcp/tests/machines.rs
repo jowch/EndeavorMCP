@@ -733,8 +733,11 @@ fn a_cluster_jobs_core_without_julia_gets_the_login_nodes_on_the_users_yes() {
     wait_for("the job's runtime", || front.ok("session_status", json!({})).get("browser_url").is_some());
     let notebook = place.project.join("a.jl");
     std::fs::write(&notebook, "### A Pluto.jl notebook ###\n").unwrap();
+    // A yes before any notebook needed Julia (to the helper, say) doesn't get one.
+    let used = front.ok("use_machine", json!({ "machine": "hpc", "install": true }));
+    assert_eq!(used["state"], "ready", "{used}");
     let (failed, said) = front.call("open_notebook", json!({ "path": notebook.display().to_string() }));
-    assert!(failed && said["error"] == "julia_not_found", "{said}");
+    assert!(failed && said["error"] == "julia_not_found", "the core wasn't handed a Julia: {said}");
     assert!(common::julia_pids(&place.state).is_empty());
 
     let used = front.ok("use_machine", json!({ "machine": "hpc", "install": true }));

@@ -105,12 +105,18 @@ fn askpass_program() -> Result<std::path::PathBuf, String> {
     crate::this_program()
 }
 
-/// The user agreed to Julia for a cluster job's runtime (`runtime`): find Julia on `name`'s login node,
-/// downloading Endeavor's own there if there is none, waiting for the download while the call has time,
-/// and hand its path to the job's core, which starts it when a notebook next needs it. A note for the
-/// result when it isn't done.
+/// The user agreed to an install for a cluster job's runtime (`runtime`). If the job's core looked for
+/// Julia and found none, find it on `name`'s login node, downloading Endeavor's own there if there is
+/// none, waiting for the download while the call has time, and hand its path to the core, which starts
+/// it when a notebook next needs it. A yes that was for the helper alone downloads nothing. A note for
+/// the result when it isn't done.
 fn login_julia(provider: &dyn Provider, name: &str, runtime: &RuntimeInfo, deadline: &Deadline) -> Option<String> {
     let again = "Call `use_machine` again with `install: true` in a minute to finish; until then a Julia notebook there can't start.";
+    match crate::bridge_rpc(runtime.port, &runtime.token, "endeavor/julia_status", json!({})) {
+        Ok(reply) if reply["result"]["state"] == "failed" && reply["result"]["code"] == "julia_not_found" => {}
+        Ok(_) => return None,
+        Err(e) => return Some(format!("Couldn't ask Endeavor on {name} whether it has Julia ({e}). Calling `use_machine` again with `install: true` tries again.")),
+    }
     loop {
         let path = match provider.files(wire::files::Request::Julia { download: true }, deadline.left()) {
             Some(Ok(wire::files::Reply::Julia { julia: wire::files::JuliaState::Ready { path, .. } })) => path,
@@ -122,7 +128,7 @@ fn login_julia(provider: &dyn Provider, name: &str, runtime: &RuntimeInfo, deadl
                 return Some(format!("Endeavor is getting Julia on {name}'s login node ({step}). {again}"));
             }
             Some(Ok(wire::files::Reply::Error { message })) => return Some(format!("Couldn't get Julia on {name}'s login node: {message} Calling `use_machine` again with `install: true` tries again.")),
-            Some(Ok(other)) => return Some(format!("{name}'s helper answered the question about Julia with {other:?}.")),
+            Some(Ok(_)) => return Some(format!("{name}'s helper gave an answer about Julia that this Endeavor doesn't know, so Julia wasn't set up there. Tell the user; `stop_machine` and `use_machine` again start a new job.")),
             Some(Err(e)) => return Some(format!("Couldn't ask {name} about Julia ({e}). Calling `use_machine` again with `install: true` tries again.")),
             None => return Some(format!("{name} didn't say about Julia in time. {again}")),
         };
