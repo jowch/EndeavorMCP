@@ -1011,17 +1011,22 @@ fn the_runtime_end_to_end() {
         let mut seen = String::new();
         let mut buffer = [0u8; 8192];
         let deadline = Instant::now() + Duration::from_secs(60);
-        while !seen.contains(r#""idle_stopped":[{"#) {
-            assert!(Instant::now() < deadline, "no idle stop within a minute; events:\n{seen}");
+        // Another open notebook can go idle a check before this one, so wait for an event that has this one.
+        let stopped_here = |line: &str| -> Option<Value> {
+            let state: Value = serde_json::from_str(line.strip_prefix("data: ")?).ok()?;
+            let entry = state["idle_stopped"].as_array()?.iter().find(|e| e["path"] == path.as_str())?.clone();
+            Some(entry)
+        };
+        let entry = loop {
+            if let Some(entry) = seen.lines().find_map(stopped_here) {
+                break entry;
+            }
+            assert!(Instant::now() < deadline, "{path} not stopped for being idle within a minute; events:\n{seen}");
             let n = events.read(&mut buffer).unwrap();
             assert!(n > 0, "the events stream ended:\n{seen}");
             seen.push_str(&String::from_utf8_lossy(&buffer[..n]));
-        }
-        let last = seen.lines().rev().find(|l| l.starts_with("data: ") && l.contains("idle_stopped")).unwrap();
-        let state: Value = serde_json::from_str(&last["data: ".len()..]).unwrap();
-        let stopped: Vec<&str> = state["idle_stopped"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap()).collect();
-        assert!(stopped.contains(&path.as_str()), "{path} stopped for being idle: {state}");
-        assert_eq!(state["idle_stopped"][0]["hours"], 0, "{state}");
+        };
+        assert_eq!(entry["hours"], 0, "{entry}");
     });
 
     rt.stop();

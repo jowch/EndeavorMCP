@@ -2863,7 +2863,7 @@ fn close_notebook_ends_its_own_notebook_and_no_other() {
     let other = format!("{}-other.jl", paths[0].trim_end_matches(".jl"));
     for (tool, args) in [("new_notebook", json!({})), ("new_notebook", json!({ "path": &other })), ("open_notebook", json!({ "path": &paths[1] }))] {
         let refused = s.call("a", tool, args).unwrap_err();
-        assert!(refused.starts_with("ArgumentError: one_notebook::") && refused.contains("You closed it") && refused.contains("open_notebook with its path opens it again"), "{tool}: {refused}");
+        assert!(refused.starts_with("ArgumentError: one_notebook::") && refused.contains("You closed it") && refused.contains("Open it again now with open_notebook and its path, so the user's notebook isn't left closed"), "{tool}: {refused}");
     }
     // An engine that can't say what's open keeps the mark: the next call is refused all the same.
     s.engine.with(&theirs, |nb| nb.broken = true);

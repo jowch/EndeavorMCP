@@ -1407,7 +1407,7 @@ impl Notebooks {
                 self.seen_open(owner);
             }
             let closed = if open == Some(false) && self.state.lock().unwrap().closed_own.contains(owner) {
-                " You closed it, and closing it doesn't free the session for another: open_notebook with its path opens it again."
+                " You closed it, and closing it doesn't free the session for another. Open it again now with open_notebook and its path, so the user's notebook isn't left closed, and go on there."
             } else {
                 ""
             };
