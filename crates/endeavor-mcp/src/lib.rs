@@ -227,10 +227,12 @@ pub(crate) fn which_version(theirs: Option<u32>, ours: Option<u32>) -> &'static 
 /// What the agent is told about a runtime on `place` that another build started and that doesn't offer this
 /// build's interface, whose core offers `interface`; `machine` is the id `stop_machine` and `use_machine`
 /// take, and `open` a sentence on its open notebooks, if any. No build keys: an agent passes this on to the
-/// user, to whom they mean nothing.
+/// user, to whom they mean nothing. As in `no_r_text`'s callers, the way to stop it comes only after the
+/// user's yes: small models take a named call as a recipe, and a kept runtime's open notebook is often
+/// this session's own, which `stop_machine`'s check of other sessions doesn't count (#239).
 pub(crate) fn other_version_text(place: &str, machine: &str, interface: Option<u32>, open: &str) -> String {
     format!(
-        "Endeavor on {place} was started by {} version, and it keeps running as it is.{open} Some notebook tools may not work as described, or may be refused. If that happens, ask the user whether to stop it, since stopping it closes its notebooks. To stop it, call `stop_machine` with machine \"{machine}\"; then `use_machine` with machine \"{machine}\" starts this version.",
+        "Endeavor on {place} was started by {} version, and it keeps running as it is.{open} Some notebook tools may not work as described, or may be refused. If that happens, don't stop it yourself: tell the user, and ask whether to restart it, which closes the notebooks open in it. Only if the user says yes, call `stop_machine` with machine \"{machine}\", then `use_machine` with machine \"{machine}\" to start this version.",
         which_version(interface, Some(core::INTERFACE))
     )
 }

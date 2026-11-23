@@ -1576,7 +1576,7 @@ fn a_runtime_of_another_build_with_a_notebook_open_is_kept_and_the_agent_is_told
     assert!(!failed && said[0][0]["path"] == path.as_str(), "{said:?}");
     let notice = said[1].as_str().unwrap_or_default();
     assert!(notice.starts_with("Note: Endeavor on this computer was started by an older version, and it keeps running as it is. It has 1 notebook open. Some notebook tools"), "{notice}");
-    assert!(notice.contains("`stop_machine` with machine \"local\"; then `use_machine` with machine \"local\" starts this version."), "{notice}");
+    assert!(notice.contains("don't stop it yourself: tell the user") && notice.contains("Only if the user says yes, call `stop_machine` with machine \"local\", then `use_machine` with machine \"local\" to start this version."), "{notice}");
     assert!(!notice.contains(ANOTHER_BUILD), "{notice}");
     second.ok("open_notebook", json!({ "path": path }));
     let (_, again) = second.contents("list_notebooks", json!({}));

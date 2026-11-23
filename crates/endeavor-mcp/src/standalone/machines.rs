@@ -84,6 +84,8 @@ fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>)
         not_connected: |name| format!("Endeavor isn't connected to {name}. Call use_machine to use it again."),
         // The plugin's runs aren't held for the user's answer by any runtime (it sends no policy): an old one is no worse.
         no_run_gate: None,
+        // The front tells its agent of another build's runtime itself (`Relay::decorate`), with `stop_machine`.
+        tell_other_build: false,
     };
     Session::new(config)
 }

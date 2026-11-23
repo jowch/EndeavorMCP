@@ -10,7 +10,9 @@
 //! runtime is, and while the runtime is gone.
 
 use std::io::{self, BufRead, BufReader, ErrorKind, Write};
+use std::collections::HashSet;
 use std::net::TcpStream;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -42,6 +44,19 @@ impl From<String> for Picture {
     fn from(png: String) -> Picture {
         Picture { png, cut: None }
     }
+}
+
+/// What the agent is told of a runtime from another build that doesn't offer this build's interface
+/// (`serve_guarded`). The plugin's front tells its agent once, and in every `session_status`
+/// (`Relay::decorate`); the app's agent had only the refusal of an R notebook's path (#239).
+pub struct Older<'a> {
+    /// A refusal of an R notebook's path for want of R notebooks (`mcp::refuses_r_for_want_of_it`),
+    /// which says only that the path must end in .jl, gets this instead.
+    pub no_r: &'a dyn Fn() -> String,
+    /// Added to each session's first tool result, and as `other_version` to every `session_status`.
+    pub notice: Option<String>,
+    /// The sessions told already, by key, for as long as this runtime is the one relayed to.
+    pub told: &'a Mutex<HashSet<String>>,
 }
 
 /// The agent's tool that asks the user to restart the runtime, which the client answers (`AskRestart`).
@@ -145,8 +160,7 @@ pub(crate) fn with_restart_tool(result: &Value) -> Option<Value> {
 /// other messages) passes through as it is, and the requests after it on the
 /// same connection are checked the same way. With `snapshot`, a `view_cell_output`
 /// the runtime has no picture for gets the snapshot instead (`relay_result`). With
-/// `no_r`, a runtime's refusal of an R notebook's path for want of R notebooks
-/// (`mcp::refuses_r_for_want_of_it`), which says only that the path must end in .jl, gets its text instead.
+/// `older`, the runtime is another build's, and the agent is told so (`Older`).
 /// With `restart` (the client's hook and the place's name), `tools/list` gets `request_restart`, and
 /// a call to it is answered here (`restart_call`): the runtime never sees it.
 pub fn serve_guarded(
@@ -154,7 +168,7 @@ pub fn serve_guarded(
     upstream: TcpStream,
     refuse: &dyn Fn(&str, &str, &Value) -> Option<String>,
     snapshot: Option<&Pictures>,
-    no_r: Option<&dyn Fn() -> String>,
+    older: Option<&Older>,
     restart: Option<(&AskRestart, &str)>,
 ) -> io::Result<()> {
     let mut client = wire::Shared::new(client);
@@ -198,18 +212,21 @@ pub fn serve_guarded(
             let call = message["method"] == "tools/call" && !message["id"].is_null();
             let (tool, arguments) = (params["name"].as_str().unwrap_or_default(), params.get("arguments").unwrap_or(&Value::Null));
             let view = snapshot.filter(|_| call && tool == "view_cell_output");
-            let no_r = no_r.filter(|_| call && crate::mcp::names_r_notebook(tool, arguments));
+            let no_r = older.map(|o| o.no_r).filter(|_| call && crate::mcp::names_r_notebook(tool, arguments));
             let list = restart.is_some() && message["method"] == "tools/list" && !message["id"].is_null();
+            // Only the calls that get the notice are read whole: a call that waits on the user keeps its stream.
+            let notice = older.and_then(|o| o.notice.as_deref().map(|notice| (o, notice))).filter(|(o, _)| call && (tool == "session_status" || !o.told.lock().unwrap().contains(&session)));
             request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Transfer-Encoding") && !name.eq_ignore_ascii_case("Content-Length"));
             request.headers.push(("Content-Length".into(), body.len().to_string()));
-            if view.is_some() || no_r.is_some() || list {
+            let whole = view.is_some() || no_r.is_some() || list || notice.is_some();
+            if whole {
                 // Only a call that waits on the user streams its answer; this keeps the answer one JSON body even so.
                 request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Accept"));
                 request.headers.push(("Accept".into(), "application/json".into()));
             }
             request.write_to(&mut to_runtime)?;
             to_runtime.write_all(&body)?;
-            let instead = |result: &Value| -> Option<Value> {
+            let replaced = |result: &Value| -> Option<Value> {
                 if list {
                     return with_restart_tool(result);
                 }
@@ -223,7 +240,13 @@ pub fn serve_guarded(
                 let no_r = no_r.filter(|_| crate::mcp::refuses_r_for_want_of_it(tool, arguments, result))?;
                 Some(tool_error(&no_r(), false))
             };
-            if view.is_some() || no_r.is_some() || list {
+            let instead = |result: &Value| -> Option<Value> {
+                let Some((older, notice)) = notice else { return replaced(result) };
+                let mut result = replaced(result).unwrap_or_else(|| result.clone());
+                told_of_older(&mut result, tool, &session, older, notice);
+                Some(result)
+            };
+            if whole {
                 if !relay_result(&request, &mut client, &mut from_runtime, &instead)? {
                     return Ok(());
                 }
@@ -276,6 +299,24 @@ fn closed(socket: &TcpStream) -> bool {
     closed
 }
 
+/// `result`, the answer to the agent's call to `tool` in `session`, with what it is told of an older
+/// runtime: `notice` as `other_version` in a `session_status` that worked, and as a note after the
+/// first tool result of each session.
+fn told_of_older(result: &mut Value, tool: &str, session: &str, older: &Older, notice: &str) {
+    if tool == "session_status"
+        && result["isError"] != true
+        && let Some(Value::Object(mut fields)) = result["content"][0]["text"].as_str().and_then(|text| serde_json::from_str(text).ok())
+    {
+        fields.insert("other_version".into(), notice.into());
+        result["content"][0]["text"] = to_json(&Value::Object(fields)).into();
+    }
+    if let Some(content) = result["content"].as_array_mut()
+        && older.told.lock().unwrap().insert(session.to_owned())
+    {
+        content.push(json!({ "type": "text", "text": format!("Note: {notice}") }));
+    }
+}
+
 /// Pass on the runtime's answer to a tool call, unless `instead` gives a result in place of the
 /// runtime's: then the answer is that. Whether the client connection can carry another request.
 fn relay_result(request: &Head, client: &mut wire::Shared, from_runtime: &mut BufReader<wire::Shared>, instead: &dyn Fn(&Value) -> Option<Value>) -> io::Result<bool> {
@@ -312,6 +353,7 @@ mod tests {
     use super::*;
     use std::io::Read;
     use std::net::TcpListener;
+    use std::sync::Arc;
 
     /// A runtime that answers every request with what it was sent, and an
     /// upgrade with `101` and then an echo, and a client connected to it
@@ -551,8 +593,12 @@ mod tests {
 
     /// A runtime from before R notebooks: it answers a new or opened notebook's path that doesn't end in
     /// .jl as such a core did, and any other call with an empty list. A client connected to it through
-    /// `serve_guarded`, with `no_r` if `older`.
-    fn without_r(older: bool) -> TcpStream {
+    /// `serve_guarded`, as another build's runtime if `older_runtime`, which with `notice` the agent is told of.
+    fn without_r(older_runtime: bool) -> TcpStream {
+        without_r_told(older_runtime, None, Arc::default())
+    }
+
+    fn without_r_told(older_runtime: bool, notice: Option<&'static str>, told: Arc<Mutex<HashSet<String>>>) -> TcpStream {
         let runtime = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = runtime.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -563,7 +609,9 @@ mod tests {
                 let body = http::read_body(&mut reader, request.request_body().unwrap()).unwrap();
                 let message: Value = serde_json::from_slice(&body).unwrap();
                 let path = message["params"]["arguments"]["path"].as_str().unwrap_or_default();
-                let result = if path.is_empty() || path.ends_with(".jl") {
+                let result = if message["params"]["name"] == "session_status" {
+                    json!({ "content": [{ "type": "text", "text": "{\"pluto\":\"running\"}" }], "isError": false })
+                } else if path.is_empty() || path.ends_with(".jl") {
                     json!({ "content": [{ "type": "text", "text": "[]" }], "isError": false })
                 } else {
                     tool_error(&format!("ArgumentError: invalid_path::Notebook path must end in .jl: '{path}'"), false)
@@ -578,7 +626,8 @@ mod tests {
         let upstream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         std::thread::spawn(move || {
             let no_r = || "unsupported::No R here; restart it.".to_owned();
-            let _ = serve_guarded(accepted, upstream, &|_, _, _| None, None, older.then_some(&no_r as &dyn Fn() -> String), None);
+            let older = Older { no_r: &no_r, notice: notice.map(str::to_owned), told: &told };
+            let _ = serve_guarded(accepted, upstream, &|_, _, _| None, None, older_runtime.then_some(&older), None);
         });
         client
     }
@@ -601,6 +650,33 @@ mod tests {
 
         let mut client = without_r(false);
         assert_eq!(call_tool(&mut client, "new_notebook", "/work/a.R")["message"], "Notebook path must end in .jl: '/work/a.R'", "a runtime of this build's interface answers as it does");
+    }
+
+    /// The whole result of a call to `tool` with `path` from `session`.
+    fn call_from(client: &mut TcpStream, session: &str, tool: &str, path: &str) -> Value {
+        let call = json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": { "name": tool, "arguments": { "path": path } } }).to_string();
+        let reply: Value = serde_json::from_str(post(client, "/mcp", session, &call).strip_prefix("200 ").unwrap()).unwrap();
+        reply["result"].clone()
+    }
+
+    #[test]
+    fn each_session_is_told_once_of_another_builds_runtime_and_session_status_says_it_every_time() {
+        let told = Arc::default();
+        let mut client = without_r_told(true, Some("Endeavor on lab was started by an older version."), Arc::clone(&told));
+        let first = call_from(&mut client, "7", "new_notebook", "/work/a.jl");
+        assert_eq!(first["content"][0]["text"], "[]", "the runtime's answer stays first");
+        assert_eq!(first["content"][1]["text"], "Note: Endeavor on lab was started by an older version.");
+        assert_eq!(call_from(&mut client, "7", "new_notebook", "/work/b.jl")["content"].as_array().unwrap().len(), 1, "once per session");
+        let status = call_from(&mut client, "7", "session_status", "");
+        let fields: Value = serde_json::from_str(status["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(fields, json!({ "pluto": "running", "other_version": "Endeavor on lab was started by an older version." }), "every time");
+        assert_eq!(status["content"].as_array().unwrap().len(), 1, "with no second note");
+        let other = call_from(&mut client, "8", "new_notebook", "/work/c.R");
+        assert_eq!((other["isError"].clone(), other["content"][1]["text"].as_str().map(|t| t.starts_with("Note: "))), (json!(true), Some(true)), "another session is told too, after a refusal it explains");
+        assert_eq!(other["content"][0]["text"], json!(tool_error("unsupported::No R here; restart it.", false)["content"][0]["text"]));
+        // A new connection of a session told already, to the same runtime: not again.
+        let mut again = without_r_told(true, Some("Endeavor on lab was started by an older version."), told);
+        assert_eq!(call_from(&mut again, "7", "new_notebook", "/work/d.jl")["content"].as_array().unwrap().len(), 1);
     }
 
     /// A runtime that answers `tools/list` with one tool and anything else with what it was sent,
