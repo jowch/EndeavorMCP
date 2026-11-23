@@ -443,7 +443,9 @@ Next:
   `app = marimo.App(`). The core starts Python notebooks' adapter
   (`runtime/marimo/adapter.py`) through uv the first time one is opened or made,
   drives it with R's protocol (`notebooks/r.rs`), serves marimo's page at
-  `/marimo/` (not its terminal or file listings), and stops it on exit. marimo
+  `/marimo/` (not its terminal or file listings), and stops it on exit. Its first
+  start may download Python and marimo: a call waits up to 30 s of it, then
+  answers `python_installing`, and the same call again waits on (#354). marimo
   runs every notebook in its own uv environment from the notebook's header; a new
   notebook's header pins marimo and an `exclude-newer` package date, and a
   package a run imports is installed and written there at its exact version.
@@ -613,7 +615,7 @@ Next:
   name a client asks a runtime for (`wire::ENGINE_PLUTO`, a string) is still
   a string; it becomes `Backend` later.
 - A tool call that finds something still starting answers as a normal result, not an
-  error, keeping its code (`julia_starting`, `r_installing`, `notebook_opening`), and so
+  error, keeping its code (`julia_starting`, `r_installing`, `python_installing`, `notebook_opening`), and so
   does a machine's runtime that is starting or queued (#105). `open_notebook` and
   `new_notebook` wait at most what is left of the call's 45 s, Julia's start included;
   an open that takes longer goes on, the call answers `notebook_opening`, and the same
