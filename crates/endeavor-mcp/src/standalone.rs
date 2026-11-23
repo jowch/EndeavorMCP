@@ -1361,6 +1361,7 @@ impl Relay {
             rewritten = to_json(&call);
             line = &rewritten;
         }
+        let crop_call = tool.as_deref() == Some("notebook_crop") || (tool.as_deref() == Some("view_cell_output") && message["params"]["arguments"].get("crop").is_some_and(|crop| !crop.is_null()));
         // These two use a runtime that is running, and start none.
         let need = match tool.as_deref() {
             Some("session_status") => Need::Peek,
@@ -1372,6 +1373,18 @@ impl Relay {
                 Ok(route) => route,
                 Err(unready) => return self.unready(&message, tool.as_deref(), unready),
             };
+            // This build lists a box's picture, but a runtime an older version started, kept because a
+            // notebook is open in it (runtime::replaces), doesn't have it: say so rather than relay its
+            // "not an argument".
+            if crop_call && let Some(older) = self.held(&target).and_then(|provider| match provider.status().state {
+                crate::client::State::Ready(info) => info.interface.is_none_or(|interface| interface < crate::CROP_SINCE).then_some(info.pid),
+                _ => None,
+            }) {
+                if id.is_some() {
+                    self.answer_call(&message, tool.as_deref(), crate::mcp::tool_error(&format!("unsupported: the Endeavor here (pid {older}) was started by an older version, which can't keep or show a box's picture. Read the box's cells instead. It is replaced by this version once no notebook is open in it, or after `endeavor stop`."), false));
+                }
+                return;
+            }
             let sink = |reply: String| {
                 let reply = if tool.as_deref().is_some_and(crate::views::is_view_tool) { reply } else { self.consent.reply_said(reply, self.page_shows()) };
                 self.write(&self.decorate(&message, tool.as_deref(), self.in_browser(&message, tool.as_deref(), &route, in_browser, reply)))

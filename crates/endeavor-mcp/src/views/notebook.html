@@ -296,6 +296,9 @@ const pointHost = {
   // Links in cells open in the user's browser through Claude, which asks first: the view's frame
   // can't open windows itself. Only when the host offers it.
   get openLink() { return app.getHostCapabilities()?.openLinks ? url => app.openLink({ url }).then(() => {}) : undefined; },
+  // A box Point drew: the view draws its picture (it can't take a screenshot), and the core keeps it for the
+  // agent's view_cell_output with `crop`, by the id the quote names.
+  crop: (png, crop) => call("notebook_crop", { notebook_id: notebook.id, png, crop }).then(() => {}),
 };
 
 async function load() {

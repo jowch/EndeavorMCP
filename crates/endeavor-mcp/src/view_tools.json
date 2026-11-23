@@ -72,5 +72,19 @@
       },
       "required": ["notebook_id", "path"]
     }
+  },
+  {
+    "name": "notebook_crop",
+    "title": "Notebook box picture",
+    "description": "Used by the notebook view to keep the picture of a box the user drew with Point, for the agent's view_cell_output (`crop`).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "notebook_id": { "type": "string", "description": "The open notebook the box is over." },
+        "png": { "type": "string", "description": "The picture, a PNG in base64." },
+        "crop": { "type": "string", "description": "Its id, 16 lowercase hex digits the view picked at random, so that the quote can name it before this call ends. Without it, the result gives one." }
+      },
+      "required": ["notebook_id", "png"]
+    }
   }
 ]
