@@ -596,7 +596,8 @@ Next:
   folder is gone (a day after its last use), the next start removes the set
   whose `.ji` names its source, so old sets don't pile up to Julia's limit of
   10 per package. A cluster whose cache folder is per node but whose depot is
-  shared would remove another node's set, and that node compiles it again.
+  shared would remove another node's set, and that node compiles it again
+  (#528).
 - Julia starts only when it's needed (#76). With `--julia-when-needed` the
   core writes `runtime.json` and answers at once, finds Julia itself (and
   downloads it only with `--install-julia`) the first time a Julia notebook is
