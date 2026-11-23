@@ -179,6 +179,9 @@ pub fn wait_until_done(session: &mut Session, id: &str, limit: Duration) -> Resu
         for cell in code["cell_ids"].as_array().cloned().unwrap_or_default() {
             let read = session.tool("read_cell", json!({ "notebook_id": id, "cell_id": cell }))?;
             busy |= read["running"] == true || read["queued"] == true;
+            if let Some(why) = held(&read) {
+                return Err(why);
+            }
         }
         if !busy {
             return Ok(());
@@ -190,9 +193,24 @@ pub fn wait_until_done(session: &mut Session, id: &str, limit: Duration) -> Resu
     }
 }
 
+/// Why a cell waits for someone who won't come: an install that waits for an OK, which the harness
+/// doesn't give, so waiting on it would only run out the limit (N1 in Python, #541).
+fn held(read: &Value) -> Option<String> {
+    (read["packages"]["step"] == "asking").then(|| format!("cell {} waits for an OK to install {}, which no one gives here", read["cell_id"].as_str().unwrap_or("?"), read["packages"]["packages"]))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    #[test]
+    fn a_wait_ends_at_a_cell_held_for_an_ok_no_one_gives() {
+        let asking = serde_json::json!({ "cell_id": "c1", "queued": true, "packages": { "step": "asking", "packages": ["numpy"] } });
+        assert!(super::held(&asking).is_some_and(|w| w.contains("numpy")));
+        let installing = serde_json::json!({ "cell_id": "c1", "queued": true, "packages": { "step": "installing", "packages": ["numpy"] } });
+        assert_eq!(super::held(&installing), None, "an install under way ends by itself");
+        assert_eq!(super::held(&serde_json::json!({ "cell_id": "c1", "running": true })), None);
+    }
 
     #[test]
     fn a_harness_session_is_not_the_agents() {
