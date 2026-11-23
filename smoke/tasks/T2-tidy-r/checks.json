@@ -8,7 +8,7 @@
     { "check": "no_errored_cells" },
     { "check": "output_contains", "texts": ["5.1"] },
     { "check": "code_lacks", "texts": ["4.2"] },
-    { "check": "code_contains", "soft": true, "texts": ["Summary", "5.1"] },
+    { "check": "output_contains", "soft": true, "texts": ["Summary", "5.1"] },
     { "check": "called", "tool": "delete_cell", "soft": true },
     { "check": "reproducible" }
   ]

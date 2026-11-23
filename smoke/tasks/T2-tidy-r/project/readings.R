@@ -1,4 +1,6 @@
 ### An Ember notebook ###
+# /// environment
+# ///
 
 # %% id=S [markdown]
 #' # Sensor readings

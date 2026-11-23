@@ -1,4 +1,6 @@
 ### An Ember notebook ###
+# /// environment
+# ///
 
 # %% id=5a1e0000-0000-4000-8000-000000000001
 x <- 0:2
