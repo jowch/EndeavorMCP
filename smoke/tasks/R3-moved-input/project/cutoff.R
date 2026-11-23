@@ -1,4 +1,6 @@
 ### An Ember notebook ###
+# /// environment
+# ///
 
 # %% id=L
 library(emberui)

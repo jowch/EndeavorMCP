@@ -1,0 +1,15 @@
+{
+  "about": "The tidy pass the skill describes (#295, #296). A notebook the user wrote is open and run: its summary is stale (it says 4.2; the cleaned mean is 5.1), a report cell sits above the cells it reads, and two cells are dead ends (first_try, scratch). The user asks to tidy it, then says yes to what the agent proposed. The agent reads it as the page shows it, deletes and moves nothing before the yes, and leaves it running with a summary that matches. Tags: already_open, tidy, long_session_guidance.",
+  "checks": [
+    { "check": "notebooks", "count": 1 },
+    { "check": "called", "tool": "read_notebook_code", "args": { "order": "visual", "include_markdown": true } },
+    { "check": "not_called", "tool": "delete_cell", "before_turn": 2 },
+    { "check": "not_called", "tool": "move_cell", "before_turn": 2 },
+    { "check": "no_errored_cells" },
+    { "check": "output_contains", "texts": ["5.1"] },
+    { "check": "code_lacks", "texts": ["4.2"] },
+    { "check": "output_contains", "soft": true, "texts": ["Summary", "5.1"] },
+    { "check": "called", "tool": "delete_cell", "soft": true },
+    { "check": "reproducible" }
+  ]
+}
