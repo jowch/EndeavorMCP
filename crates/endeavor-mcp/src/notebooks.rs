@@ -110,6 +110,8 @@ impl Upstream for Julia {
 struct Change {
     owner: String,
     seq: u64,
+    /// When, by the core's clock.
+    at: f64,
 }
 
 #[derive(Default)]
@@ -1735,7 +1737,7 @@ impl Notebooks {
                     Some(code) => {
                         notebook.authors.insert(cell.clone(), (hash(code), "user"));
                         // The user's change: an agent reads the cell before a run of it or what needs it.
-                        notebook.changes.insert(cell.clone(), Change { owner: tools::USER.to_owned(), seq });
+                        notebook.changes.insert(cell.clone(), Change { owner: tools::USER.to_owned(), seq, at: self.now() });
                         // Unrun agent code put back to what last ran is in step again; anything else is
                         // unrun, its before-text the code that last ran (the turn's, if the turn ran it).
                         if !pending.contains(cell) {

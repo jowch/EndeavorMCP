@@ -1373,6 +1373,34 @@ fn a_read_says_when_someone_else_changed_the_cell_since_this_session_read_it() {
 }
 
 #[test]
+fn a_first_read_says_when_another_session_changed_the_cell_a_moment_ago() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "rate = 0.3"), (Y, "y = 2")]);
+    let read = |owner: &str| s.call(owner, "read_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
+    s.read("b", NB, X);
+    s.call("b", "edit_cell", json!({ "notebook_id": NB, "cell_id": X, "code": "rate = 0.4" })).unwrap();
+    s.seconds(30.0);
+    // Session a never read it: its first read is told of b's edit, and when (#108).
+    let first = read("a");
+    assert_eq!(first["edited_by_another_session"], json!({ "seconds_ago": 30 }), "{first}");
+    assert!(first["message"].as_str().unwrap().contains("Another Endeavor session changed this cell 30 s ago"), "{first}");
+    assert_eq!(read("a").get("edited_by_another_session"), None, "said once");
+    // The same for read_notebook_code, for a session that hasn't read it either.
+    let code = s.call("c", "read_notebook_code", json!({ "notebook_id": NB })).unwrap();
+    assert_eq!(code["edited_by_another_session"], json!({ X: { "seconds_ago": 30 } }), "{code}");
+    assert!(code["message"].as_str().unwrap().contains("Tell the user before you replace those changes"), "{code}");
+    // Not the session's own edit, not one long ago, not the user's change, and never the app's calls.
+    assert_eq!(read("b").get("edited_by_another_session"), None);
+    s.seconds(600.0);
+    assert_eq!(read("d").get("edited_by_another_session"), None, "ten minutes on, it is the notebook as it is");
+    s.engine.with(NB, |nb| nb.cells[1].code = "y = 3".into());
+    assert_eq!(s.call("e", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap().get("edited_by_another_session"), None);
+    s.read("b", NB, Y);
+    s.call("b", "edit_cell", json!({ "notebook_id": NB, "cell_id": Y, "code": "y = 4" })).unwrap();
+    assert_eq!(s.call("", "read_cell", json!({ "notebook_id": NB, "cell_id": Y })).unwrap().get("edited_by_another_session"), None);
+}
+
+#[test]
 fn reads_come_before_edits_and_edits_of_several_cells_are_all_or_nothing() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = 2")]);
