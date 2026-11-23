@@ -85,6 +85,9 @@ copilot = false
 manager = "uv"
 [display]
 default_table_page_size = 25
+theme = "system"
+[ai]
+enabled = false
 """
 
 # A new notebook, as `marimo new` writes one (no cells yet but an empty one), with a PEP 723 header: its
