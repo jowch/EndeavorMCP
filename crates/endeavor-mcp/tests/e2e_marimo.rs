@@ -418,6 +418,13 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
         assert_eq!(order(&mut agent), now, "the ids survive going live");
         assert_eq!(code(&mut agent, &before[0]), "x = 20");
+        // Every id moved in marimo's session: each runs the code it names.
+        agent.ok("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }));
+        for cell in &now {
+            let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+            assert!(read["errored"] == false && read["not_run"] != true, "{read}");
+        }
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": before[1] }))["output"], "21");
         agent.ok("close_notebook", json!({ "notebook_id": id }));
 
         // A restart is a new session of marimo's, which numbers the cells again: a cell the agent added came
