@@ -1338,8 +1338,8 @@ fn the_julia_a_killed_core_leaves_behind_is_stopped_before_the_next_start() {
     // SAFETY: plain syscall, on the core alone, as an OOM kill or `kill -9` would end it.
     unsafe { libc::kill(core as i32, libc::SIGKILL) };
     common::wait_for("the core to end", || !common::pid_alive(core as i32));
-    // Linux ends Julia with its core (PR_SET_PDEATHSIG); on macOS nothing does, so it is still running here.
-    assert!(cfg!(target_os = "linux") || common::pid_alive(left), "Julia outlived its core");
+    // Julia ends with its core: on Linux by PR_SET_PDEATHSIG, on macOS by the watcher the core started with it.
+    // Which comes first, that or the next start, is a race, so either may stop it.
     assert!(dir.join("runtime.json").exists(), "the killed core left its record");
 
     std::fs::write(dir.join("hold"), "").unwrap();

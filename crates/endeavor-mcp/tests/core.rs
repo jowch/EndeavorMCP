@@ -1831,9 +1831,9 @@ fn a_stop_signal_julia_goes_on_through_is_followed_by_a_shutdown_and_then_a_kill
 }
 
 #[test]
-#[cfg(target_os = "linux")]
 fn a_julia_that_goes_on_through_the_signal_its_dead_core_left_it_is_killed_a_grace_later() {
-    // Julia's SIGTERM from PR_SET_PDEATHSIG can leave it hung, with no core left to escalate (#509).
+    // On Linux, Julia's SIGTERM from PR_SET_PDEATHSIG can leave it hung, with no core left to escalate (#509);
+    // on macOS nothing signals it at all.
     let dir = state_dir("core-died-deaf");
     std::fs::write(dir.join("deaf"), "").unwrap();
     let bridge = FakeBridge::start(&dir);

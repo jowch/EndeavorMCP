@@ -286,6 +286,7 @@ pub fn main(argv: &[String]) -> ! {
     r.stop();
     marimo.stop();
     remove_state(&args.state_dir, std::process::id() as i32, None);
+    #[cfg(unix)]
     let signalled = served.julia.signalled.load(std::sync::atomic::Ordering::SeqCst);
     match stop {
         #[cfg(unix)]
@@ -679,7 +680,7 @@ impl JuliaStarter {
         }
         let mut child = self.spawn.spawn(command).map_err(|e| format!("julia_failed::Couldn't start {julia}: {e}"))?;
         let pid = child.id() as i32;
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         let watch = watch_for_core_death(pid, self.mask);
         // To end it if it stalls, once the watcher below has it.
         #[cfg(windows)]
@@ -694,7 +695,7 @@ impl JuliaStarter {
         let watching = served.clone();
         std::thread::spawn(move || {
             let Ok(status) = child.wait() else { return };
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             if let Some((mut watch, mut ended)) = watch {
                 let _ = ended.write_all(b"\n");
                 drop(ended);
@@ -2004,22 +2005,30 @@ fn pass_on_stop_signals(set: libc::sigset_t, served: Arc<Served>) {
     });
 }
 
-/// Julia gets SIGTERM when the core dies (`PR_SET_PDEATHSIG`), and with nothing left to escalate, a SIGTERM
-/// that reaches it while it compiles can leave it hung in its exit (#509). So a shell waits on a pipe whose
-/// other end only the core holds: a line on it means Julia ended; its end without one, that the core died
-/// (an OOM kill, `kill -9`). Then, `stop_grace` later, it kills the Julia it was started for, if it still
-/// runs: the same pid with the same start time.
-#[cfg(target_os = "linux")]
+/// When the core dies abruptly (an OOM kill, `kill -9`), nothing is left to stop Julia. On Linux it gets
+/// SIGTERM (`PR_SET_PDEATHSIG`), and a SIGTERM that reaches it while it compiles can leave it hung in its
+/// exit (#509); macOS has no such signal. So a shell waits on a pipe whose other end only the core holds: a
+/// line on it means Julia ended; its end without one, that the core died. Then it signals the Julia it was
+/// started for (macOS), and `stop_grace` later kills it if it still runs: the same pid with the same start
+/// time. On Windows the core's job ends Julia with it (`winproc::job_ending_with_this_process`).
+#[cfg(unix)]
 fn watch_for_core_death(pid: i32, mask: Option<libc::sigset_t>) -> Option<(std::process::Child, std::process::ChildStdin)> {
-    const WATCH: &str = r#"julia=$1 grace=$2
-started() { s=$(cat "/proc/$julia/stat" 2>/dev/null) || return 1; s=${s##*) }; set -- $s; echo "${20}"; }
-was=$(started) || exit 0
+    const WATCH: &str = r#"julia=$1 grace=$2 term=$3
+started() {
+  if [ -r "/proc/$julia/stat" ]; then s=$(cat "/proc/$julia/stat" 2>/dev/null) || return 1; s=${s##*) }; set -- $s; echo "${20}"
+  else ps -o lstart= -p "$julia" 2>/dev/null; fi
+}
+was=$(started)
+[ -n "$was" ] || exit 0
 read -r _ && exit 0
+[ "$term" = 1 ] && [ "$(started)" = "$was" ] && kill -TERM "$julia" 2>/dev/null
 sleep "$grace"
 [ "$(started)" = "$was" ] && kill -KILL "$julia" 2>/dev/null
 exit 0"#;
+    // Linux's PR_SET_PDEATHSIG has sent it SIGTERM already.
+    let term = if cfg!(target_os = "linux") { "0" } else { "1" };
     let mut command = Command::new("sh");
-    command.args(["-c", WATCH, "sh", &pid.to_string(), &format!("{:.1}", stop_grace().as_secs_f64())]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    command.args(["-c", WATCH, "sh", &pid.to_string(), &format!("{:.1}", stop_grace().as_secs_f64()), term]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(mask) = mask {
         // SAFETY: only an async-signal-safe call between fork and exec.
         unsafe {
