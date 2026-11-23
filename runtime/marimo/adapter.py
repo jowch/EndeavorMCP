@@ -1,37 +1,3 @@
-"""marimo's adapter: Python notebooks for the runtime core (docs/runtime-core.md).
-
-It answers the calls R's adapter answers, the same way: `POST /adapter`
-{"method", "params"} -> {"result"} | {"error": "<Kind>: <kind>::<text>"}, and
-`GET /notifications?after=<seq>` held up to 25 s, both behind
-`Authorization: Bearer <engines' key>` (ENDEAVOR_TOKEN). So the core drives it
-with the same upstream as R (notebooks/r.rs).
-
-One `marimo edit` server serves every notebook, on a private loopback port
-and token, with a private marimo config (lazy, nothing runs on open, no AI)
-and `--sandbox`: each notebook gets its own uv environment from its PEP 723
-header. Per notebook:
-
-- In safe preview (opened from disk, not yet allowed to run) marimo has no
-  session for it: building the sandbox installs packages, which runs code.
-  The cells come from marimo's own parser, reading the file, and an edit is
-  written back with marimo's own save (its file manager, with no session or
-  kernel), so nothing runs and nothing installs (#351). marimo keeps no cell
-  ids in the file, so when the notebook goes live the adapter gives marimo's
-  session the ids the preview handed out.
-- Once it may run, the adapter makes marimo's session as its editor, leaves,
-  and watches it as a read-only (kiosk) connection. marimo allows one editor
-  per notebook, so a page opened later takes the session over as the editor.
-  The adapter's copy of the cells comes from that connection, so reads answer
-  while a cell runs. Writes go through the endpoints marimo's own page uses
-  (document transactions, save, run, interrupt), which don't wait for a run.
-
-Every call into marimo's internals is in this file; marimo is pinned
-(requirements.txt) and tested against the pin (tests/e2e_marimo.rs).
-
-    uv run --no-project --with-requirements requirements.txt python adapter.py
-    env: ENDEAVOR_TOKEN, ENDEAVOR_MARIMO_STATE (where to write the ports)
-"""
-
 import asyncio
 import collections
 import functools
@@ -64,15 +30,11 @@ from marimo._ast.load import load_app
 
 TOKEN = os.environ.get("ENDEAVOR_TOKEN", "")
 STATE_FILE = os.environ.get("ENDEAVOR_MARIMO_STATE", "")
-# The core's /marimo/ route forwards to marimo under this prefix.
 BASE_URL = "/marimo"
 POLL_HOLD = 25
 NOTES_KEPT = 500
 TEXT_MAX = 20_000
 
-# Ours, not the user's: nothing runs by itself (an edit marks its readers stale), opening runs
-# nothing, a file edited elsewhere marks cells stale, and marimo's own AI is off (one agent). A table shows
-# 25 rows a page, not marimo's 10, so the agent's text of a small table is the whole of it.
 MARIMO_CONFIG = """[runtime]
 on_cell_change = "lazy"
 auto_instantiate = false
@@ -87,13 +49,6 @@ manager = "uv"
 default_table_page_size = 25
 """
 
-# A new notebook, as `marimo new` writes one (no cells yet but an empty one), with a PEP 723 header: its
-# sandbox's packages. marimo is pinned to the server's version (else marimo adds `marimo>=<newest>`, and
-# the kernel can come up newer than the server), and `exclude-newer` holds every package, dependencies
-# included, to what was published by the time the notebook was made, as an R notebook's package date
-# does. Python is held to the minor version it was made with, since packages from that date may have no
-# wheels for a later one. Packages the notebook imports are added with their exact versions
-# (`Notebook.install`).
 NEW_HEADER = """# /// script
 # requires-python = "=={python}.*"
 # dependencies = [
@@ -122,7 +77,7 @@ if __name__ == "__main__":
 
 
 class AdapterError(Exception):
-    """An error the core passes on: "ArgumentError: kind::text"."""
+    ...
 
 
 def argument_error(kind, text):
@@ -130,7 +85,6 @@ def argument_error(kind, text):
 
 
 def key_error(kind, text):
-    # Julia's KeyError form, which the core unwraps (mcp.rs, unwrap_key_error).
     key = f"{kind}::{text}".replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
     return AdapterError(f'KeyError: key "{key}" not found')
 
@@ -152,13 +106,9 @@ def real(path):
     return os.path.realpath(os.path.expanduser(path))
 
 
-# ---- marimo's server ---------------------------------------------------------
-
-
 class Marimo:
     def __init__(self):
         self.port = free_port()
-        # The core makes it (as Ember's secret): it goes into the requests the core's /marimo/ route forwards.
         self.token = os.environ.get("ENDEAVOR_MARIMO_TOKEN") or secrets.token_hex(32)
         self.base = f"http://127.0.0.1:{self.port}{BASE_URL}"
         self.config = Path(tempfile.mkdtemp(prefix="endeavor-marimo-"))
@@ -173,8 +123,6 @@ class Marimo:
         env = {**os.environ, "XDG_CONFIG_HOME": str(self.config), "MARIMO_SKIP_UPDATE_CHECK": "1"}
         env.pop("ENDEAVOR_TOKEN", None)
         env.pop("ENDEAVOR_MARIMO_TOKEN", None)
-        # The whole filesystem is the workspace: notebooks open by absolute path, anywhere. The server
-        # listens on loopback only, behind its token, which only the core's /marimo/ route adds.
         root = os.path.abspath(os.sep)
         self.child = asyncio.subprocess.create_subprocess_exec(
             sys.executable, "-m", "marimo", "-q", "edit", root, "--headless", "--sandbox", "--watch",
@@ -205,7 +153,6 @@ class Marimo:
         return h
 
     async def page_token(self, path):
-        """The token marimo's page sends with every write (skew protection), from the page itself."""
         if self.server_token is None:
             async with httpx.AsyncClient() as c:
                 page = (await c.get(self.base + "/", params={"file": path}, headers=self.headers())).text
@@ -222,10 +169,6 @@ class Marimo:
             return r.json()
 
     async def execute(self, session_id, code, timeout=None):
-        """Python run in the notebook's kernel by marimo's code mode (what `marimo pair` uses): whether it
-        succeeded, and what it printed. It waits in the kernel's queue behind a running cell, so only runs
-        and installs go this way. marimo's own run endpoint would refuse us: it lets only the notebook's one
-        editor run cells, and the adapter is never the editor."""
         out, ok, event = [], False, None
         async with httpx.AsyncClient(timeout=timeout) as c:
             async with c.stream("POST", self.base + "/api/kernel/execute", headers=self.headers(session_id), json={"code": code}) as r:
@@ -250,19 +193,7 @@ class Marimo:
         return r
 
 
-# ---- Notebooks ---------------------------------------------------------------
-
-
 def file_form(code):
-    """A cell's code as marimo's file gives it back, when that means the same code: a `mo.md("...")` cell is
-    written with triple quotes, and quotes, a trailing newline or indentation may change. Our copy and marimo's
-    session keep this form, not the agent's, so that they match the file. When they don't, marimo's reload after
-    the file changes under it (a package added to its header) pairs cells by similar code, and can give one
-    heading's code to another (L1 on Haiku, 11-20). marimo writes a markdown string's value into a plain
-    `\"\"\"`, so a backslash in it (LaTeX's `\\alpha`) would become an escape (#433): such a cell takes a raw
-    `r\"\"\"`, which marimo keeps, and is kept as sent only when that can't hold its value either. A cell kept
-    as sent can still change in the file, since marimo's save writes it its own way: its cells get a note
-    that says so (`changes_in_file`, #449)."""
     try:
         kept = _marimo_writes(code)
         if kept == code or _meaning(kept) == _meaning(code):
@@ -273,12 +204,10 @@ def file_form(code):
             if _meaning(kept) == _meaning(code):
                 return kept
         return code
-    except Exception:  # noqa: BLE001 - code marimo can't write, or that doesn't parse, is kept as it came
+    except Exception:  # noqa: BLE001
         return code
 
 
-# A note on a markdown cell that `file_form` kept as sent although marimo writes it in another form, so
-# the file, and the notebook once reopened, has other code than this session (#449).
 FILE_FORM_NOTE = ("markdown_in_file::marimo writes this markdown cell to the file in another form, so reopening "
                   "the notebook changes it: a backslash at the end of its text, or \"\"\" together with a backslash, "
                   "becomes another escape, and keyword arguments to mo.md are dropped. To keep it as it is, write the "
@@ -288,15 +217,13 @@ FILE_FORM_NOTE = ("markdown_in_file::marimo writes this markdown cell to the fil
 
 @functools.lru_cache(maxsize=1024)
 def changes_in_file(code):
-    """Whether marimo's file gives `code`, a markdown cell's, back with another meaning (`file_form`)."""
     try:
         return _meaning(_marimo_writes(code)) != _meaning(code)
-    except Exception:  # noqa: BLE001 - code marimo can't write, or that doesn't parse, says nothing
+    except Exception:  # noqa: BLE001
         return False
 
 
 def _marimo_writes(code):
-    """A cell's code as marimo writes it to the file and reads it back."""
     from marimo._ast import codegen
     from marimo._ast.cell import CellConfig
     from marimo._ast.parse import parse_notebook
@@ -305,8 +232,6 @@ def _marimo_writes(code):
 
 
 def _raw_markdown(code):
-    """A `mo.md("...")` cell whose text has a backslash, written as `mo.md(r\"\"\"...\"\"\")` with the same
-    text, or None when a raw string can't hold it (it has `\"\"\"` or ends in a backslash)."""
     tree = ast.parse(code)
     if len(tree.body) != 1 or not isinstance(tree.body[0], ast.Expr):
         return None
@@ -323,8 +248,6 @@ def _raw_markdown(code):
 
 
 def _meaning(code):
-    """What code does, as Python's syntax tree, but for the spaces and newlines around a string's text,
-    which marimo adds to a markdown cell's."""
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -336,20 +259,12 @@ def _meaning(code):
 
 
 def kept_ids(ours, loaded):
-    """The ids we gave cells, for the cells marimo has just loaded from the file: {loaded id: our id}.
-
-    marimo doesn't keep ids in the file. It numbers the cells by position when it loads it, so after a
-    cell above was added, deleted or moved, a cell comes back under another cell's id (#353). Cells are
-    paired by code, the way marimo pairs them when the file changes under a session: the same code
-    first, then the most similar. A cell that pairs with none keeps marimo's id. `ours` and `loaded`
-    map each id to its code."""
     if not ours or not loaded:
         return {}
     from marimo._utils.cell_matching import match_cell_ids_by_similarity
     try:
-        # {the id to use: the loaded id}
         return {got: keep for keep, got in match_cell_ids_by_similarity(ours, loaded).items()}
-    except Exception as e:  # noqa: BLE001 - marimo's ids then stay, as before
+    except Exception as e:  # noqa: BLE001
         print(f"endeavor marimo: couldn't pair the file's cells with ours: {e}", file=sys.stderr)
         return {}
 
@@ -369,25 +284,14 @@ class Notebook:
         self.order = []
         self.cells = {}
         self.missing = set()
-        # An agent's run's cells (`watch_run`), and the install under way for some of them: a cell that
-        # failed to import a package we'll install reads as queued until it runs again.
         self.watched, self.installing = collections.Counter(), None
-        # A run's import of a package new to the notebook waits for the user's OK (#355), as a Julia
-        # notebook's does (#397): the modules to install, their PyPI names, and the cells that wait.
-        # `approve_install` is the OK; a yes holds for those modules while the notebook is open.
         self.asking, self.approved = None, set()
-        # The last ready preview of moving the package date (`preview_packages`), which an apply must match.
         self.previewed = None
         self.ws = None
-        # The watch's own consumer id, which edits are sent as (`go_live`).
         self.watcher = None
         self.closing = False
         self.watch = None
-        # Whether the ids safe preview handed out may not be the ones marimo gives the cells when it loads the
-        # file (`rekey`): safe preview wrote an edit, or read the file again after a change and kept its ids.
         self.own_ids = False
-
-    # -- reading the file (safe preview) --
 
     def load_file(self):
         app = load_app(self.path)
@@ -397,7 +301,6 @@ class Notebook:
         old = self.cells
         loaded = [(cid, manager.get_cell_data(cid)) for cid in manager.cell_ids()]
         codes = {cid: file_form(data.code) for cid, data in loaded}
-        # Read again after a change to the file, each cell keeps the id it had (#353).
         ids = kept_ids({c: old[c]["code"] for c in self.order}, codes)
         self.order, self.cells = [], {}
         for got, data in loaded:
@@ -405,7 +308,6 @@ class Notebook:
             cell = old.get(cid) or new_cell(code, data.name)
             cell["code"], cell["name"] = code, data.name
             cell["hide_code"] = bool(data.config.hide_code)
-            # The rest of the cell's config (disabled, column), for writing an edit back.
             cell["config"] = data.config.asdict()
             self.order.append(cid)
             self.cells[cid] = cell
@@ -414,7 +316,6 @@ class Notebook:
         self.mtime = os.stat(self.path).st_mtime
 
     def write_file(self):
-        """Write the cells to the file in safe preview, through marimo's own save with no session."""
         from marimo._ast.cell import CellConfig
         from marimo._server.models.models import SaveNotebookRequest
         from marimo._session.notebook.file_manager import AppFileManager
@@ -431,23 +332,18 @@ class Notebook:
         if not self.live and os.stat(self.path).st_mtime != self.mtime:
             self.load_file()
 
-    # -- marimo's session --
-
     async def session_id(self):
-        # Re-keyed when a page takes the session over, so asked each time.
         for sid, s in (await self.m.sessions()).items():
             if real(s.get("path") or s.get("filename") or "") == self.path:
                 return sid
         raise key_error("notebook_closed", "marimo has no session for this notebook any more; open it again")
 
     async def go_live(self):
-        """Make marimo's session for the notebook (its sandbox builds now), then watch it."""
         await asyncio.to_thread(pin_marimo, self.path)
         url = f"ws://127.0.0.1:{self.m.port}{BASE_URL}/ws"
         query = urllib.parse.urlencode({"file": self.path, "access_token": self.m.token})
         maker = await websockets.connect(f"{url}?session_id=endeavor-{secrets.token_hex(6)}&{query}", max_size=None)
         try:
-            # A sandboxed notebook first builds its environment (startup-progress), then says kernel-ready.
             while True:
                 msg = json.loads(await asyncio.wait_for(maker.recv(), 900))
                 if msg.get("op") == "kernel-ready":
@@ -455,13 +351,8 @@ class Notebook:
         finally:
             await maker.close()
         await self.m.page_token(self.path)
-        # The watch is a consumer of its own, not the session's id: marimo sends an edit to every consumer but
-        # the one it came from, and an edit sent with the session's id comes from the page that holds it, which
-        # then never sees it, and its next save puts back what it had.
         self.watcher = f"endeavor-watch-{secrets.token_hex(6)}"
         self.ws = await websockets.connect(f"{url}?session_id={self.watcher}&kiosk=true&{query}", max_size=None)
-        # The watch's own kernel-ready, taken here and not in `follow`, where it would come after `reform` and put
-        # back the code as the file had it.
         try:
             while True:
                 first = json.loads(await asyncio.wait_for(self.ws.recv(), 30))
@@ -470,15 +361,7 @@ class Notebook:
                     break
         except asyncio.TimeoutError:
             pass
-        # The ids we handed out before this session: safe preview's, or the last session's before a restart,
-        # which marimo numbers again by position (#353). A resumed session keeps marimo's, as its cells may have
-        # run, unless safe preview gave out its own.
         ours = {c: self.cells[c]["code"] for c in self.order} if self.order and (self.own_ids or not msg["data"].get("resumed")) else None
-        # A new session's cells come from the file as written, which may not be how marimo's file writes them
-        # (a hand-written `mo.md("## A")`). Its first save would then make the file and the session differ, and a
-        # change to the file under marimo (a package install) has marimo pair them by similar code, which can give
-        # headings each other's code (#442, as #431 for the agent's own cells). So they take the file's form now,
-        # before anything runs. A resumed session keeps its code: its cells may have run.
         reformed = self.kernel_ready(msg["data"], reform=not msg["data"].get("resumed"))
         self.live = True
         self.watch = asyncio.create_task(self.follow())
@@ -489,25 +372,12 @@ class Notebook:
             await self.reform(reformed)
 
     async def rekey(self, ours):
-        """Give marimo's session the cell ids we handed out before it started, and return {marimo's id: ours}.
-
-        marimo numbers a file's cells by position when it loads it, so after a cell was added, deleted or
-        moved, in safe preview, by another editor, or by the agent before a restart, its ids differ from the
-        ones the agent holds (and the core's staged runs name). `ours` maps each id we had to its code; the
-        file's cells are paired with them by code (`kept_ids`). One transaction then puts our ids back: a
-        cell id only marimo has is deleted, one only we have is created, one both have takes the code, name
-        and config of the cell the file holds under our id, and the order is the file's. Each cell's code
-        and config are the file's; only the ids change. No id is deleted and created again, because marimo
-        drops a create whose id the same transaction deleted. Nothing runs, since nothing has. If marimo
-        refuses, its ids stay and the tools hear the topology changed.
-        """
         ids = list(self.order)
         mine = kept_ids(ours, {c: self.cells[c]["code"] for c in ids})
         target = [mine.get(c, c) for c in ids]
         if target == ids:
             return {}
         try:
-            # Copies: the changes below write into the cells under the ids they name.
             theirs = {c: dict(self.cells[c]) for c in ids}
             changes = [{"type": "delete-cell", "cellId": c} for c in ids if c not in set(target)]
             for got, cid in zip(ids, target):
@@ -532,24 +402,20 @@ class Notebook:
                 self.cells[cid]["config"] = theirs[got].get("config")
             await self.adapter.save(self, self.watcher)
             return dict(zip(ids, target))
-        except Exception as e:  # noqa: BLE001 - the notebook is live either way; only the ids differ
+        except Exception as e:  # noqa: BLE001
             print(f"endeavor marimo: kept marimo's cell ids for {self.path}: {e}", file=sys.stderr)
             self.adapter.notify("topology_changed", notebook_id=self.id)
             return {}
 
     async def reform(self, cells):
-        """Give marimo's session the code `kernel_ready` kept in file form for `cells`, and save, so the session and
-        the file agree. The meaning is the same (`file_form`), and nothing has run."""
         changes = [{"type": "set-code", "cellId": c, "code": self.cells[c]["code"]} for c in cells if c in self.cells]
         try:
             await self.m.post("/api/document/transaction", self.watcher, {"changes": changes})
             await self.adapter.save(self, self.watcher)
-        except Exception as e:  # noqa: BLE001 - the notebook is live either way; only the file's form differs
+        except Exception as e:  # noqa: BLE001
             print(f"endeavor marimo: kept the file's form of {len(changes)} cells of {self.path}: {e}", file=sys.stderr)
 
     def kernel_ready(self, d, reform=False):
-        """Take marimo's cells. With `reform`, each cell's code is kept in the form marimo's file gives it back
-        (`file_form`), and the cells whose code that changes are returned, for marimo's session to take too."""
         old = self.cells
         self.order, self.cells = [], {}
         reformed = []
@@ -561,7 +427,6 @@ class Notebook:
             cell["code"], cell["name"] = code, d["names"][i]
             config = (d.get("configs") or [{}] * len(d["cell_ids"]))[i] or {}
             cell["hide_code"] = bool(config.get("hide_code"))
-            # The rest as the file has it (disabled, column), for `save` and `rekey`.
             if config:
                 cell["config"] = {k: config[k] for k in ("disabled", "column", "expand_output") if k in config}
             self.order.append(cid)
@@ -573,12 +438,11 @@ class Notebook:
             async for raw in self.ws:
                 try:
                     self.on(json.loads(raw))
-                except Exception as e:  # noqa: BLE001 - one bad message mustn't end the watch
+                except Exception as e:  # noqa: BLE001
                     print(f"endeavor marimo: couldn't read marimo's message: {e}", file=sys.stderr)
         except websockets.ConnectionClosed:
             pass
         if not self.closing:
-            # marimo ended the session (its kernel died, or someone shut it down there).
             self.adapter.forget(self)
             self.adapter.notify("notebook_shut_down", notebook_id=self.id)
 
@@ -606,7 +470,6 @@ class Notebook:
             self.cells[cid] = new_cell(ch.get("code", ""), ch.get("name", ""))
             config = dict(ch.get("config") or {})
             self.cells[cid]["hide_code"] = bool(config.get("hide_code"))
-            # Keep the rest (disabled, column) for `save`, as set-config does (#425).
             self.cells[cid]["config"] = {k: config[k] for k in ("disabled", "column", "expand_output") if k in config}
             if ch.get("after") in self.order:
                 self.order.insert(self.order.index(ch["after"]) + 1, cid)
@@ -621,8 +484,6 @@ class Notebook:
         elif t == "set-config" and cid in self.cells:
             if ch.get("hideCode") is not None:
                 self.cells[cid]["hide_code"] = bool(ch["hideCode"])
-            # The rest of the config is the adapter's copy that `save` writes back: a cell disabled or
-            # moved to another column on the page stays so after the next save (#425).
             config = dict(self.cells[cid].get("config") or {})
             for key, name in (("disabled", "disabled"), ("column", "column"), ("expandOutput", "expand_output")):
                 if key in ch:
@@ -648,7 +509,6 @@ class Notebook:
         status = d.get("status")
         if status:
             if status == "running" and c["status"] != "running":
-                # A cell that waits for an OK and runs anyway (from marimo's page) waits no more.
                 if self.asking and d["cell_id"] in self.asking["cells"]:
                     self.asking["cells"].remove(d["cell_id"])
                     if not self.asking["cells"]:
@@ -668,7 +528,6 @@ class Notebook:
         if d.get("output") is not None:
             c["output"] = d["output"]
             c["errored"] = d["output"].get("channel") == "marimo-error"
-            # Marked here, as marimo reports the error, so no read sees it between the run and the install.
             if c["errored"] and d["cell_id"] in self.watched and (self.missing_modules([d["cell_id"]]) or self.raised_by_awaiting(d["cell_id"])):
                 c["awaiting_install"] = True
         console = d.get("console")
@@ -676,18 +535,14 @@ class Notebook:
             c["console"] += console if isinstance(console, list) else [console]
 
     def error_data(self, cid):
-        """The errors marimo reported for the cell's last output, as a list."""
         out = self.cells.get(cid, {}).get("output") or {}
         return out.get("data") if isinstance(out.get("data"), list) else []
 
     def raised_by_awaiting(self, cid):
-        """Whether the cell failed only because an ancestor did, and that ancestor waits for its package."""
         raised = [e.get("raising_cell") for e in self.error_data(cid)]
         return bool(raised) and all(r in self.cells and self.cells[r].get("awaiting_install") for r in raised)
 
     def missing_modules(self, cells, tried=False):
-        """The modules the cells failed to import, which nobody tried to install yet (with `tried`,
-        those too)."""
         found = {}
         for c in cells:
             for e in self.error_data(c):
@@ -697,11 +552,6 @@ class Notebook:
         return found
 
     async def install(self, cells, ask_new=False):
-        """Cells of an agent's run failed to import a package the notebook's environment lacks: add it
-        (marimo puts it in the file's header with its exact version) and run them again, as a Julia
-        notebook installs a package on `using`. Each module is tried once. With `ask_new`, a package
-        new to the notebook (not in its header, and not approved yet) waits for the user's OK instead:
-        PyPI isn't curated, so a typo such as `import pandsa` would install whatever has that name."""
         modules = self.missing_modules(cells)
         if not modules:
             return False
@@ -713,15 +563,12 @@ class Notebook:
             if new:
                 held = [c for c in (self.asking or {}).get("cells", []) if c in self.cells]
                 modules = sorted(set(modules) | set((self.asking or {}).get("modules", [])))
-                # A name a letter or two from a widely used package's: likely a typo (#416).
                 near = {pypi_name(m): n for m in fresh if (n := near_miss(m))}
                 self.asking = {"modules": modules, "packages": new, "near": near, "cells": self.in_order(set(held) | set(rerun))}
                 return False
         return await self.install_modules(modules, rerun)
 
     def rerun_for(self, modules, cells):
-        """The importers, and the run's cells that failed only because an importer did: marimo's lazy mode
-        wouldn't run those again with the importer, and they'd keep showing its error."""
         rerun = {c for cs in modules.values() for c in cs}
         rerun |= {c for c in cells if c in self.cells and self.cells[c].get("awaiting_install")}
         return self.in_order(rerun)
@@ -731,12 +578,7 @@ class Notebook:
         return sorted(cells, key=lambda c: (order.index(c) if c in order else len(order), self.order.index(c)))
 
     async def install_modules(self, modules, rerun):
-        """Install `modules` into the notebook's environment, with `rerun` marked as waiting for them."""
         self.missing |= set(modules)
-        # marimo 0.25.1 adds a sandboxed notebook's package with `uv add --script`, which keeps to the
-        # header's date (e2e_marimo checks it). Its other way in, `uv pip install`, reads no header and
-        # would take today's version, which a header dated before it can't build again; the date is set
-        # for that one too.
         date = package_date(self.path)
         code = CODE_MODE + "import os\nfrom marimo._runtime.packages.module_name_to_pypi_name import module_name_to_pypi_name\n" \
             "names = module_name_to_pypi_name()\n" + \
@@ -749,7 +591,6 @@ class Notebook:
             self.cells[c]["status"], self.cells[c]["queued_by_us"], self.cells[c]["awaiting_install"] = "queued", True, True
         self.installing = {"packages": sorted(modules), "started": time.time()}
         try:
-            # Set by e2e_marimo, in a debug build only, so its read lands during the install.
             delay = float(os.environ.get("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS") or 0)
             if delay:
                 await asyncio.sleep(delay)
@@ -771,12 +612,10 @@ class Notebook:
             try:
                 sid = await self.session_id()
                 await self.m.post("/api/home/shutdown_session", sid, {"sessionId": sid})
-            except Exception:  # noqa: BLE001 - it's going anyway
+            except Exception:  # noqa: BLE001
                 pass
             if self.ws:
                 await self.ws.close()
-
-    # -- what the core reads --
 
     def cell_state(self, cid):
         c = self.cells[cid]
@@ -785,8 +624,6 @@ class Notebook:
                 "queued": c["status"] == "queued" or waiting, "errored": c["errored"] and not waiting}
 
     def waits_for_install(self, cid):
-        """The cell failed to import a package that is being, or is about to be, installed for it, or
-        that waits for the user's OK."""
         c = self.cells[cid]
         asked = bool(self.asking) and cid in self.asking["cells"]
         return (bool(c.get("awaiting_install")) or asked) and c["status"] != "running"
@@ -805,11 +642,8 @@ class Notebook:
              "running": c["status"] == "running", "queued": c["status"] == "queued" or waiting,
              "errored": c["errored"] and not waiting, "last_run": c["last_run"], "runtime": c["runtime"] * 1e9,
              "output": "", "hidden": False, "markdown": is_markdown(c["code"]),
-             # marimo's lazy mode marks a cell whose inputs changed; a cell edited since its run is
-             # stale for the tools too.
              "stale": bool(c["stale"]) or (c["ran_code"] is not None and c["ran_code"] != c["code"]),
              "not_run": never and not c["errored"], "off": False, "notes": [], "inputs": []}
-        # Not `markdown` alone: marimo takes a call with keyword arguments as markdown too.
         if c["code"].lstrip().startswith("mo.md(") and changes_in_file(c["code"]):
             d["notes"].append(FILE_FORM_NOTE)
         if waiting:
@@ -830,13 +664,11 @@ class Notebook:
                 "cells": [self.snapshot_cell(cid) for cid in self.order]}
 
     def install_state(self):
-        """The package install under way, as the tools show a Julia or R one, or None."""
         if self.asking and not self.installing:
             self.asking["cells"] = [c for c in self.asking["cells"] if c in self.cells]
             if not self.asking["cells"]:
                 self.asking = None
         if self.asking and not self.installing:
-            # As a Julia notebook's new packages ask (#397): the front asks the user with these names.
             packages, near = self.asking["packages"], self.asking.get("near") or {}
             return {"step": "asking", "new": True, "packages": packages, "seconds": 0, "last_line": None,
                     "download": {"bytes": None, "packages": [{"package": p, **({"close_to": near[p]} if p in near else {})} for p in packages]}}
@@ -844,9 +676,6 @@ class Notebook:
             return None
         started = (self.installing or {}).get("started", time.time())
         waiting = [c for c in self.order if self.waits_for_install(c)]
-        # Before the install starts (or after it ends) only the waiting cells' errors name it, tried or not.
-        # A cell that waits because its ancestor raised names nothing itself: the ancestor's import error
-        # does, and that ancestor may still say it's running (#439).
         raising = [e.get("raising_cell") for c in waiting for e in self.error_data(c)]
         named = self.missing_modules(waiting + [r for r in raising if r in self.cells], tried=True)
         return {"step": "installing", "packages": (self.installing or {}).get("packages") or sorted(named),
@@ -871,27 +700,18 @@ def bundle_of(out):
     return {}
 
 
-# What makes HTML interactive, as the Julia runtime decides it (`_INTERACTIVE` in Output.jl): a script,
-# a canvas or a control. A plotly figure comes as an iframe with scripts; marimo's own controls
-# (`mo.ui.slider`, `mo.ui.plotly`) are `<marimo-…>` elements. Not a table, math or a JSON tree, which
-# show as text, nor a layout or a static display (an accordion, tabs, a carousel, a sidebar, a
-# dictionary of controls, a stat, a diagram, a progress bar, a menu): marimo puts their content in
-# the HTML, so that decides. A lazy element's content isn't in it, so it counts.
 INTERACTIVE = re.compile(r"<(script|canvas|input|select|button|textarea|iframe)\b"
                          r"|<marimo-(?!(ui-element|table|tex|json-output|callout-output|accordion|tabs|carousel|sidebar"
                          r"|dict|stat|mermaid|progress|nav-menu)\b)[a-z]", re.I)
 
 
 def interactive_bundle(bundle):
-    """Whether an output has scripts or controls, so a picture of it can't show that they work (#398).
-    An altair chart is a Vega-Lite spec, which marimo draws with tooltips."""
     if any(mime.startswith(("application/vnd.vega", "application/vnd.plotly")) for mime in bundle):
         return True
     return any(INTERACTIVE.search(str(bundle.get(mime) or "")) for mime in ("text/html", "text/markdown"))
 
 
 def html_text(html):
-    """HTML output as text, for read_cell: tags dropped, entities kept simple."""
     text = re.sub(r"<(script|style)\b.*?</\1>", "", html, flags=re.S | re.I)
     text = re.sub(r"<br\s*/?>|</(p|div|tr|li|h\d|pre)>", "\n", text, flags=re.I)
     text = re.sub(r"<[^>]+>", "", text)
@@ -901,7 +721,6 @@ def html_text(html):
 
 
 def table_text(html):
-    """A table (a DataFrame's output) as text: its first page of rows, as marimo's page shows them, and how many rows it has in all."""
     def attr(name):
         found = re.search(name + r"='([^']*)'", html)
         return html_module.unescape(found.group(1)) if found else None
@@ -952,12 +771,6 @@ def output_text(out, console):
 
 
 def pin_marimo(path):
-    """Add marimo, at the server's version, to a notebook header that doesn't name it (#352).
-
-    marimo's sandbox adds `marimo` to such a header itself, with `uv add --script`, which writes
-    `marimo>=<newest>`: wrong for anyone who runs the file elsewhere, and its kernel can come up newer
-    than the server. Done first, with the version pinned, marimo's finds marimo there and leaves it.
-    As marimo's, a file with no header gets one."""
     from marimo._environments import script_metadata
     try:
         if not script_metadata.should_add_marimo(path):
@@ -966,13 +779,11 @@ def pin_marimo(path):
         with script_metadata.materialized_for_edit(path) as target:
             script_metadata.uv(["add", "--script", target.path, f"marimo=={marimo.__version__}"],
                                env=script_metadata.script_command_env(), timeout=30, cwd=target.directory)
-    except Exception as e:  # noqa: BLE001 - marimo's sandbox then adds its own, as before
+    except Exception as e:  # noqa: BLE001
         print(f"endeavor marimo: couldn't pin marimo in {path}'s header: {e}", file=sys.stderr)
 
 
 def date_stamp(date):
-    """The `exclude-newer` for a day as YYYY-MM-DD: the end of that day in UTC, or now for none or a day not
-    over yet, so what is published later never counts."""
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if date is None:
         return now
@@ -986,13 +797,11 @@ def date_stamp(date):
 
 
 def day_of(stamp):
-    """The day of an `exclude-newer` value, as YYYY-MM-DD, or None."""
     found = re.match(r"\d{4}-\d{2}-\d{2}", stamp or "")
     return found.group(0) if found else None
 
 
 def read_header(path):
-    """The TOML of a notebook's PEP 723 header, as written, or "" when it has none."""
     from marimo._environments import script_metadata
     return script_metadata.read_manifest(path)
 
@@ -1006,12 +815,11 @@ def is_marimo(dep):
     from packaging.requirements import Requirement
     try:
         return canonical(Requirement(dep).name) == "marimo"
-    except Exception:  # noqa: BLE001 - a line that isn't a requirement is left as it is
+    except Exception:  # noqa: BLE001
         return False
 
 
 def exact_pin(dep):
-    """A requirement pinned to one version (`polars==1.34.0`) as (Requirement, version), else None."""
     from packaging.requirements import Requirement
     try:
         req = Requirement(dep)
@@ -1024,15 +832,12 @@ def exact_pin(dep):
 
 
 def with_version(req, version):
-    """`req` pinned to `version`, or with no version for None, keeping its extras and marker."""
     extras = f"[{','.join(sorted(req.extras))}]" if req.extras else ""
     marker = f"; {req.marker}" if req.marker else ""
     return f"{req.name}{extras}{'==' + version if version else ''}{marker}"
 
 
 def with_deps_and_date(header, deps, stamp):
-    """`header` with `dependencies` (one for one, as `header_deps` lists them) and `[tool.uv] exclude-newer`
-    replaced, the rest as written: each entry changes in place, so comments around it stay."""
     import tomlkit
     doc = tomlkit.parse(header)
     if "dependencies" in doc:
@@ -1053,14 +858,11 @@ def with_deps_and_date(header, deps, stamp):
 
 
 def let_go(header, stamp):
-    """The header at `stamp`, with each exactly pinned package but marimo let go, for uv to pick that date's
-    newest."""
     deps = [d if is_marimo(d) or not exact_pin(d) else with_version(exact_pin(d)[0], None) for d in header_deps(header)]
     return with_deps_and_date(header, deps, stamp)
 
 
 def pin_at(header, stamp, versions):
-    """The header at `stamp`, with each exactly pinned package but marimo pinned at its version in `versions`."""
     def pinned(d):
         found = None if is_marimo(d) else exact_pin(d)
         if not found:
@@ -1071,9 +873,6 @@ def pin_at(header, stamp, versions):
 
 
 def write_header(path, header, previous):
-    """Write `header` as the notebook's PEP 723 header, under marimo's lock for the file, unless the header
-    is no longer `previous`: then nothing is written, and False. As marimo's own `write_manifest`, but a
-    blank line stays `#`, not `# `, so the rest of the user's header doesn't change."""
     from marimo._environments import script_metadata
     with script_metadata.notebook_file_lock(path):
         if script_metadata.read_manifest(path) != previous:
@@ -1096,9 +895,6 @@ def write_header(path, header, previous):
 
 
 def resolve(path, header):
-    """The versions uv picks for the notebook at `path` with the header `header`, {canonical name: version},
-    and None with uv's reason when it can't. Resolved in a copy, so the notebook and its lock are untouched,
-    and nothing is built."""
     from marimo._environments import script_metadata
     text = Path(path).read_text(encoding="utf-8")
     block = script_metadata.wrap_block(header) if header.strip() else script_metadata.wrap_block("dependencies = []")
@@ -1109,7 +905,7 @@ def resolve(path, header):
         try:
             out = script_metadata.uv(["export", "--script", str(copy), "--no-hashes", "--no-header", "--no-annotate", "--no-build", "--quiet"],
                                      env=script_metadata.script_command_env(), timeout=120, cwd=folder).stdout
-        except Exception as e:  # noqa: BLE001 - uv says why it can't
+        except Exception as e:  # noqa: BLE001
             why = (getattr(e, "stderr", None) or str(e)).strip()
             return None, "\n".join(line for line in why.splitlines() if line.strip())[-1500:]
     versions = {}
@@ -1121,7 +917,6 @@ def resolve(path, header):
 
 
 def version_changes(old, new):
-    """The packages whose versions differ between two resolutions: `from`, `to`, and `change`."""
     from packaging.version import Version
     rows = []
     for name in sorted(set(old) | set(new)):
@@ -1142,7 +937,6 @@ def version_changes(old, new):
 
 
 def package_date(path):
-    """The `exclude-newer` date in a notebook's PEP 723 header, or None."""
     try:
         text = Path(path).read_text()
     except OSError:
@@ -1153,7 +947,6 @@ def package_date(path):
 
 
 def header_packages(path):
-    """The package names a notebook's PEP 723 header lists in `dependencies`, canonical (`canonical`)."""
     try:
         text = Path(path).read_text()
     except OSError:
@@ -1168,13 +961,9 @@ def header_packages(path):
 
 
 def canonical(name):
-    """A PyPI name as PEP 503 compares it."""
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-# Import names of widely used packages, for `near_miss` (#416): a new name a letter or two from one of
-# these is likely a typo, and PyPI has typosquats of exactly these. Kept small and shipped here, so
-# the check needs no network. A name on the list is never flagged.
 COMMON_MODULES = frozenset("""
 aiohttp altair anndata anthropic anyio apache_beam arrow astropy attr attrs awkward
 bcrypt biopython black bokeh boto3 botocore bs4 cachetools catboost certifi cffi chardet
@@ -1200,11 +989,6 @@ xlsxwriter yaml yarl zarr
 
 
 def near_miss(module):
-    """The widely used package `module` may be a typo of, or None. Only a hint, for the question and
-    the agent: the user still decides. Kept narrow, since real packages sit close to common ones
-    (pysam and pyyaml, nilearn and sklearn, boto and boto3): the same first letter, neither name the
-    start of the other, and one edit for a name under 8 letters, two from 8 up; or the same name but
-    for case, `-` or `_`."""
     if module in COMMON_MODULES:
         return None
     low = module.lower()
@@ -1226,7 +1010,6 @@ def near_miss(module):
 
 
 def edits(a, b):
-    """The edit distance between two names, a swap of neighbours counting as one edit."""
     if abs(len(a) - len(b)) > 2:
         return 3
     prev2, prev = None, list(range(len(b) + 1))
@@ -1241,13 +1024,11 @@ def edits(a, b):
 
 
 def pypi_name(module):
-    """The PyPI name marimo installs for an import of `module`: its own mapping, else the module's name."""
     from marimo._runtime.packages.module_name_to_pypi_name import module_name_to_pypi_name
     return module_name_to_pypi_name().get(module, module)
 
 
 def json_text(data):
-    """A list, tuple or dict output as text: marimo's JSON, with its typed leaves (`text/plain+float:2.5`) as plain values."""
     try:
         value = json.loads(data) if isinstance(data, str) else data
     except ValueError:
@@ -1266,7 +1047,6 @@ def json_text(data):
     return plain(value)
 
 
-# marimo's error types, by the names Ember's errors use for the same thing.
 ERROR_KINDS = {"exception": "runtime", "multiple-defs": "multiple_definitions", "syntax": "parse", "ancestor-stopped": "upstream_error", "ancestor-prevented": "upstream_error"}
 
 
@@ -1293,9 +1073,6 @@ def error_of(out, console):
     return d
 
 
-# ---- The graph, from the code (no kernel) ------------------------------------
-
-
 def analyse(code, cid):
     from marimo._ast.compiler import compile_cell
     try:
@@ -1317,9 +1094,7 @@ def graph(nb, edges=False, packages=False):
     for cid in nb.order:
         for parent in up[cid]:
             down[parent].append(cid)
-    # A name defined in two cells is marimo's error: those cells don't run.
     clash = {c for cells in defined.values() if len(cells) > 1 for c in cells}
-    # Run order: topological, page order among equals; cells in a cycle can't run.
     order, done, visiting, blocked = [], set(), set(), set(clash)
 
     def visit(cid):
@@ -1369,9 +1144,6 @@ def imports(code):
 CODE_MODE = "import marimo._code_mode as cm\nctx = cm.get_context(skip_staleness_check=True)\n"
 
 
-# ---- The adapter -------------------------------------------------------------
-
-
 class Adapter:
     def __init__(self):
         self.marimo = Marimo()
@@ -1380,7 +1152,6 @@ class Adapter:
         self.notes = []
         self.changed = asyncio.Event()
         self.runs = 0
-        # Each run that's going on: set when it's over.
         self.done = {}
 
     def notify(self, method, **params):
@@ -1426,7 +1197,6 @@ class Adapter:
         if os.path.exists(path):
             raise argument_error("file_exists", f"'{path}' already exists; use open_notebook to load it")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        # The first write of a file no engine has yet: marimo's own empty notebook.
         date = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         Path(path).write_text(NEW_HEADER.format(python=f"{sys.version_info[0]}.{sys.version_info[1]}", version=marimo.__version__, date=date) + NEW_NOTEBOOK)
         r = await self.open(path, True)
@@ -1455,14 +1225,12 @@ class Adapter:
         if nb.allowed and not nb.live:
             raise argument_error("execution_blocked", "marimo is still starting this notebook (building its environment); try again when it is ready")
         if not nb.live:
-            # Safe preview: the edit goes to the file (`write_file`). A change made on disk since is read first.
             nb.reload_if_changed()
         for op in ops:
             if op.get("op") == "set_code" and op.get("expected") is not None:
                 cid = nb.check_cell(op["cell_id"])
                 if nb.cells[cid]["code"] != op["expected"]:
                     raise argument_error("stale_read", f"Cell {cid} changed since last read; call read_cell again")
-        # The code each set or new cell is kept as (`file_form`), for the core to record as the agent's read.
         changes, inserted, order, kept = [], [], list(nb.order), {}
         for op in ops:
             kind = op.get("op", "")
@@ -1499,7 +1267,6 @@ class Adapter:
                 changes.append(change)
                 order.insert(i, cid)
             elif kind == "fold":
-                # marimo replaces the whole config, and refuses one missing a field: the rest stays as the file had it.
                 cid = nb.check_cell(op["cell_id"])
                 config = nb.cells[cid].get("config") or {}
                 changes.append({"type": "set-config", "cellId": cid, "column": config.get("column"), "disabled": bool(config.get("disabled")),
@@ -1513,13 +1280,8 @@ class Adapter:
         elif changes:
             sid = nb.watcher
             await self.marimo.post("/api/document/transaction", sid, {"changes": changes})
-            # The transaction changes the document only. A deleted cell also has to leave the kernel's
-            # graph, or what it defined stays there, and the cells that read it keep running in the
-            # session though a fresh run of the file fails on them (#410). In lazy mode they turn stale.
             deleted = [ch["cellId"] for ch in changes if ch["type"] == "delete-cell"]
             if deleted:
-                # Its readers are marked stale here, as marimo will mark them: the kernel takes the cell
-                # out only after a running cell, and a read before that would show them current.
                 if any(nb.cells[c]["ran_code"] is not None for c in deleted):
                     down = {d["cell_id"]: d["downstream"] for d in graph(nb, edges=True)["cells"]}
                     todo, seen = list(deleted), set(deleted)
@@ -1531,7 +1293,6 @@ class Adapter:
                                 if nb.cells[r]["ran_code"] is not None:
                                     nb.cells[r]["stale"] = True
                 asyncio.create_task(self.unregister(nb, deleted))
-            # Our copy follows at once, not when marimo's message comes back: the next read is ours.
             for ch in changes:
                 nb.document_change(ch)
             await self.save(nb, sid)
@@ -1539,11 +1300,6 @@ class Adapter:
         return {"inserted": inserted, "seq": self.seq, "codes": kept}
 
     async def unregister(self, nb, cells):
-        """Take deleted cells out of the kernel's graph too: a document transaction leaves them there, with
-        what they defined, so the cells that read it keep running in the session though a fresh run of the
-        file fails on them (#410). marimo's /api/kernel/delete refuses us (no page is the session's editor),
-        so it goes through code mode, which waits behind a running cell; the edit doesn't wait for it, and a
-        later run queues behind it. In lazy mode the readers turn stale."""
         code = CODE_MODE + "from marimo._runtime.commands import DeleteCellCommand\n" + \
             "".join(f"await ctx._kernel.delete_cell(DeleteCellCommand(cell_id={c!r}))\n" for c in cells)
         try:
@@ -1557,7 +1313,6 @@ class Adapter:
         cells = [nb.cells[c] for c in nb.order]
         await self.marimo.post("/api/kernel/save", sid, {
             "cellIds": list(nb.order), "codes": [c["code"] for c in cells], "names": [c["name"] or "_" for c in cells],
-            # A cell's config as the file had it (disabled, column), where known.
             "configs": [{"column": (c.get("config") or {}).get("column"), "disabled": bool((c.get("config") or {}).get("disabled")),
                          "hide_code": c["hide_code"], "expand_output": bool((c.get("config") or {}).get("expand_output"))} for c in cells],
             "filename": nb.path, "persist": True})
@@ -1565,7 +1320,6 @@ class Adapter:
     async def start_run(self, nb, cells, watch=True, ask_new=False):
         sid = await nb.session_id()
         for c in cells:
-            # Marked now: a read straight after the call sees the run, not the cell as it was.
             if nb.cells[c]["status"] != "running":
                 nb.cells[c]["status"] = "queued"
                 nb.cells[c]["queued_by_us"] = True
@@ -1574,7 +1328,6 @@ class Adapter:
         return self.watch(nb, cells, ask_new) if watch else None
 
     def watch(self, nb, cells, ask_new, first=None):
-        """A run of `cells` that `run_finished` reports the end of, after `first` where given."""
         self.runs += 1
         run = f"py-run-{self.runs}"
         nb.watched.update(cells)
@@ -1590,7 +1343,6 @@ class Adapter:
         except Exception as e:  # noqa: BLE001
             print(f"endeavor marimo: couldn't run {cells}: {e}", file=sys.stderr)
         finally:
-            # Cells marked queued that marimo never took (it refused the run) mustn't look queued forever.
             await asyncio.sleep(0.5)
             for c in cells:
                 if c in nb.cells and nb.cells[c]["status"] == "queued" and nb.cells[c].get("queued_by_us"):
@@ -1607,7 +1359,6 @@ class Adapter:
         finally:
             nb.watched.subtract(cells)
             for c in cells:
-                # A cell another watched run still has keeps its mark until that run ends too.
                 if nb.watched[c] <= 0:
                     del nb.watched[c]
                     if c in nb.cells:
@@ -1628,8 +1379,6 @@ class Adapter:
     async def run(self, nb, cells, wait, timeout, ask_new=False):
         cells = [nb.check_cell(c) for c in cells]
         result = {"accepted": nb.allowed and nb.live, "process_status": nb.process_status()}
-        # The cells that wait for an OK run with these, and ask again for what is new then: an edit may
-        # have dropped the import, or the user added the package another way.
         if result["accepted"] and nb.asking:
             cells = [c for c in nb.asking["cells"] if c in nb.cells and c not in cells] + cells
             nb.asking = None
@@ -1637,9 +1386,6 @@ class Adapter:
             if result["accepted"] and wait:
                 result.update(completed=[], timed_out=[])
             return result
-        # marimo runs lazily here (no autorun, so opening a notebook runs nothing), which would leave the
-        # cells below a run stale, or showing the error it fixed. Pluto reruns them, and the tools say a run
-        # does: the run takes them too, in the graph's order, and the core is told which.
         g = graph(nb, edges=True)
         down = {d["cell_id"]: d["downstream"] for d in g["cells"]}
         dependents, todo = [], list(cells)
@@ -1654,7 +1400,6 @@ class Adapter:
         if not wait:
             result["run"] = run
             return result
-        # Over when its watch says so: that covers a package it installs and the cells it runs again.
         done = self.done.get(run)
         if done is not None:
             try:
@@ -1663,7 +1408,6 @@ class Adapter:
                 pass
         left = self.unfinished(nb, ran) if done is not None and not done.is_set() else []
         if nb.asking:
-            # As a Julia run that asks answers: its cells wait, so none finished.
             left = sorted(set(left) | {c for c in ran if c in nb.asking["cells"]}, key=ran.index)
             result["asking"] = nb.asking["packages"]
         result["process_status"] = nb.process_status()
@@ -1675,17 +1419,14 @@ class Adapter:
 
     async def interrupt(self, nb):
         busy = bool(self.unfinished(nb, list(nb.order))) or bool(nb.asking)
-        # Cells that wait for an OK stop waiting: they show their import error again.
         nb.asking = None
         if nb.live:
             await self.marimo.post("/api/kernel/interrupt", await nb.session_id(), {})
         return {"interrupted": busy}
 
     async def restart(self, nb):
-        """A new session for the notebook, every cell not run."""
         if not nb.allowed:
             raise argument_error("execution_blocked", "The notebook is in safe preview; Run notebook starts it")
-        # marimo's restart closes the session (its page then reloads, which starts a new one); we start it.
         nb.closing = True
         await self.marimo.post("/api/kernel/restart_session", await nb.session_id(), {}, timeout=300)
         if nb.ws:
@@ -1699,11 +1440,6 @@ class Adapter:
         return {"restarted": True}
 
     async def preview_packages(self, nb, date, package=None, version=None):
-        """What moving the notebook's package date (the header's `exclude-newer`) to `date`, or to now, would
-        change; nothing changes yet. uv resolves the header at its date, and again at the new one with each
-        exactly pinned package let go to that date's newest; `changes` are the versions that differ, the
-        packages they bring included. marimo stays at the server's version. Nothing is built (`--no-build`),
-        so a preview runs no package's code, in safe preview too. `apply_packages` writes it."""
         if package is not None or version is not None:
             raise argument_error("not_supported", "A Python notebook's packages move together with its date: give `date`, or leave it out for today's newest. Exact versions are in the header")
         stamp = date_stamp(date)
@@ -1712,7 +1448,6 @@ class Adapter:
         old, problem = await asyncio.to_thread(resolve, nb.path, before)
         new = None
         if old is None:
-            # With no versions to start from, every package would read as added.
             problem = f"The notebook's header doesn't resolve as it is, so there is nothing to compare with: fix the header first (a version that doesn't exist, or one only buildable from source). uv said: {problem}"
         else:
             new, problem = await asyncio.to_thread(resolve, nb.path, after)
@@ -1726,10 +1461,6 @@ class Adapter:
                 "packages": len([d for d in header_deps(before) if not is_marimo(d)])}
 
     async def apply_packages(self, nb, date):
-        """Move the package date to the one `preview_packages` showed for `date`, and pin each exactly pinned
-        package at that date's version: refused unless the preview is ready and still what it would do. A live
-        notebook then gets a new session, whose sandbox is built from the new header, and every cell is left not run.
-        In safe preview only the file changes."""
         shown = nb.previewed
         day = day_of(date_stamp(date))
         if not shown or shown["day"] != day:
@@ -1744,8 +1475,6 @@ class Adapter:
         nb.previewed = None
         if new is None or version_changes(old, new) != shown["changes"]:
             raise argument_error("no_preview", again)
-        # Before the restart: marimo's save keeps the header the file has, so the session can't write the
-        # old one back, and a header that changed under us (a start adding marimo) stops it with nothing done.
         if not write_header(nb.path, pin_at(before, shown["stamp"], new), before):
             raise argument_error("no_preview", again)
         nb.mtime = os.stat(nb.path).st_mtime
@@ -1754,12 +1483,6 @@ class Adapter:
         return {"date": day, "changes": shown["changes"], "process_status": nb.process_status()}
 
     async def approve(self, nb, packages=None):
-        """The user's yes to the packages a notebook asks about (#355): they install, and the cells that
-        waited run, under a run that `run_finished` reports the end of. `packages`, when given, are the
-        PyPI names the user was shown: the yes covers only those (#418). A package added since keeps
-        asking, and the cells wait for it too; a yes that names none of what waits approves nothing.
-        Like a Julia notebook's reply, it says whether the install and run were started (`accepted`)
-        and the notebook's `process_status` (#419)."""
         a = nb.asking
         if not a or not nb.live:
             raise argument_error("nothing_to_approve", "Nothing in this notebook waits for the user's OK")
@@ -1777,7 +1500,6 @@ class Adapter:
             a["packages"] = left
             return {"approved": True, "accepted": False, "packages": ok, "asking": left, "cells": cells, "process_status": nb.process_status()}
         nb.asking = None
-        # Marked now: a read straight after the OK sees them wait for the install, not their import error.
         for c in cells:
             nb.cells[c]["status"], nb.cells[c]["queued_by_us"], nb.cells[c]["awaiting_install"] = "queued", True, True
 
@@ -1880,7 +1602,6 @@ class Adapter:
 
 
 def new_id(nb, taken):
-    # marimo's own id form: four letters.
     while True:
         cid = "".join(secrets.choice("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") for _ in range(4))
         if cid not in nb.cells and cid not in taken:
@@ -1899,7 +1620,7 @@ def make_app(adapter):
             return JSONResponse({"result": await adapter.call(str(msg.get("method") or ""), msg.get("params") or {})})
         except AdapterError as e:
             return JSONResponse({"error": str(e)})
-        except Exception as e:  # noqa: BLE001 - every failure is an answer
+        except Exception as e:  # noqa: BLE001
             return JSONResponse({"error": f"python_error::{type(e).__name__}: {e}"})
 
     async def notifications(req: Request):
@@ -1924,7 +1645,6 @@ def make_app(adapter):
 
 
 def write_state(bridge_port, server):
-    """Written whole or not at all: the core polls for the file. marimo's token isn't in it: the core made it."""
     if not STATE_FILE:
         return
     tmp = f"{STATE_FILE}.tmp{os.getpid()}"

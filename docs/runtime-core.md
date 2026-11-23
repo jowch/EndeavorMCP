@@ -440,7 +440,8 @@ notebook is opened. How it and Ember's install work is in
 ### Python
 
 Python notebooks' adapter (`runtime/marimo/adapter.py`, which runs marimo)
-starts the first time a Python notebook is opened or made. uv runs it, with
+starts the first time a Python notebook is opened or made. How it works is in
+[marimo-adapter.md](marimo-adapter.md). uv runs it, with
 the packages in `requirements.txt`, and each notebook gets its own uv
 environment from its header. uv is found on the PATH, where its installer
 puts it, or in Homebrew's folder.
