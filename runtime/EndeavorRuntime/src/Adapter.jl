@@ -287,6 +287,9 @@ end
 const _ASKING = Dict{UUID,Any}()        # notebook => (cells = the held cells, packages)
 const _APPROVED = Dict{UUID,Set{String}}()  # notebook => packages the user said yes to
 const _ASKING_LOCK = ReentrantLock()
+# Cells that waited for an OK no longer needed (an edit dropped the package, or it came another
+# way): released, they run with the notebook's next run, which is what was asked of them (#523).
+const _LEFT = Dict{UUID,Vector{Pluto.Cell}}()
 
 function new_packages(nb)
     ctx = nb.nbpkg_ctx
@@ -300,16 +303,19 @@ end
 
 _asking(nb) = lock(() -> get(_ASKING, nb.notebook_id, nothing), _ASKING_LOCK)
 
-function _forget_asking!(nb)
+# `keep`: the cells still want to run, with the next run (`_LEFT`). A Stop's are dropped.
+function _forget_asking!(nb; keep::Bool=false)
     held = lock(_ASKING_LOCK) do
         a = pop!(_ASKING, nb.notebook_id, nothing)
-        a === nothing ? Pluto.Cell[] : a.cells
+        held = a === nothing ? Pluto.Cell[] : a.cells
+        keep ? append!(get!(Vector{Pluto.Cell}, _LEFT, nb.notebook_id), held) : delete!(_LEFT, nb.notebook_id)
+        held
     end
     isempty(held) || _release_cells!(nb, held)
     return nothing
 end
 
-forget_packages!(notebook_id::UUID) = lock(() -> (delete!(_ASKING, notebook_id); delete!(_APPROVED, notebook_id)), _ASKING_LOCK)
+forget_packages!(notebook_id::UUID) = lock(() -> (delete!(_ASKING, notebook_id); delete!(_APPROVED, notebook_id); delete!(_LEFT, notebook_id)), _ASKING_LOCK)
 
 # The user's yes to the packages a notebook asks about: they install, and the
 # held cells run. `packages`, when given, are the ones the user was shown: the
@@ -341,7 +347,7 @@ function _asking_step(nb)
     # nothing waits for an OK any more. A snapshot releases the held cells then, on purpose, so an
     # edit unblocks without another call; it costs a topology pass per snapshot while one asks.
     if isempty(new_packages(nb))
-        _forget_asking!(nb)
+        _forget_asking!(nb; keep=true)
         return nothing
     end
     Dict{String,Any}(
@@ -490,6 +496,11 @@ end
 # and a `run_finished` notification with that `run` says when it ends.
 function run_cells!(session, nb, cells; wait::Bool, timeout::Real, ask_new::Bool=false)
     accepted = Pluto.will_run_code(nb)
+    # Cells released from a wait for an OK no longer needed run with this run (#523).
+    if accepted
+        left = lock(() -> pop!(_LEFT, nb.notebook_id, Pluto.Cell[]), _ASKING_LOCK)
+        cells = unique!(filter(c -> haskey(nb.cells_dict, c.cell_id), vcat(collect(cells), left)))
+    end
     # A notebook that asks already holds these cells too, and asks again with
     # what is new now (an edit may have dropped or added a package).
     if accepted && (ask_new || _asking(nb) !== nothing)

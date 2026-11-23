@@ -64,7 +64,8 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   other cells still read and view as usual, #506), `packages.step` is `asking`
   with `new`, and `approve_install` is the user's yes, asked about in the
   same dialog or page; its yes holds for those packages while the notebook
-  is open. The yes covers only the packages the user was shown: the dialog,
+  is open. An edit that drops the package releases the cells, and they
+  run with the notebook's next run (#523). The yes covers only the packages the user was shown: the dialog,
   the page and the app's card pass their names on (`approve_install`'s
   `packages`, interface 43), and a package the notebook came to need after
   the question asks again (#418). A call the front passes on with no yes to

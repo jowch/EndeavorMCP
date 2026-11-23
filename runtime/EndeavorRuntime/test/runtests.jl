@@ -967,6 +967,19 @@ end
             result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "nothing")))
             @test !haskey(run_asking([pkg]), "asking")
             @test result("snapshot", Dict("notebook_id" => nid))["packages"] === nothing
+            # A cell held with it, which the run after the edit doesn't name, runs with that run: the
+            # snapshot that saw nothing new released it, and it was asked to run (#523).
+            title = insert("md\"Title\"", 5)
+            result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "using Example")))
+            @test run_asking([pkg, title])["asking"] == ["Example"]
+            @test nb.cells_dict[UUID(title)].queued && nb.cells_dict[UUID(title)].output.last_run_timestamp == 0
+            result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "nothing")))
+            @test result("snapshot", Dict("notebook_id" => nid))["packages"] === nothing
+            @test !nb.cells_dict[UUID(title)].queued
+            ran = run_asking([pkg])
+            @test !haskey(ran, "asking") && title in ran["completed"]
+            @test nb.cells_dict[UUID(title)].output.last_run_timestamp > 0
+            result("apply", ops(Dict("op" => "delete", "cell_id" => title)))
             # Asked again, and stopped: the cell isn't queued any more.
             result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "using Example")))
             @test run_asking([pkg])["asking"] == ["Example"]
