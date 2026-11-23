@@ -2865,12 +2865,39 @@ fn close_notebook_ends_its_own_notebook_and_no_other() {
         let refused = s.call("a", tool, args).unwrap_err();
         assert!(refused.starts_with("ArgumentError: one_notebook::") && refused.contains("You closed it") && refused.contains("open_notebook with its path opens it again"), "{tool}: {refused}");
     }
+    // An engine that can't say what's open keeps the mark: the next call is refused all the same.
+    s.engine.with(&theirs, |nb| nb.broken = true);
+    assert!(s.call("a", "new_notebook", json!({})).unwrap_err().starts_with("ArgumentError: one_notebook::"));
+    s.engine.with(&theirs, |nb| nb.broken = false);
+    assert!(s.call("a", "new_notebook", json!({})).unwrap_err().contains("You closed it"));
     assert!(s.call("a", "open_notebook", json!({ "path": &paths[0] })).is_ok());
     assert_eq!(s.notebooks.bound("a").as_ref(), Some(&paths[0]));
     // Open again, it closes as any notebook does: closed some other way, it frees the session.
     s.notebooks.stop_notebook(&paths[0]).unwrap();
     assert!(s.call("a", "open_notebook", json!({ "path": &paths[1] })).is_ok());
     assert_eq!(s.notebooks.bound("a").as_ref(), Some(&paths[1]));
+}
+
+#[test]
+fn a_session_whose_closed_notebook_the_user_opens_again_is_freed_when_the_user_closes_it() {
+    // The user, not the session, opens it again: the session's next change to it, or its
+    // list_notebooks, sees it open, so the user's close frees the session (#520).
+    for seen_by in ["add_cell", "list_notebooks"] {
+        let s = setup();
+        let paths = temp_notebooks(&format!("reopen-{seen_by}"), 2);
+        let mine = s.call("a", "open_notebook", json!({ "path": &paths[0] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+        s.call("a", "close_notebook", json!({ "notebook_id": mine })).unwrap();
+        let again = s.call("", "open_notebook", json!({ "path": &paths[0] })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
+        if seen_by == "add_cell" {
+            s.call("a", "add_cell", json!({ "notebook_id": again, "code": "z = 3" })).unwrap();
+        } else {
+            s.call("a", "list_notebooks", json!({})).unwrap();
+        }
+        s.notebooks.stop_notebook(&paths[0]).unwrap();
+        let other = s.call("a", "open_notebook", json!({ "path": &paths[1] }));
+        assert!(other.is_ok(), "{seen_by}: {other:?}");
+        assert_eq!(s.notebooks.bound("a").as_ref(), Some(&paths[1]), "{seen_by}");
+    }
 }
 
 #[test]

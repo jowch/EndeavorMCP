@@ -1333,6 +1333,12 @@ impl Notebooks {
         false
     }
 
+    /// The notebook session `owner` closed is open again (the user opened it): from now on it
+    /// closes as any notebook does, and a close by the user frees the session.
+    fn seen_open(&self, owner: &str) {
+        self.state.lock().unwrap().closed_own.remove(owner);
+    }
+
     /// Session `owner` closed `path` with `close_notebook`. Bound to it, it stays bound (#520);
     /// one that may work on several notebooks, or isn't bound to it, is left as it is.
     fn closed_by(&self, owner: &str, path: &str) {
@@ -1392,16 +1398,15 @@ impl Notebooks {
         }
         let bound = self.bound(owner)?;
         let refuse = |what: &str| {
-            // An engine that can't say leaves the binding.
-            let gone = self.snapshots().is_ok_and(|open| !open.iter().any(|nb| canonical_path(&nb.path).is_ok_and(|p| p == bound)));
-            if gone && self.unbind(owner, &bound) {
+            // An engine that can't say leaves the binding, and the mark (#520).
+            let open = self.snapshots().ok().map(|open| open.iter().any(|nb| canonical_path(&nb.path).is_ok_and(|p| p == bound)));
+            if open == Some(false) && self.unbind(owner, &bound) {
                 return None;
             }
-            if !gone {
-                // Open again (the user opened it): from now on it closes as any notebook does.
-                self.state.lock().unwrap().closed_own.remove(owner);
+            if open == Some(true) {
+                self.seen_open(owner);
             }
-            let closed = if gone && self.state.lock().unwrap().closed_own.contains(owner) {
+            let closed = if open == Some(false) && self.state.lock().unwrap().closed_own.contains(owner) {
                 " You closed it, and closing it doesn't free the session for another: open_notebook with its path opens it again."
             } else {
                 ""
@@ -1433,7 +1438,13 @@ impl Notebooks {
         let known = self.state.lock().unwrap().notebooks.get(&id).map(|nb| nb.path.clone()).filter(|p| !p.is_empty());
         let path = known.or_else(|| self.snapshot(&id).ok().map(|nb| nb.path))?;
         match canonical_path(&path) {
-            Ok(canonical) if canonical == bound => None,
+            Ok(canonical) if canonical == bound => {
+                // Its own notebook, open again (the user opened it): it closes as any notebook does.
+                if self.state.lock().unwrap().closed_own.contains(owner) && self.snapshot(&id).is_ok() {
+                    self.seen_open(owner);
+                }
+                None
+            }
             Err(error) => Some(error),
             Ok(_) => refuse(&format!("change or run {path}")),
         }

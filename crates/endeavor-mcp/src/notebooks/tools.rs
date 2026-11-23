@@ -822,8 +822,13 @@ impl Call<'_> {
         // A session that may work on several notebooks can't say which is the conversation's (`allow_several`).
         let several = self.nbs.several(self.owner);
         let own = |at: usize| !several && bound.as_ref().is_some_and(|bound| paths[at] == *bound);
-        if let Some(bound) = bound.as_ref().filter(|bound| !paths.contains(bound)) {
-            self.nbs.unbind(self.owner, bound);
+        match bound.as_ref() {
+            Some(bound) if !paths.contains(bound) => {
+                self.nbs.unbind(self.owner, bound);
+            }
+            // Its own notebook, open again: it closes as any notebook does (#520).
+            Some(_) => self.nbs.seen_open(self.owner),
+            None => {}
         }
         let mut state = self.nbs.state.lock().unwrap();
         Ok(Value::Array(snapshots.iter().enumerate().map(|(at, nb)| nb.summary(&state.notebooks.entry(nb.id.clone()).or_default().pending_run(nb), own(at))).collect()))
