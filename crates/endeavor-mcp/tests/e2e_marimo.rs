@@ -670,7 +670,7 @@ fn a_python_notebook_through_the_runtime() {
         let shown = text(&mut agent, &small);
         assert!(shown.lines().any(|l| l.split_whitespace().last() == Some("10")) && !shown.contains("the first"), "all 11 rows: {shown}");
         let shown = text(&mut agent, &big);
-        assert!(shown.contains("[the first 25 of 30 rows]") && shown.lines().any(|l| l.split_whitespace().last() == Some("24")), "{shown}");
+        assert!(shown.contains("[the first 25 of 30 rows]") && shown.lines().any(|l| l.split_whitespace().last() == Some("24")) && !shown.lines().any(|l| l.split_whitespace().last() == Some("25")), "{shown}");
         agent.ok("close_notebook", json!({ "notebook_id": nb }));
     });
 
