@@ -310,6 +310,18 @@ check("an error: errored, structured, message as output", isTRUE(ec$errored) && 
       identical(ec$error$msg, "boom") && identical(ec$output, "boom"))
 pc <- cell_of(snap, err$inserted[[2]])
 check("a plot: placeholder output", grepl("^\\[image/png output, [0-9]+ bytes; call view_cell_output", pc$output))
+# An error names what failed (#288): a code cell's call, or a text cell's inline span.
+calls <- result("apply", list(notebook_id = nid, ops = list(
+  list(op = "insert", index = 6, code = "#' see `r stop(\"boom\")`", folded = FALSE),
+  list(op = "insert", index = 7, code = "fails <- function() stop(\"x\")\nfails()", folded = FALSE))))
+invisible(result("run", list(notebook_id = nid, cells = calls$inserted, wait = TRUE, timeout = 60)))
+snap <- result("snapshot", list(notebook_id = nid))
+span_err <- cell_of(snap, calls$inserted[[1]])$error
+code_err <- cell_of(snap, calls$inserted[[2]])$error
+check("a text cell's failed inline span: its call is the span", identical(span_err$call, "`r stop(\"boom\")`") && identical(span_err$line, 1L))
+check("a code cell's error: its call is R's", identical(code_err$call, "fails()"))
+# One delete per edit: two in one edit fail in Ember once the cells have run (Ember #637).
+for (id in calls$inserted) invisible(result("apply", list(notebook_id = nid, ops = list(list(op = "delete", cell_id = id)))))
 png <- result("render_png", list(notebook_id = nid, cell_id = err$inserted[[2]]))
 check("render_png: base64 PNG", identical(png$mime, "image/png") && identical(as.integer(base64_dec(png$png)[2:4]), c(0x50L, 0x4eL, 0x47L)))
 placeholder_bytes <- as.integer(sub("^\\[image/png output, ([0-9]+) bytes.*", "\\1", pc$output))

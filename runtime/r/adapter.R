@@ -275,6 +275,9 @@ structure_error <- function(e) {
   if (length(e$names) > 0) d$names <- I(e$names)
   if (length(e$cells) > 0) d$cells <- I(e$cells)
   if (!is.null(e$line)) d$line <- e$line
+  # What failed, as R's "Error in <call>:" names it: a code cell's call, or a text cell's
+  # `` `r expr` `` span, so the agent can tell which part of the cell to change (#288).
+  if (is.character(e$call) && length(e$call) == 1 && nzchar(e$call)) d$call <- e$call
   if (length(e$traceback) > 0) d$traceback <- I(e$traceback)
   d
 }
