@@ -1,6 +1,3 @@
-# A copy of Endeavor's .github/ISSUE_TEMPLATE/feedback.yml: the same questions and
-# details as the Tally form on Endeavor's feedback page. The fields are listed in
-# Endeavor's site/feedback-fields.md; change them there and copy this file.
 name: Something got in your way
 description: Trying Endeavor or its plugin, and something stopped you, confused you or took too long.
 title: "Got in my way: "
