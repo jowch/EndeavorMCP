@@ -405,7 +405,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
         Ok(n) => (n, None),
         Err(e) => (Vec::new(), Some(e)),
     };
-    let wants_rerun = specs["checks"].as_array().into_iter().flatten().any(|c| c["check"] == "reproducible");
+    let wants_rerun = specs["checks"].as_array().into_iter().flatten().any(wants_reproducible);
     let rerun = (wants_rerun && read_error.is_none()).then(|| rerun(&notebooks, task, work, &project, endeavor));
     let ev = Evidence { calls: &calls, notebooks: &notebooks, agent_tools: &agent.tools, final_message: &agent.final_message, injections: &injections, rerun: rerun.as_ref(), turns: &turns_at, server_files: &server_files, questions: &questions, pages: &pages };
     let outcomes: Vec<checks::Outcome> = specs["checks"].as_array().into_iter().flatten().map(|spec| checks::run(spec, &ev)).collect();
@@ -442,6 +442,12 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
         "notebooks": notebooks_json(&notebooks),
         "rerun": rerun.as_ref().map(|r| r.as_ref().map_or_else(|e| json!(e), |n| notebooks_json(n))),
     })
+}
+
+/// Whether a check is `reproducible` or holds one, inside `any_of` or `all_of` (N8's): the task's
+/// notebook is then run again afresh.
+fn wants_reproducible(check: &Value) -> bool {
+    check["check"] == "reproducible" || check["checks"].as_array().into_iter().flatten().any(wants_reproducible)
 }
 
 /// The user's messages: the prompt, then each of `followup.md`'s, which a line of `---` alone separates.
@@ -1057,6 +1063,17 @@ mod tests {
         .join("\n");
         assert_eq!(foreign_tools_used(&transcript), ["mcp__claude_ai_x__y"]);
         assert!(foreign_tools_used(&transcript.replace("mcp__claude_ai_x__y", "Read")).is_empty());
+    }
+
+    #[test]
+    fn a_reproducible_check_inside_any_of_or_all_of_asks_for_the_rerun() {
+        assert!(wants_reproducible(&json!({ "check": "reproducible" })));
+        let nested = json!({ "check": "any_of", "checks": [{ "check": "all_of", "checks": [{ "check": "notebooks" }, { "check": "reproducible" }] }] });
+        assert!(wants_reproducible(&nested));
+        assert!(!wants_reproducible(&json!({ "check": "any_of", "checks": [{ "check": "notebooks" }] })));
+        // Every task whose checks hold one, at any depth, asks for it: N8's nests it (#524).
+        let n8: Value = serde_json::from_str(include_str!("../../../smoke/tasks/N8-one-notebook/checks.json")).unwrap();
+        assert!(n8["checks"].as_array().unwrap().iter().any(wants_reproducible));
     }
 
     #[test]
