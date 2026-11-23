@@ -1,26 +1,3 @@
-//! `endeavor core`: the runtime the helper starts (docs/runtime-core.md).
-//! It serves the runtime's one port and writes `runtime.json`. On that port it
-//! serves the agent's MCP connection at `/mcp` and the app's `/endeavor/call`s
-//! itself (see `mcp`), and the app's `/endeavor/events` stream (see
-//! `notebooks`), driving each notebook engine through its adapter. Every other
-//! path is Pluto's page, passed through to Pluto's private port with Pluto's
-//! secret added, WebSockets included (docs/one-port.md), or under `/ember/`,
-//! Ember's.
-//!
-//! Julia (`julia boot.jl`, with Pluto) is the core's child. With
-//! `--julia-when-needed` it starts the first time something needs it: a Julia
-//! notebook opened or made, or a browser opening Pluto's page. The core finds
-//! Julia only then, so a runtime that only ever opens R notebooks never finds,
-//! downloads or starts Julia. Without the flag Julia starts at once, and
-//! `runtime.json` is written once it's ready, as the app expects.
-//!
-//! Julia shares the core's process group, which the helper created, so the
-//! helper's signals to the group reach both. A stop signal sent to the core
-//! alone goes on to Julia. Once Julia has started, the core exits when Julia
-//! does, the same way; before that it ends on a stop signal itself. On
-//! Windows the core puts itself in a Job Object as it starts, so Julia and its
-//! workers end when the core does.
-
 use std::fs::OpenOptions;
 use std::io::{self, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -39,21 +16,8 @@ use wire::backend::Backend;
 use crate::mcp::Bridge;
 use crate::{USAGE, bridge_call, owner_only, remove_state};
 
-/// The number for what a core offers the processes that use it, recorded in `runtime.json` as
-/// `interface`: the notebook tools' names and arguments at `/mcp`, the app's `/endeavor/call`s and
-/// `/endeavor/events`, and the record's own fields. A front or a client of another build uses a
-/// runtime with the same number as it is, and treats one with another number (or none) as another
-/// build's. Two builds with one number must take each other's calls both ways: a newer front meets
-/// an older core as often as the reverse, and lists its own build's tools. So raise it with any
-/// change to those that a caller of the build before would get wrong, additions included (a tool, an
-/// argument, a call), and with a change in what one returns or does while its arguments stay the same.
-/// A field of the record that older callers ignore, and that a newer one does without when it's
-/// missing, doesn't count (`network`); nor do descriptions and changes inside the core. Tests in `mcp.rs` fail when the notebook tools' names or arguments change, and when
-/// a call the app makes or a field of the record is added, removed or renamed; nothing catches a change
-/// in what a call or the events stream returns.
 pub const INTERFACE: u32 = 47;
 
-/// Where boot.jl writes its state for the core, in the state folder.
 const JULIA_STATE: &str = "julia.json";
 
 #[cfg(unix)]
@@ -61,24 +25,15 @@ const STOP_SIGNALS: [i32; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
 
 struct Args {
     state_dir: PathBuf,
-    /// Where to find Julia: a path, or what `--julia auto`, `--julia own` and `--julia-shell` mean (`julia::find`).
     julia: crate::julia::Source,
-    /// `--install-julia`: Endeavor's own Julia may be downloaded when none is found.
     install_julia: bool,
-    /// `--julia-when-needed`: Julia starts the first time something needs it, not at once.
     julia_when_needed: bool,
     runtime: PathBuf,
     depot: String,
-    /// The R for R notebooks, and the R library Ember is installed in (none: Endeavor's own).
     r: crate::r::Source,
     r_library: Option<String>,
-    /// `--own-r`: the core is on the user's own computer, where it may offer Endeavor's own R on a Mac
-    /// when none is found; `--install-r`: it may install it without asking again.
     own_r: bool,
     install_r: bool,
-    /// `--lifeline FD`: the read end of a pipe from the helper that started the core (`connect
-    /// --own-with-client`), whose end before it says "k" means the start was abandoned (`watch_lifeline`).
-    /// On Windows it is the value of an inherited handle.
     lifeline: Option<usize>,
 }
 
@@ -126,21 +81,6 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     })
 }
 
-/// `endeavor core …`, with ENDEAVOR_TOKEN and ENDEAVOR_LAUNCHER in the
-/// environment, and ENDEAVOR_BUILD, the app build it came from, which it
-/// reports to the app. Its stdout and stderr are the runtime's log, which Julia shares.
-///
-/// Started without the app (`standalone`), the environment also has
-/// ENDEAVOR_FOLDER, the notebooks' folder, which makes it a standalone
-/// runtime, or ENDEAVOR_NO_FOLDER, which makes it one with no project folder:
-/// it works in the user's home folder, and only a session that says it has none
-/// gives absolute paths only;
-/// ENDEAVOR_PORT, a fixed port; ENDEAVOR_HOST_TOOLS, the host name
-/// under which every session gets the host tools; and ENDEAVOR_IDLE_HOURS, the
-/// idle stop (48 hours when not set). ENDEAVOR_EXIT_IDLE, to end the runtime
-/// once no notebook has been open for that long, works with or without a
-/// folder: a client asks for it on a runtime it starts in the background.
-/// `runtime.json` says whether it was set.
 pub fn main(argv: &[String]) -> ! {
     let args = parse_args(argv).unwrap_or_else(|e| {
         eprintln!("{e}\n{USAGE}");
@@ -152,7 +92,6 @@ pub fn main(argv: &[String]) -> ! {
     };
     let token = std::env::var("ENDEAVOR_TOKEN").unwrap_or_else(|_| fail("ENDEAVOR_TOKEN is not set".into()));
     let launcher = std::env::var("ENDEAVOR_LAUNCHER").unwrap_or_else(|_| "process".into());
-    // Held until `runtime.json` is written (`record`), so that a client can tell a start under way from one that died.
     let starting_lock = crate::runtime::hold_starting(&args.state_dir).unwrap_or_else(|e| fail(format!("Couldn't lock {}: {e}", args.state_dir.display())));
     #[cfg(unix)]
     let (stop_signals, inherited_mask) = block_stop_signals();
@@ -161,13 +100,11 @@ pub fn main(argv: &[String]) -> ! {
     if let Some(lifeline) = args.lifeline {
         watch_lifeline(lifeline, &args.state_dir);
     }
-    // The runtime is the `runtime/` inside the folder `unpack` made.
     let _lease = args.runtime.parent().and_then(crate::lease);
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let fixed_port: u16 = env("ENDEAVOR_PORT").and_then(|p| p.parse().ok()).unwrap_or(0);
     let folder = env("ENDEAVOR_FOLDER");
     let no_folder = folder.is_none() && env("ENDEAVOR_NO_FOLDER").is_some();
-    // Not the client's working folder, which may be one a plugin update removes.
     let folder = folder.or_else(|| {
         no_folder.then(|| {
             let home = crate::paths::Env::here().home;
@@ -178,13 +115,11 @@ pub fn main(argv: &[String]) -> ! {
         })
     });
     if let Some(folder) = &folder {
-        // Relative paths in the tools, and Julia's, start in the notebooks' folder.
         std::env::set_current_dir(folder).unwrap_or_else(|e| fail(format!("Couldn't use {folder} as the notebooks' folder: {e}")));
     }
     let idle_hours = env("ENDEAVOR_IDLE_HOURS").and_then(|h| h.parse::<f64>().ok());
     let exit_idle = env("ENDEAVOR_EXIT_IDLE").is_some();
     let listener = TcpListener::bind(("127.0.0.1", fixed_port)).unwrap_or_else(|e| fail(format!("Couldn't open the runtime's port {fixed_port}: {e}")));
-    // Kept, unused, until the process exits: closing it ends the job. Before any child starts.
     #[cfg(windows)]
     let _job = crate::winproc::job_ending_with_this_process().unwrap_or_else(|e| fail(format!("Couldn't keep Julia's processes together with this one (Job Object): {e}")));
     let (stops, stopped) = std::sync::mpsc::channel();
@@ -192,8 +127,6 @@ pub fn main(argv: &[String]) -> ! {
     let page_token = crate::page_token(&args.state_dir).unwrap_or_else(|e| fail(e));
     let cookie = cookie_name(&page_token);
     let port = listener.local_addr().unwrap().port();
-    // The engines' key: Julia's and R's bridges run cells without the core's run gate, so they take neither the
-    // MCP bearer token, which an agent's config carries, nor the pages' token. Made at each start and kept in no file.
     let engine_token = crate::random_hex::<32>().unwrap_or_else(|e| fail(e));
     let julia = JuliaStarter::new(&args, &engine_token, &launcher, stops.clone());
     #[cfg(unix)]
@@ -203,7 +136,6 @@ pub fn main(argv: &[String]) -> ! {
     if let Ok(build) = std::env::var("ENDEAVOR_BUILD") {
         let _ = bridge.notebooks.build.set(build);
     }
-    // Before `runtime.json` is written: a client that sees the record reads these.
     if let Some(hours) = idle_hours {
         bridge.notebooks.set_idle_limit(hours);
     }
@@ -218,11 +150,6 @@ pub fn main(argv: &[String]) -> ! {
     let r = RStarter { mask: Some(inherited_mask), ..r };
     let r = Arc::new(r);
     let _ = served.r.set(r.clone());
-    // An install the call that started it no longer waits for goes on to start R as that call would
-    // have: through the notebooks, so that a call made meanwhile waits for this start, not a second one.
-    // It waits for nothing: an install it begins (Ember's, after Endeavor's own R) comes back here when
-    // it ends, and an update goes on in the background as an update's call has it. So the start lock is
-    // held only for R's launch, and an agent call made meanwhile still answers within its own wait.
     let weak = Arc::downgrade(&served);
     let _ = r.after_install.set(Box::new(move || {
         let Some(served) = weak.upgrade() else { return };
@@ -241,8 +168,6 @@ pub fn main(argv: &[String]) -> ! {
         Backend::Marimo => starting.2.start(&starting.1, came + wait.min(marimo_wait())),
         Backend::Pluto => starting.1.julia.wait(&starting.1, wait.saturating_sub(came.elapsed()).min(julia_wait())).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
     }));
-    // A folder that has Julia notebooks gets Julia started ahead, so its first notebook doesn't wait. Set before
-    // the first connection: the front that started the core sends its folder as soon as it can.
     let weak = Arc::downgrade(&served);
     let _ = served.bridge.on_folder.set(Box::new(move |folder, kind| {
         if let Some(served) = weak.upgrade() {
@@ -252,7 +177,6 @@ pub fn main(argv: &[String]) -> ! {
     accept(listener, served.clone());
 
     if !args.julia_when_needed {
-        // As before Julia started only when needed: `runtime.json` once Julia is ready, and the core gone if it can't start.
         served.julia.begin(&served, false);
         if let Err(why) = served.julia.wait(&served, Duration::MAX) {
             match served.julia.exited() {
@@ -267,7 +191,6 @@ pub fn main(argv: &[String]) -> ! {
     if let Err(e) = record(&args.state_dir, port, &launcher, &served.bridge, &served.page_token) {
         fail(e);
     }
-    // Let go after the record is written: whoever sees the lock free and no record knows the start died.
     crate::runtime::release_starting(starting_lock);
     if exit_idle {
         exit_when_idle(served.clone());
@@ -298,10 +221,6 @@ pub fn main(argv: &[String]) -> ! {
     }
 }
 
-/// What a call that waited `wait` hears while Julia starts: the step, how long so far, and to call
-/// again now, since each call is the wait (an agent told to try again "in a minute" with no way to
-/// pause gave up after a dozen tries, #153). A start that stops moving fails at `julia_stall()`,
-/// with its own message.
 fn starting_message(step: &str, so_far: Duration, wait: Duration) -> String {
     let words = |d: Duration| if d.as_secs() >= 90 { format!("about {} minutes", (d.as_secs() + 30) / 60) } else { format!("{} seconds", d.as_secs()) };
     let what = format!(
@@ -314,10 +233,6 @@ fn starting_message(step: &str, so_far: Duration, wait: Duration) -> String {
     format!("{what} Tell the user once, then make the same call again right away: each call waits up to {} for the start, so don't pause between calls.", words(wait))
 }
 
-/// How long a call that needs Julia waits for it to start before it's told Julia is still starting:
-/// well within the 45 s an agent's call waits, and less if the call already waited (for the user's
-/// answer, say), so that the notebook's open has some of the 45 s too.
-/// ENDEAVOR_TEST_JULIA_WAIT_SECS sets it in debug builds.
 const JULIA_WAIT: Duration = Duration::from_secs(30);
 
 fn julia_wait() -> Duration {
@@ -325,23 +240,15 @@ fn julia_wait() -> Duration {
     test.map_or(JULIA_WAIT, Duration::from_secs)
 }
 
-/// What ends the core.
 enum Stop {
-    /// Julia, once started, ended (on its own, from `endeavor/shutdown`, or from a stop signal passed on).
     Julia(ExitStatus),
-    /// A stop signal came while Julia wasn't running.
     #[cfg(unix)]
     Signal(i32),
-    /// `endeavor/shutdown`, or idle, while Julia wasn't running.
     Shutdown,
 }
 
-/// Write `runtime.json` for the helper: the core's pid and its one `port`, its launcher, node and
-/// job, its tokens, whether it ends itself when idle, and the network settings it was started with.
 fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge, page_token: &str) -> Result<(), String> {
-    // A Slurm job's id, so a reconnect can find the job with squeue.
     let job = if launcher == "slurm" { std::env::var("SLURM_JOB_ID").unwrap_or_default() } else { String::new() };
-    // With the pid, what tells the core from a later process given its pid.
     let started = crate::own_start_time();
     let boot = crate::own_boot();
     let mut state = json!({
@@ -361,10 +268,6 @@ fn record(state_dir: &Path, port: u16, launcher: &str, bridge: &Bridge, page_tok
     write_private(&state_dir.join("runtime.json"), state.to_string().as_bytes())
 }
 
-/// `julia boot.jl` with the environment it reads (see runtime/boot.jl), on
-/// private ports free here (Pluto's, and Julia's bridge for the core), writing
-/// its state to `julia_state` for the core. Its flags must keep the compile cache's key the same
-/// as `standalone::precompile_command`'s, or that background precompile is wasted.
 fn julia_command(julia: &str, runtime: &Path, depot: &str, token: &str, launcher: &str, julia_state: &Path) -> Result<Command, String> {
     let ports = free_ports()?;
     let runtime = runtime.display();
@@ -375,14 +278,10 @@ fn julia_command(julia: &str, runtime: &Path, depot: &str, token: &str, launcher
         .arg(format!("{runtime}/boot.jl"))
         .args(ports.map(|p| p.to_string()))
         .env("JULIA_DEPOT_PATH", crate::paths::with_user_depot(depot))
-        // Not argv, which `ps` shows to every user.
         .env("ENDEAVOR_TOKEN", token)
         .env("ENDEAVOR_STATE", julia_state)
         .env("ENDEAVOR_LAUNCHER", launcher)
         .stdin(Stdio::null());
-    // Julia is a console program. The core may have no console to give it (in
-    // the app, the core is the app's own GUI program), and then Julia would open
-    // a console window for as long as it runs. Pluto's workers share Julia's.
     crate::client::no_window(&mut command);
     for name in ["ENDEAVOR_PORT", "ENDEAVOR_FOLDER", "ENDEAVOR_NO_FOLDER", "ENDEAVOR_HOST_TOOLS", "ENDEAVOR_IDLE_HOURS", "ENDEAVOR_EXIT_IDLE"] {
         command.env_remove(name);
@@ -391,14 +290,11 @@ fn julia_command(julia: &str, runtime: &Path, depot: &str, token: &str, launcher
 }
 
 fn free_ports() -> Result<[u16; 2], String> {
-    // Both held at once so the OS can't hand out the same port twice.
     let pluto = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let mcp = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     Ok([&pluto, &mcp].map(|l| l.local_addr().unwrap().port()))
 }
 
-/// Runs each start on one thread that lasts as long as the core: a process started on Linux ends with
-/// the thread that started it (`PR_SET_PDEATHSIG`), and a request's thread ends with its connection.
 struct Spawner(std::sync::Mutex<std::sync::mpsc::Sender<(Command, std::sync::mpsc::Sender<io::Result<std::process::Child>>)>>);
 
 impl Spawner {
@@ -419,65 +315,41 @@ impl Spawner {
     }
 }
 
-/// Where Julia is.
 enum Phase {
-    /// Not started yet.
     Idle,
-    /// Being found, downloaded or started: what it's doing, in words for the user.
     Starting(String),
     Ready,
-    /// The last start failed: why, with its code. Once that has been said, the next call that needs Julia tries again.
     Failed(String),
 }
 
 struct JuliaNow {
     phase: Phase,
-    /// While starting: the last sign of progress, a new step or new lines in the runtime's log.
     moved: std::time::Instant,
-    /// When the start began.
     began: std::time::Instant,
-    /// Why the last start failed has been said.
     said: bool,
-    /// How Julia ended, if the one started last did.
     exited: Option<ExitStatus>,
-    /// The Julia the last start found: its path, version, and whether it's Endeavor's own.
     started: Option<(String, String, bool)>,
 }
 
-/// Finds and starts Julia (`julia boot.jl`, with Pluto) when it's first needed, once at a time.
 struct JuliaStarter {
-    /// Which Julia starts. A cluster job submitted before any notebook needed Julia is handed the one
-    /// found or downloaded on the login node (`endeavor/use_julia`, #80).
     source: std::sync::Mutex<crate::julia::Source>,
-    /// Whether Endeavor's own Julia may be downloaded; `endeavor/allow_julia_install` allows it later.
     install: std::sync::atomic::AtomicBool,
-    /// Started when first needed: the client didn't find Julia, so the log says which one starts and why
-    /// it couldn't. Started at once, the client said both, and the log is Julia's alone, as it was.
     when_needed: bool,
     runtime: PathBuf,
     depot: String,
-    /// The engines' key, which Julia's bridge takes: not the MCP bearer token.
     token: String,
     launcher: String,
-    /// Where `julia boot.jl` writes its state for the core.
     state: PathBuf,
     log: PathBuf,
-    /// The signal mask the core was started with, for Julia.
     #[cfg(unix)]
     mask: Option<libc::sigset_t>,
     spawn: Spawner,
     now: std::sync::Mutex<JuliaNow>,
     changed: std::sync::Condvar,
-    /// Julia's pid while it runs, else 0.
     pid: std::sync::atomic::AtomicI32,
-    /// When that Julia started (`winproc::start_time`), else 0: on Windows a pid alone may name
-    /// another process once Julia has gone, so it is killed only through this (#464).
     #[cfg(windows)]
     started: std::sync::atomic::AtomicU64,
-    /// The core is stopping: Julia ending now ends it, even mid-start.
     stopping: std::sync::atomic::AtomicBool,
-    /// The stop signal the core was sent, else 0: a Julia that shut down cleanly on it ends the core
-    /// the way the signal would have (`pass_on_stop_signals`).
     signalled: std::sync::atomic::AtomicI32,
     stops: std::sync::mpsc::Sender<Stop>,
 }
@@ -508,10 +380,6 @@ impl JuliaStarter {
         }
     }
 
-    /// Start Julia in the background unless it runs or is starting, or failed and that hasn't been said yet.
-    /// A `warm` start is one nothing asked for yet (`warm_for`): it never downloads Julia, and if Julia
-    /// would need downloading it leaves Julia not started, for the first call that needs it. Pluto's
-    /// packages still install on Julia's first start in a fresh depot, as for any start.
     fn begin(&self, served: &Arc<Served>, warm: bool) {
         let mut now = self.now.lock().unwrap();
         let again = matches!(now.phase, Phase::Failed(_)) && now.said;
@@ -531,7 +399,6 @@ impl JuliaStarter {
             now.said = false;
             now.phase = match (started, now.exited) {
                 (Ok(ready), None) => {
-                    // Set once: Julia ending after this ends the core, so there is never a second Ready.
                     let _ = served.bridge.views.pluto.set((ready.pluto.port, ready.pluto.secret.clone()));
                     let _ = served.pluto.set(ready.pluto);
                     let _ = served.bridge.julia.port.set(ready.bridge_port);
@@ -552,13 +419,11 @@ impl JuliaStarter {
             julia.changed.notify_all();
             if matches!(now.phase, Phase::Ready) {
                 drop(now);
-                // Its notebooks are followed and listed from now on, whatever started it.
                 served.bridge.notebooks.add_engine(Backend::Pluto, served.bridge.julia.clone());
             }
         });
     }
 
-    /// Start Julia unless it runs, and wait up to `wait` for it: why it isn't ready, with its code, if it isn't.
     fn wait(&self, served: &Arc<Served>, wait: Duration) -> Result<(), String> {
         self.begin(served, false);
         let deadline = std::time::Instant::now().checked_add(wait);
@@ -572,7 +437,6 @@ impl JuliaStarter {
                     now.said = true;
                     return Err(why);
                 }
-                // A warm start that left Julia to be found now.
                 Phase::Idle if !self.stopping.load(std::sync::atomic::Ordering::SeqCst) => {
                     drop(now);
                     self.begin(served, false);
@@ -587,12 +451,10 @@ impl JuliaStarter {
         }
     }
 
-    /// Nothing has asked for Julia yet.
     fn idle(&self) -> bool {
         matches!(self.now.lock().unwrap().phase, Phase::Idle)
     }
 
-    /// How the Julia started last ended, if it did.
     fn exited(&self) -> Option<ExitStatus> {
         self.now.lock().unwrap().exited
     }
@@ -607,17 +469,10 @@ impl JuliaStarter {
         }
     }
 
-    /// The start made progress without a new step: new lines in the runtime's log.
     fn moved(&self) {
         self.now.lock().unwrap().moved = std::time::Instant::now();
     }
 
-    /// Where Julia is, for the app (`endeavor/julia_status`), without starting it: `not_started`,
-    /// `starting` with the step in words and how many seconds since the last sign of progress, `ready`,
-    /// or `failed` with the error's code and why. Reading a failure here doesn't count as saying it: the
-    /// agent's next call that needs Julia still hears why. The app's Retry is `start_now`. Once a
-    /// start has found Julia, `julia` says which (`path`, `version`, `endeavors`): the app shows it
-    /// rather than working out for itself which Julia `--julia` picks.
     fn status(&self) -> Value {
         let now = self.now.lock().unwrap();
         let mut status = match &now.phase {
@@ -635,8 +490,6 @@ impl JuliaStarter {
         status
     }
 
-    /// Start Julia now, for the app (`endeavor/start_julia`): its Retry after a failure, which then counts
-    /// as said, or a start before anything needs Julia. Nothing changes while Julia runs or is starting.
     fn start_now(&self, served: &Arc<Served>) {
         {
             let mut now = self.now.lock().unwrap();
@@ -647,7 +500,6 @@ impl JuliaStarter {
         self.begin(served, false);
     }
 
-    /// Find Julia, start it, and wait until its bridge answers; then have Pluto suggest the notebooks' folder.
     fn start(&self, served: &Arc<Served>, warm: bool) -> Result<JuliaReady, String> {
         let install = !warm && self.install.load(std::sync::atomic::Ordering::SeqCst);
         self.now.lock().unwrap().started = None;
@@ -685,13 +537,11 @@ impl JuliaStarter {
         let pid = child.id() as i32;
         #[cfg(unix)]
         let watch = watch_for_core_death(pid, self.mask);
-        // To end it if it stalls, once the watcher below has it.
         #[cfg(windows)]
         let started = crate::winproc::start_time(std::os::windows::io::AsRawHandle::as_raw_handle(&child));
         #[cfg(windows)]
         self.started.store(started.unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
         self.pid.store(pid, std::sync::atomic::Ordering::SeqCst);
-        // A stop that came before the pid was stored found nothing to end.
         if self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
             let _ = child.kill();
         }
@@ -708,7 +558,6 @@ impl JuliaStarter {
             julia.pid.store(0, std::sync::atomic::Ordering::SeqCst);
             let mut now = julia.now.lock().unwrap();
             now.exited = Some(status);
-            // Once it ran, or once the core is stopping, Julia ending ends the core, as it always has.
             if matches!(now.phase, Phase::Ready) || julia.stopping.load(std::sync::atomic::Ordering::SeqCst) {
                 let _ = julia.stops.send(Stop::Julia(status));
             }
@@ -729,9 +578,6 @@ impl JuliaStarter {
             }
             let stalled = self.now.lock().unwrap().moved.elapsed();
             if stalled >= julia_stall() {
-                // It may be stuck on anything (a lock, a network share, a hung precompile): end it, so the
-                // next call that needs Julia starts it afresh.
-                // Through the pid the watcher clears once it has reaped Julia, so a pid reused since isn't hit.
                 let pid = self.pid.load(std::sync::atomic::Ordering::SeqCst);
                 #[cfg(unix)]
                 if pid > 0 {
@@ -750,7 +596,6 @@ impl JuliaStarter {
             }
             std::thread::sleep(Duration::from_millis(100));
         };
-        // Before Julia counts as ready: whoever then opens a notebook may rely on the folder.
         let folder = served.app_folder.lock().unwrap().clone().or_else(|| served.bridge.standalone.as_ref().map(|standalone| standalone.folder.clone()));
         if let Some(folder) = folder {
             set_pluto_folder(ready.bridge_port, &self.token, &folder);
@@ -758,11 +603,9 @@ impl JuliaStarter {
         Ok(ready)
     }
 
-    /// End Julia if it runs: the core is stopping.
     fn kill(&self) {
         self.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
         let pid = self.pid.load(std::sync::atomic::Ordering::SeqCst);
-        // On Windows the job ends it with the core.
         #[cfg(unix)]
         if pid > 0 {
             // SAFETY: plain syscall.
@@ -772,39 +615,23 @@ impl JuliaStarter {
     }
 }
 
-/// How long Julia may start with no sign of progress (a new step, or new lines in the runtime's log)
-/// before the start fails and Julia is ended. A first start installs and compiles Pluto's packages for
-/// minutes, writing a line to the log as each package finishes. The longest quiet stretch is compiling
-/// Pluto itself: 75 s on a Linux cloud machine with Julia 1.12.6 (2026-10-10). 30 minutes leaves room
-/// for a machine twenty times slower (antivirus scanning each file on Windows, say).
-/// ENDEAVOR_TEST_JULIA_STALL_SECS sets it in debug builds.
 fn julia_stall() -> Duration {
     let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_JULIA_STALL_SECS").ok()?.parse().ok()).flatten();
     test.map_or(Duration::from_secs(30 * 60), Duration::from_secs)
 }
 
-/// The size of a file, 0 when there is none.
 fn file_size(path: &Path) -> u64 {
     std::fs::metadata(path).map_or(0, |m| m.len())
 }
 
-/// Where R's adapter writes its state for the core, in the state folder.
 const R_STATE: &str = "r.json";
 
-/// Ember's page secret, which is the core's to make: R is handed it, not asked for it. It goes into
-/// page URLs and a cookie, so it is hex; and it is 32 random bytes, more than Ember's own
-/// `random_secret(32)` (32 letters and digits, about 190 bits).
 fn ember_secret() -> Result<String, String> {
     crate::random_hex::<32>()
 }
 
-/// Ember's r-universe repository, which builds Ember's latest main. R notebooks install Ember from
-/// it, and update it when R starts (`runtime/r/install.R`).
 pub const EMBER_REPOSITORY: &str = "https://jowch.r-universe.dev";
 
-/// How long a call that starts R waits for the check for a newer Ember, or its install, before
-/// answering `r_installing`: as long as Julia's start. ENDEAVOR_TEST_EMBER_WAIT_SECS sets it in
-/// debug builds.
 const EMBER_WAIT: Duration = JULIA_WAIT;
 
 fn ember_wait() -> Duration {
@@ -812,17 +639,12 @@ fn ember_wait() -> Duration {
     test.map_or(EMBER_WAIT, Duration::from_secs)
 }
 
-/// What `install.R` exits with when Ember's newest build failed and the one before it is used.
 const KEPT_PREVIOUS: i32 = 3;
 
-/// The answer that offers Endeavor's own R, `item`, when no R is found on the user's Mac. Through
-/// `endeavor mcp` the agent installs it with `use_machine` once the user agrees; the app's agents
-/// have no `use_machine`, so there the user installs it from the notebook pane or Settings.
 fn own_r_offer(item: &wire::Item, in_app: bool) -> String {
     own_r_offer_text(&item.to_string(), in_app)
 }
 
-/// The two offers, each as the words before the item and after it: the app's, then the plugin's.
 const OWN_R_OFFERS: [(&str, &str); 2] = [
     (
         "r_not_found::No R was found on this computer. Endeavor can install its own R if the user agrees: ",
@@ -839,9 +661,6 @@ fn own_r_offer_text(item: &str, in_app: bool) -> String {
     format!("{before}{item}{after}")
 }
 
-/// `error` as the app's caller (`app`) or the plugin's should hear it: R starts once for every
-/// caller of a runtime the app and the plugin share, and its offer of Endeavor's own R is worded for
-/// whoever started the runtime. Anything else is left as it is.
 pub(crate) fn own_r_offer_for(error: &str, app: bool) -> std::borrow::Cow<'_, str> {
     for (before, after) in OWN_R_OFFERS {
         if let Some(item) = error.strip_prefix(before).and_then(|rest| rest.strip_suffix(after)) {
@@ -851,7 +670,6 @@ pub(crate) fn own_r_offer_for(error: &str, app: bool) -> std::borrow::Cow<'_, st
     error.into()
 }
 
-/// Why R wasn't found, and what the user can do about it: Endeavor installs its own R only on a Mac.
 fn r_not_found(r: &crate::r::Source) -> String {
     format!(
         "r_not_found::Couldn't find R: no {}. R notebooks need R with the tools to build R packages. The user can install it with rig (https://github.com/r-lib/rig) or the system's packages; on a cluster, they can set this machine's R to a shell line such as `module load R`.",
@@ -859,9 +677,6 @@ fn r_not_found(r: &crate::r::Source) -> String {
     )
 }
 
-/// Whether this computer can build R packages from source: on a Mac, whether its developer tools are
-/// installed (asked without running `cc`, which on a Mac without them opens an installer), elsewhere
-/// whether `cc` and `make` are on the PATH.
 fn has_compiler() -> bool {
     let quiet = |command: &mut Command| command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     if cfg!(target_os = "macos") {
@@ -871,38 +686,22 @@ fn has_compiler() -> bool {
     }
 }
 
-/// Why R didn't start when its shell line ended well.
 const ENDED_EARLY: &str = "The shell line for R ended without starting R. A line that ends in a comment (#) hides what comes after it.";
 
-/// Why R notebooks use the Ember before the newest, for the agent.
 const EMBER_PREVIOUS: &str = "ember_previous::Ember's newest build didn't work here, so R notebooks use the Ember before it. The runtime's log says why. Mention it to the user if R notebooks act up.";
 
-/// Where installing or updating Ember, or Endeavor's own R, is.
 enum Install {
     Idle,
     Running,
-    /// Done while no call waited for it: what the next call says. A first install's OK end is taken by
-    /// the start `RStarter::after_install` makes at once, so it lasts that long; an update's
-    /// lasts until the next call.
     Done(Result<bool, String>),
-    /// It failed (why, and when): every call is told, until `retry_after()` has passed; the call
-    /// after that tries again. Told once and tried again on the next call, several agents retrying
-    /// started an install each time, six in a minute (#183).
     Failed(String, std::time::Instant),
 }
 
-/// How long a failed install is said to every call before a call tries it again: long enough
-/// that agents retrying at once don't each start one, short enough that what the user fixed
-/// (the network, a compiler) is tried without restarting. ENDEAVOR_TEST_INSTALL_RETRY_SECS sets it
-/// in debug builds.
 fn retry_after() -> Duration {
     let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_INSTALL_RETRY_SECS").ok()?.parse().ok()).flatten();
     test.map_or(Duration::from_secs(60), Duration::from_secs)
 }
 
-/// Why a failed install is still what calls are told, if it is (`retry_after`), saying that
-/// nothing was tried for this call and when a call will try: else an agent whose user just
-/// installed a compiler reads the same words and says the compiler is still missing.
 fn failure_kept(install: &Install) -> Option<String> {
     match install {
         Install::Failed(why, at) if at.elapsed() < retry_after() => {
@@ -913,8 +712,6 @@ fn failure_kept(install: &Install) -> Option<String> {
     }
 }
 
-/// What `r_status` reads: whether R's adapter runs, the installs of Endeavor's own R and of Ember,
-/// whether Ember is installed, whether the adapter is starting, and why the last start failed.
 struct RNow<'a> {
     running: bool,
     own: &'a Install,
@@ -924,12 +721,6 @@ struct RNow<'a> {
     failed: Option<&'a str>,
 }
 
-/// Where R notebooks' setup is (`endeavor/r_status`): `ready` while R's adapter runs (with `updating`
-/// while a newer Ember installs for the next start), `starting` with the step in words (installing
-/// Endeavor's own R, installing or updating Ember, starting R), `failed` with the error's code and why
-/// (until the next start), else `not_started`. An install that finished after the call that started it
-/// stopped waiting goes straight on to start R (`RStarter::after_install`), so `not_started` between
-/// the two lasts only a moment (#148).
 fn r_status(now: &RNow) -> Value {
     let failed = |why: &str| {
         let (code, message) = why.split_once("::").unwrap_or(("r_failed", why));
@@ -955,8 +746,6 @@ fn r_status(now: &RNow) -> Value {
     }
 }
 
-/// The Ember builds in Endeavor's own folder (`ember.dcf`, which `install.R` writes): the one in use,
-/// the one before it, and the ones that failed here.
 #[derive(Debug, Default, PartialEq)]
 struct EmberBuilds {
     current: String,
@@ -977,32 +766,20 @@ impl EmberBuilds {
         std::fs::rename(&tmp, folder.join("ember.dcf"))
     }
 
-    /// Whether the build in use is there, as `install.R`'s `installed` checks.
     fn installed(&self, folder: &Path) -> bool {
         !self.current.is_empty() && folder.join(&self.current).join("ember").is_dir()
     }
 
-    /// R's libraries with build `name`'s Ember, for `R_LIBS`.
     fn libraries(folder: &Path, name: &str) -> String {
         format!("{}:{}", folder.join(name).display(), folder.join("deps").display())
     }
 
-    /// The build in use failed: use the one before it, and don't try this one again.
     fn fall_back(&mut self) {
         self.failed = self.failed.split_whitespace().chain([self.current.as_str()]).collect::<Vec<_>>().join(" ");
         self.current = std::mem::take(&mut self.previous);
     }
 }
 
-/// R reads ~/.Renviron and ~/.Rprofile only when there is no `.Renviron` or `.Rprofile` in the
-/// folder it starts in. Name the home .Renviron, unless the user named another, so a project's (renv's,
-/// say) isn't read instead. A file that isn't there is read as empty. On Windows R looks in R_USER
-/// (Documents), not the home folder, so it keeps its own rules there.
-///
-/// The profile is different: an error in it stops Rscript before the adapter runs, and the notebook
-/// would say only that R stopped. So R reads `empty` (an empty file) as the profile, and the adapter
-/// runs the user's (ENDEAVOR_R_PROFILE, or ~/.Rprofile when that's empty) itself, where an error in it
-/// is logged and R carries on.
 fn user_r_settings(command: &mut Command, home: Option<&Path>, empty: &Path) {
     let named = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
     if let Some(home) = home.filter(|h| !h.as_os_str().is_empty() && !cfg!(windows)) && named("R_ENVIRON_USER").is_none() {
@@ -1011,7 +788,6 @@ fn user_r_settings(command: &mut Command, home: Option<&Path>, empty: &Path) {
     command.env("ENDEAVOR_R_PROFILE", named("R_PROFILE_USER").unwrap_or_default()).env("R_PROFILE_USER", empty);
 }
 
-/// What R last wrote to stderr, which goes on to the runtime's log as it comes.
 #[derive(Default)]
 struct LastWords {
     said: std::sync::Mutex<(std::collections::VecDeque<String>, bool)>,
@@ -1019,7 +795,6 @@ struct LastWords {
 }
 
 impl LastWords {
-    /// Its last lines, once its stderr has ended (as when R ends) or after `wait`.
     fn after_end(&self, wait: Duration) -> Vec<String> {
         let said = self.said.lock().unwrap();
         let (said, _) = self.ended.wait_timeout_while(said, wait, |(_, ended)| !*ended).unwrap();
@@ -1027,7 +802,6 @@ impl LastWords {
     }
 }
 
-/// Pass R's stderr on to ours, keeping its last lines.
 fn pass_on_stderr(stderr: std::process::ChildStderr) -> Arc<LastWords> {
     const KEPT: usize = 20;
     let words = Arc::new(LastWords::default());
@@ -1053,12 +827,9 @@ fn pass_on_stderr(stderr: std::process::ChildStderr) -> Arc<LastWords> {
     words
 }
 
-/// Why R (or Python's adapter: `who`) ended, for the agent and the user: how its process ended
-/// (nothing while it runs) and its last error.
 fn why_stopped(who: &str, status: Option<std::process::ExitStatus>, said: &[String]) -> String {
     const LONGEST: usize = 300;
     let how = status.map_or_else(|| "it stopped answering".to_owned(), |status| status.to_string());
-    // R's error and the "Execution halted" after it.
     let last: Vec<&str> = said.iter().rev().take(3).rev().map(String::as_str).collect();
     if last.is_empty() {
         return how;
@@ -1070,47 +841,29 @@ fn why_stopped(who: &str, status: Option<std::process::ExitStatus>, said: &[Stri
     format!("{how}; {who}'s last output: {last}")
 }
 
-/// Starts R's adapter (`runtime/r/adapter.R`), with Ember in it, the first time an R notebook is
-/// opened, and stops it when the core ends.
 struct RStarter {
     r: crate::r::Source,
-    /// The core's `--r-library`, which has Ember; else Endeavor's own, installed and updated from r-universe.
     library: Option<String>,
     ember: PathBuf,
-    /// `EMBER_REPOSITORY`, or in a debug build `ENDEAVOR_TEST_EMBER_REPOSITORY`.
     repository: String,
     install: Arc<std::sync::Mutex<Install>>,
-    /// Whether Endeavor's own R may be installed (`--install-r`, or `endeavor/allow_r_install` later),
-    /// and where installing it is.
     allow_own: Arc<std::sync::atomic::AtomicBool>,
     own_install: Arc<std::sync::Mutex<Install>>,
-    /// Whether Endeavor's own R may be offered here (`--own-r`): only on the user's own computer.
     offer_own: bool,
-    /// Whether the login shell's R was found once: it isn't looked for again.
     shell_has_r: std::sync::atomic::AtomicBool,
     adapter: PathBuf,
     state: PathBuf,
-    /// The engines' key, which R's bridge takes: not the MCP bearer token.
     token: String,
-    /// The signal mask the core was started with, for R (`with_mask`), as for Julia.
     #[cfg(unix)]
     mask: Option<libc::sigset_t>,
     spawn: Spawner,
     child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
-    /// Whether R's adapter is starting (`launch`), for `status`.
     launching: std::sync::atomic::AtomicBool,
-    /// Why the last start failed, until the next one (`start_noting`), for `status`.
     failed: std::sync::Mutex<Option<String>>,
-    /// Starts R as a call would (the core sets it), once an install that no call waits for any more
-    /// has finished (#148).
     after_install: Arc<OnceLock<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl RStarter {
-    /// Start `command` with the signal mask the core was started with, not the core's, which blocks
-    /// Ctrl-C, SIGTERM and SIGHUP for its own thread to take. R inherits a blocked mask and passes it
-    /// to Ember's workers, where a cell's interrupt (SIGINT) and the supervisor's SIGTERM then wait
-    /// forever (#161).
     fn with_mask(&self, command: &mut Command) {
         #[cfg(unix)]
         if let Some(mask) = self.mask {
@@ -1151,9 +904,6 @@ impl RStarter {
         }
     }
 
-    /// Where R notebooks' setup is, for the app (`endeavor/r_status`), without starting anything (see
-    /// `r_status`). Whoever waits for it, the agent included. While R runs, `r` says which R it is
-    /// (`rscript`, and `endeavors` for Endeavor's own), so the app shows it instead of working it out.
     fn status(&self) -> Value {
         let running = self.child.lock().unwrap().as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)));
         let mut status = self.status_of(running);
@@ -1174,12 +924,10 @@ impl RStarter {
             ember: &ember,
             ember_installed: EmberBuilds::read(&folder).installed(&folder),
             launching: self.launching.load(std::sync::atomic::Ordering::SeqCst),
-            // Only the app asks, so the offer of Endeavor's own R is the app's.
             failed: failed.as_deref().map(|why| own_r_offer_for(why, true)).as_deref(),
         })
     }
 
-    /// `start`, keeping why it failed for `status` until the next start. Still installing isn't a failure.
     fn start_noting(&self, served: &Served, until: std::time::Instant) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         *self.failed.lock().unwrap() = None;
         let started = self.start(served, until);
@@ -1191,17 +939,10 @@ impl RStarter {
         started
     }
 
-    /// Start the adapter and wait until it's up: what answers for R, and Ember's page on `/ember/`.
-    /// With Endeavor's own Ember, first update it if r-universe has a newer build, and if the
-    /// adapter doesn't start with a new build, start it with the one before. An install is waited
-    /// for `until` then: the call's own wait, and never longer than `ember_wait()` from when it came.
     fn start(&self, served: &Served, until: std::time::Instant) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
-        // Ember, its install and R's adapter haven't been tried on Windows.
         if cfg!(windows) {
             return Err("unsupported::R notebooks don't work on Windows yet".into());
         }
-        // Not standalone means the app's: own R is offered only with `--own-r`, on this computer, where a
-        // `serve` or `mcp` runtime is always standalone (`standalone::core_env`); a server's never gets it.
         self.own_r(served.bridge.standalone.is_none(), until)?;
         let folder = &self.ember_folder();
         if let Some(library) = &self.library {
@@ -1210,7 +951,6 @@ impl RStarter {
         match self.update(folder, until) {
             Ok(true) => self.tell_previous(served),
             Ok(false) => {}
-            // install.R failed in a way it didn't plan for: the installed Ember still works.
             Err(why) if why.starts_with(INSTALL_FAILED_START) && EmberBuilds::read(folder).installed(folder) => {
                 eprintln!("endeavor core: couldn't check for a newer Ember; starting R with the installed one");
             }
@@ -1223,10 +963,8 @@ impl RStarter {
         match self.launch(served, &EmberBuilds::libraries(folder, &builds.current)) {
             Err(why) if why.starts_with(STOPPED_STARTING) && !builds.previous.is_empty() => {
                 eprintln!("endeavor core: R's adapter didn't start with Ember {}; starting it with Ember {}", builds.current, builds.previous);
-                // Read again: another runtime's install may have changed it while R started.
                 let latest = EmberBuilds::read(folder);
                 if latest.current != builds.current && latest.installed(folder) {
-                    // It installed a newer build: start with that, and leave the record to it.
                     return self.launch(served, &EmberBuilds::libraries(folder, &latest.current));
                 }
                 builds = latest;
@@ -1235,7 +973,6 @@ impl RStarter {
                 if let Err(e) = builds.write(folder) {
                     eprintln!("endeavor core: couldn't record that Ember failed: {e}");
                 }
-                // Dated from now for install.R's cleanup, which waits a week: another runtime may have it loaded.
                 let _ = std::fs::File::open(folder.join(&failed)).and_then(|dir| dir.set_modified(std::time::SystemTime::now()));
                 let started = self.launch(served, &EmberBuilds::libraries(folder, &builds.current))?;
                 self.tell_previous(served);
@@ -1245,7 +982,6 @@ impl RStarter {
         }
     }
 
-    /// Tell the agent, with its next notebook, that R notebooks use the Ember before the newest.
     fn tell_previous(&self, served: &Served) {
         served.bridge.notebooks.warn_next(EMBER_PREVIOUS.into());
     }
@@ -1260,18 +996,12 @@ impl RStarter {
     fn launch_adapter(&self, served: &Served, library: &str) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         let _ = std::fs::remove_file(&self.state);
         let secret = ember_secret().map_err(|e| format!("r_failed::{e}"))?;
-        // Not `--vanilla`: notebooks run in this R, so they get the user's ~/.Renviron and ~/.Rprofile
-        // (a library in R_LIBS_USER, a repos option, GITHUB_PAT), and the site's. Their home ones, not a
-        // project's in the folder R starts in, which could be renv's and take Ember's libraries away.
-        // Endeavor's own R keeps its own settings (`r::Source::command`).
         let mut command = self.r.command(&[Path::new("--no-save"), Path::new("--no-restore"), &self.adapter]);
         if self.r.own().is_none() {
             let empty = self.state.with_file_name("empty.Rprofile");
             std::fs::write(&empty, "").map_err(|e| format!("r_failed::Couldn't write {}: {e}", empty.display()))?;
             user_r_settings(&mut command, std::env::home_dir().as_deref(), &empty);
         }
-        // What R prints (a profile's messages, a notebook's print() outside a cell) goes to the log,
-        // never to our stdout, which is the MCP channel for `endeavor mcp`.
         command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_EMBER_SECRET", &secret).env("ENDEAVOR_R_STATE", &self.state).env("R_LIBS", library).stdin(Stdio::null()).stdout(Stdio::from(io::stderr())).stderr(Stdio::piped());
         self.with_mask(&mut command);
         // SAFETY: only async-signal-safe calls between fork and exec.
@@ -1317,8 +1047,6 @@ impl RStarter {
         let why_ended = move || {
             let by = std::time::Instant::now() + Duration::from_secs(1);
             let said = last_words.as_ref().map(|words| words.after_end(Duration::from_secs(1))).unwrap_or_default();
-            // A killed process can close its stderr a moment before it can be reaped, so its exit is
-            // waited for, within the same second.
             let status = loop {
                 let mut children = children.lock().unwrap();
                 let Some(child) = children.as_mut().filter(|child| child.id() == pid) else { break None };
@@ -1334,8 +1062,6 @@ impl RStarter {
         Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone()).telling(Box::new(why_ended))))
     }
 
-    /// The folder Endeavor installs Ember in: one for Endeavor's own R, which is kept apart from the
-    /// user's R, and one for any other.
     fn ember_folder(&self) -> PathBuf {
         match self.r.own() {
             Some(own) => own.join("ember"),
@@ -1343,10 +1069,6 @@ impl RStarter {
         }
     }
 
-    /// When `--r auto` finds no R on a Mac, Endeavor's own: nothing when R is there, else why R
-    /// notebooks can't open yet. Without the user's yes, the answer asks for it; with it, R is
-    /// installed in the background (a minute or two), and the call that starts that returns at once.
-    /// In the app (`in_app`), whose agents have no `use_machine`, the user installs it from the app.
     fn own_r(&self, in_app: bool, until: std::time::Instant) -> Result<(), String> {
         use std::sync::atomic::Ordering::SeqCst;
         let Some(item) = self.r.own_item().filter(|_| self.offer_own) else { return Ok(()) };
@@ -1359,7 +1081,6 @@ impl RStarter {
             return Ok(());
         }
         let mut install = self.own_install.lock().unwrap();
-        // A call made while another's install runs waits for it too, as the answer says (#175).
         if matches!(*install, Install::Running) {
             drop(install);
             install = wait_for_install(&self.own_install, until.saturating_duration_since(std::time::Instant::now()));
@@ -1389,7 +1110,6 @@ impl RStarter {
                     };
                     let installed = matches!(done, Install::Idle);
                     *state.lock().unwrap() = done;
-                    // The call that started it answered at once: go on to Ember and R now, not at the agent's next call.
                     if installed && let Some(start) = after.get() {
                         start();
                     }
@@ -1399,12 +1119,6 @@ impl RStarter {
         Err(format!("r_installing::Installing Endeavor's own R {}, which takes a minute or two. Make the same call again right away: each call waits up to {} seconds.", crate::r::OWN_VERSION, ember_wait().as_secs()))
     }
 
-    /// Install Ember into Endeavor's own folder, or update it if r-universe has a newer build
-    /// (`install.R`), waiting a little for it: true when the newest build failed and the one
-    /// before it is used. Installing the first time takes minutes (packages build from source),
-    /// longer than an agent's call may wait, so then the call answers `r_installing` and the
-    /// install goes on. An update that takes longer goes on too, and R starts with the Ember
-    /// installed; the next start uses the new one. A failure is kept (`Install::Failed`).
     fn update(&self, folder: &Path, until: std::time::Instant) -> Result<bool, String> {
         let installing = |updating: bool| {
             if updating {
@@ -1415,8 +1129,6 @@ impl RStarter {
         };
         let updating = EmberBuilds::read(folder).installed(folder);
         let mut install = self.install.lock().unwrap();
-        // A call made while the first install runs waits for it too, as the answer says (#175). One
-        // made while an update runs starts R with the installed Ember at once, as before.
         if matches!(*install, Install::Running) && !updating {
             drop(install);
             install = wait_for_install(&self.install, until.saturating_duration_since(std::time::Instant::now()));
@@ -1426,7 +1138,6 @@ impl RStarter {
         }
         match std::mem::replace(&mut *install, Install::Running) {
             Install::Running => return installing(updating),
-            // Finished after the call that started it stopped waiting.
             Install::Done(done) => {
                 *install = Install::Idle;
                 return done;
@@ -1439,8 +1150,6 @@ impl RStarter {
         command.stdin(Stdio::null());
         self.with_mask(&mut command);
         let (state, r, after) = (self.install.clone(), self.r.clone(), self.after_install.clone());
-        // Whether this call still waits for the install: set false, with the install's lock held, when
-        // it stops waiting, so that the install's end, under the same lock, knows whether anyone takes it.
         let waited = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let waiting = waited.clone();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1455,9 +1164,6 @@ impl RStarter {
                 Err(e) => Err(format!("r_not_found::Couldn't start R ({}): {e}", r.describe())),
             };
             let mut install = state.lock().unwrap();
-            // A first install that ended OK after its call stopped waiting starts R now, so the agent's
-            // next call finds it ready, and `r_status` never reads `not_started` in between (#148). An
-            // update's call started R with the installed Ember already.
             let start = !updating && done.is_ok() && !waiting.load(std::sync::atomic::Ordering::SeqCst);
             *install = match done {
                 Ok(kept_previous) => Install::Done(Ok(kept_previous)),
@@ -1494,7 +1200,6 @@ impl RStarter {
     }
 }
 
-/// `state` once the install another call started has ended, or after `wait` if it hasn't.
 fn wait_for_install(state: &std::sync::Mutex<Install>, wait: Duration) -> std::sync::MutexGuard<'_, Install> {
     let deadline = std::time::Instant::now() + wait;
     loop {
@@ -1507,36 +1212,25 @@ fn wait_for_install(state: &std::sync::Mutex<Install>, wait: Duration) -> std::s
     }
 }
 
-/// How the errors that say Ember didn't install begin.
 const INSTALL_FAILED_START: &str = "r_failed::Couldn't install Ember";
 
-/// Why R notebooks have no Ember.
 const INSTALL_FAILED: &str = "r_failed::Couldn't install Ember for R notebooks; the runtime's log says why";
 
-/// Why R notebooks have no Ember, when there's no compiler to build it.
 const NO_COMPILER: &str = "r_failed::Couldn't install Ember for R notebooks: it has to be built on this computer, and there is no compiler here to build it. The runtime's log has the details.";
 
-/// Starts Python notebooks' adapter (`runtime/marimo/adapter.py`, which runs marimo) the first time a
-/// Python notebook is opened or made, and stops it when the core ends. uv runs it, with the packages
-/// in `requirements.txt`; each notebook then gets its own uv environment from its header.
 struct MarimoStarter {
     adapter: PathBuf,
     requirements: PathBuf,
     state: PathBuf,
-    /// The engines' key, which the adapter's bridge takes: not the MCP bearer token.
     token: String,
-    /// The core runs on the user's own computer (`--own-r`, which the app passes only there; a test
-    /// checks a server's bootstrap never does, `a_servers_core_is_never_told_it_is_this_computer`).
     this_computer: bool,
     #[cfg(unix)]
     mask: Option<libc::sigset_t>,
     spawn: Spawner,
     child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
-    /// A start that a call stopped waiting for (`python_installing`): the next call waits on for it.
     pending: std::sync::Mutex<Option<MarimoPending>>,
 }
 
-/// A start of the adapter that hasn't written its state yet.
 struct MarimoPending {
     child: std::process::Child,
     last_words: Option<Arc<LastWords>>,
@@ -1561,17 +1255,10 @@ impl MarimoStarter {
         }
     }
 
-    /// Start the adapter and wait until marimo answers: what answers for Python, and marimo's page on
-    /// `/marimo/`. The first start may download Python and marimo, which takes longer than an agent's
-    /// call may wait: a call waits `until`, then answers `python_installing`, and the start goes on for
-    /// the next call to wait on, up to `MARIMO_START` in all.
     fn start(&self, served: &Served, until: std::time::Instant) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         if cfg!(windows) {
             return Err("unsupported::Python notebooks don't work on Windows yet".into());
         }
-        // ponytail: a server's runtime has no uv set up (#354). A runtime on this computer is the plugin's
-        // (standalone) or the app's (`--own-r`); the app's own sessions are refused per caller (#358,
-        // `mcp::PYTHON_NOT_IN_APP`), and the plugin's may use the app's runtime.
         if served.bridge.standalone.is_none() && !self.this_computer {
             return Err("unsupported::Python notebooks work with the Endeavor plugin on this computer (`endeavor serve` or `endeavor mcp`), not yet on a server".into());
         }
@@ -1590,7 +1277,6 @@ impl MarimoStarter {
             if let Ok(state) = std::fs::read(&self.state).map_err(|_| ()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ())) {
                 break state;
             }
-            // The core is ending: `stop` waits for this lock, and ends the start.
             if served.bridge.notebooks.stopping.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("python_failed::Endeavor is stopping".into());
             }
@@ -1606,7 +1292,6 @@ impl MarimoStarter {
             }
             std::thread::sleep(Duration::from_millis(100));
         };
-        // The pending start stays held until its child is in `child`, so a `stop` meanwhile finds it.
         let MarimoPending { mut child, last_words, secret, .. } = pending.take().unwrap();
         let port = |key: &str| state[key].as_u64().and_then(|p| u16::try_from(p).ok()).ok_or_else(|| format!("python_failed::marimo's state has no {key}: {state}"));
         let (bridge, page) = match (port("bridge_port"), port("marimo_port")) {
@@ -1632,7 +1317,6 @@ impl MarimoStarter {
         Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone()).telling(Box::new(why_ended))))
     }
 
-    /// Run the adapter through uv, with a new secret for marimo's page.
     fn spawn_adapter(&self) -> Result<MarimoPending, String> {
         let uv = find_uv().ok_or_else(|| "python_not_found::Python notebooks need uv, which isn't installed. Install it (https://docs.astral.sh/uv/getting-started/installation/), then try again.".to_owned())?;
         let _ = std::fs::remove_file(&self.state);
@@ -1640,8 +1324,6 @@ impl MarimoStarter {
         let mut command = Command::new(&uv);
         command.args(["run", "--quiet", "--no-project", "--with-requirements"]).arg(&self.requirements).arg("python").arg(&self.adapter);
         command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_MARIMO_TOKEN", &secret).env("ENDEAVOR_MARIMO_STATE", &self.state).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
-        // ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS slows the adapter's package installs (e2e_marimo reads
-        // during one); only a debug build passes it on.
         if !cfg!(debug_assertions) {
             command.env_remove("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS");
         }
@@ -1669,10 +1351,8 @@ impl MarimoStarter {
     }
 
     fn stop(&self) {
-        // A start still under way, then the adapter that runs.
         let pending = self.pending.lock().unwrap().take().map(|pending| pending.child);
         for mut child in pending.into_iter().chain(self.child.lock().unwrap().take()) {
-            // SIGTERM first: the adapter stops marimo, which stops each notebook's kernel.
             #[cfg(unix)]
             {
                 // SAFETY: a plain kill(2) of our own child.
@@ -1689,11 +1369,8 @@ impl MarimoStarter {
     }
 }
 
-/// How long the first Python notebook waits for marimo: uv may download Python and marimo first.
 const MARIMO_START: Duration = Duration::from_secs(300);
 
-/// How long a call that starts Python notebooks' engine waits for it before answering
-/// `python_installing`: as long as Julia's start. ENDEAVOR_TEST_MARIMO_WAIT_SECS sets it in debug builds.
 fn marimo_wait() -> Duration {
     let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_MARIMO_WAIT_SECS").ok()?.parse().ok()).flatten();
     test.map_or(JULIA_WAIT, Duration::from_secs)
@@ -1701,7 +1378,6 @@ fn marimo_wait() -> Duration {
 
 const MARIMO_STATE: &str = "marimo.json";
 
-/// uv: on PATH, where its installer puts it, or Homebrew's.
 fn find_uv() -> Option<PathBuf> {
     let home = crate::paths::Env::here().home;
     let path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default();
@@ -1709,24 +1385,19 @@ fn find_uv() -> Option<PathBuf> {
     path.into_iter().chain(more).map(|dir| dir.join("uv")).find(|uv| uv.is_file())
 }
 
-/// How the error that R stopped while its adapter started begins.
 const STOPPED_STARTING: &str = "r_failed::R stopped while starting";
 
-/// An engine's page server (Pluto, Ember): its private port and the secret it requires.
 #[derive(Clone)]
 struct Page {
     port: u16,
     secret: String,
 }
 
-/// What `julia boot.jl` reports once it's up.
 struct JuliaReady {
     pluto: Page,
-    /// Julia's own bridge, for the adapter's calls.
     bridge_port: u16,
 }
 
-/// What Julia wrote in its state, once its bridge answers.
 fn julia_ready(julia_state: &Path, token: &str) -> Option<JuliaReady> {
     let julia: Value = serde_json::from_str(&std::fs::read_to_string(julia_state).ok()?).ok()?;
     let port_of = |key: &str| julia[key].as_u64().and_then(|p| u16::try_from(p).ok());
@@ -1737,8 +1408,6 @@ fn julia_ready(julia_state: &Path, token: &str) -> Option<JuliaReady> {
     bridge_call(ready.bridge_port, "/call", token, "ping").is_ok_and(|status| status == 200).then_some(ready)
 }
 
-/// Have Pluto's page suggest the notebooks' folder for new notebooks, as the
-/// app does for its session's folder.
 fn set_pluto_folder(julia_port: u16, token: &str, folder: &str) {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/set_folder", "params": { "path": folder } }).to_string();
     let bearer = format!("Bearer {token}");
@@ -1748,10 +1417,6 @@ fn set_pluto_folder(julia_port: u16, token: &str, folder: &str) {
     }
 }
 
-/// Start Julia ahead, in the background, for a session that will use it, so its first notebook
-/// doesn't wait. A caller that knows says so with `kind`: `julia` starts it, `r` never does. Otherwise
-/// (`unknown`) a folder that has Julia (Pluto) notebooks starts it, and one with only R notebooks, or
-/// none, never does. It never downloads Julia (`JuliaStarter::begin`).
 fn warm_for(served: &Arc<Served>, folder: &str, kind: &str) {
     if !served.julia.when_needed || !served.julia.idle() || kind == "r" || kind == "python" {
         return;
@@ -1765,11 +1430,6 @@ fn warm_for(served: &Arc<Served>, folder: &str, kind: &str) {
     });
 }
 
-/// The app is quitting and would stop this runtime (`endeavor/leave_to_plugin`, app #232): if the plugin
-/// is in it (`Notebooks::shared`), it is left running for the plugin, marked as ending when idle so the
-/// plugin's fronts treat it as theirs, and watched (`watch_left`): it ends once the plugin has been out of
-/// it for `LEFT_GRACE`, whatever the idle limit. Whether it was left; if not, the app stops it as before.
-/// `alive` checks a front's process.
 fn leave_to_plugin(served: &Arc<Served>, alive: Arc<dyn Fn(&crate::mcp::Front) -> bool + Send + Sync>) -> bool {
     use std::sync::atomic::Ordering::SeqCst;
     if !served.bridge.notebooks.shared(&*alive) {
@@ -1781,16 +1441,11 @@ fn leave_to_plugin(served: &Arc<Served>, alive: Arc<dyn Fn(&crate::mcp::Front) -
         *left = Some(served.bridge.notebooks.exits_when_idle.swap(true, SeqCst));
         rewrite_exits_when_idle(served, true);
     }
-    // A new watch even if it was left already: one an earlier app left running (`end_when_idle`) and didn't
-    // get back yet is watched for the plugin from now on.
     let generation = served.left_generation.fetch_add(1, SeqCst) + 1;
     watch_left(served.clone(), generation, alive);
     true
 }
 
-/// The app has the runtime again (`endeavor/keep_for_app`, its helper reattached): one left to the plugin
-/// goes back to the lifetime it started with, and its watch ends, so no front of another build stops it
-/// as the plugin's own (`standalone::target`). Nothing for a runtime that wasn't left.
 fn keep_for_app(served: &Served) {
     use std::sync::atomic::Ordering::SeqCst;
     let mut left = served.left.lock().unwrap();
@@ -1801,11 +1456,6 @@ fn keep_for_app(served: &Served) {
     rewrite_exits_when_idle(served, before);
 }
 
-/// The app is gone and its helper leaves this runtime running (`endeavor/end_when_idle`, app #274): its
-/// notebooks go on, each until it has been idle for the idle limit, as always, and once none is open the
-/// runtime ends `LEFT_GRACE` later (`watch_empty`), which leaves time for the app or Claude Code to come back
-/// to it. It is marked as ending when idle, so the plugin's fronts treat it as theirs. `keep_for_app` undoes
-/// it when the app is back. Nothing for one already left or ending when idle.
 fn end_when_idle(served: &Arc<Served>) {
     use std::sync::atomic::Ordering::SeqCst;
     let mut left = served.left.lock().unwrap();
@@ -1819,8 +1469,6 @@ fn end_when_idle(served: &Arc<Served>) {
     watch_empty(served.clone(), generation);
 }
 
-/// End a runtime the app left once no notebook has been open in it for `LEFT_GRACE`, or stop watching when
-/// the app takes it back (`generation` moves on).
 fn watch_empty(served: Arc<Served>, generation: u64) {
     use std::sync::atomic::Ordering::SeqCst;
     let check = crate::notebooks::idle_check().min(Duration::from_secs(60));
@@ -1843,7 +1491,6 @@ fn watch_empty(served: Arc<Served>, generation: u64) {
     });
 }
 
-/// Set `exits_when_idle` in `runtime.json`, if the record there is still this core's.
 fn rewrite_exits_when_idle(served: &Served, value: bool) {
     let path = served.state_dir.join("runtime.json");
     if let Some(mut state) = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok())
@@ -1856,12 +1503,8 @@ fn rewrite_exits_when_idle(served: &Served, value: bool) {
     }
 }
 
-/// How long a runtime left to the plugin keeps running once the plugin is out of it: long enough for
-/// Claude Code to restart and open its notebook again, short enough not to matter as a leak.
 const LEFT_GRACE: Duration = Duration::from_secs(10 * 60);
 
-/// The idle limit a runtime left to the plugin keeps when the app's is none ("Never"): the user asked for
-/// it to stop with the app, so it doesn't run forever for a plugin that keeps a notebook open and idle.
 const LEFT_IDLE_HOURS: f64 = 48.0;
 
 fn left_grace() -> Duration {
@@ -1872,7 +1515,6 @@ fn left_grace() -> Duration {
     LEFT_GRACE
 }
 
-/// When a runtime left to the plugin ends (`LeftWatch::tick`).
 struct LeftWatch {
     grace: Duration,
     out_since: Instant,
@@ -1884,8 +1526,6 @@ impl LeftWatch {
         LeftWatch { grace, out_since: now, empty_since: now }
     }
 
-    /// Why to end now, if it should: the plugin has been out of the runtime for the grace, or no notebook
-    /// has been open for the idle limit (`LEFT_IDLE_HOURS` when the limit is none).
     fn tick(&mut self, now: Instant, shared: bool, open: Option<usize>, hours: f64) -> Option<String> {
         if shared {
             self.out_since = now;
@@ -1902,7 +1542,6 @@ impl LeftWatch {
     }
 }
 
-/// Watch a runtime left to the plugin until it ends, or the app takes it back (`generation` moves on).
 fn watch_left(served: Arc<Served>, generation: u64, alive: Arc<dyn Fn(&crate::mcp::Front) -> bool + Send + Sync>) {
     use std::sync::atomic::Ordering::SeqCst;
     let check = crate::notebooks::idle_check().min(Duration::from_secs(60));
@@ -1926,9 +1565,6 @@ fn watch_left(served: Arc<Served>, generation: u64, alive: Arc<dyn Fn(&crate::mc
     });
 }
 
-/// End the runtime once no notebook has been open for the idle limit (none
-/// when it's 0): a runtime the stdio form or a server connection started in the
-/// background has no one to stop it.
 fn exit_when_idle(served: Arc<Served>) {
     std::thread::spawn(move || {
         let notebooks = &served.bridge.notebooks;
@@ -1947,8 +1583,6 @@ fn exit_when_idle(served: Arc<Served>) {
     });
 }
 
-/// Write `path` whole and readable only by us, so a reader never sees half of
-/// it and nobody else sees the token.
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
     let _ = std::fs::remove_file(&tmp);
@@ -1959,7 +1593,6 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|e| format!("Couldn't write {}: {e}", path.display()))
 }
 
-/// Exit the way Julia did, so the helper reports the same status.
 fn exit_like(status: ExitStatus) -> ! {
     #[cfg(unix)]
     if let Some(signal) = status.signal() {
@@ -1976,8 +1609,6 @@ fn exit_like(status: ExitStatus) -> ! {
     std::process::exit(status.code().unwrap_or(1))
 }
 
-/// Block the stop signals (for `pass_on_stop_signals` to take) before any
-/// thread starts; the mask we had, for Julia.
 #[cfg(unix)]
 fn block_stop_signals() -> (libc::sigset_t, libc::sigset_t) {
     // SAFETY: initializing and applying signal sets on this (still only) thread.
@@ -1993,13 +1624,6 @@ fn block_stop_signals() -> (libc::sigset_t, libc::sigset_t) {
     }
 }
 
-/// Until the helper that started the core says it is wanted, end the core, Julia, and anything else in the core's
-/// process group, as that helper's own cancel would (`Runtime::kill`), once the helper has gone: the pipe's end
-/// arrives however it ended. A helper that is killed outright can't stop the start it began, and an ssh server may
-/// kill it when its client goes, instead of ending its input (#95). The core is stopped by the same SIGTERM, which
-/// it hears as any stop signal (`pass_on_stop_signals`). If the core is still running ten seconds later, the group
-/// gets SIGKILL; once the core has exited, nothing more is sent. Only the start is covered: after the helper says
-/// "k", a helper that is killed leaves the runtime running, as one that detaches does.
 #[cfg(unix)]
 fn watch_lifeline(fd: usize, _: &Path) {
     use std::io::Read;
@@ -2022,9 +1646,6 @@ fn watch_lifeline(fd: usize, _: &Path) {
     });
 }
 
-/// As on Unix: until the helper says it is wanted, end the core once that helper has gone (#144). Ending the
-/// core closes its Job Object, which takes Julia and its workers along, as the helper's own cancel does by
-/// ending the core (`Runtime::kill`).
 #[cfg(windows)]
 fn watch_lifeline(handle: usize, state_dir: &Path) {
     use std::io::Read;
@@ -2043,17 +1664,11 @@ fn watch_lifeline(handle: usize, state_dir: &Path) {
             return;
         }
         eprintln!("endeavor core: the connection that started Endeavor ended while it started; stopping");
-        // A record written just before is this core's, and goes with it.
         remove_state(&state_dir, std::process::id() as i32, None);
         std::process::exit(1);
     });
 }
 
-/// A stop signal sent to the core stops Julia, and the core exits when Julia does, as the signal would
-/// end it; with no Julia running, it ends the core. A Julia that is ready is asked to shut down through
-/// its bridge first, and is signalled only if that fails or it still runs `stop_grace` later: a SIGTERM
-/// while Julia compiles can hang its exit for good (#509), which cost 10 s before the shutdown that
-/// followed. A Julia still starting has no bridge yet and gets the signal.
 #[cfg(unix)]
 fn pass_on_stop_signals(set: libc::sigset_t, served: Arc<Served>) {
     std::thread::spawn(move || {
@@ -2066,7 +1681,6 @@ fn pass_on_stop_signals(set: libc::sigset_t, served: Arc<Served>) {
                 served.bridge.notebooks.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
                 let first = julia.signalled.compare_exchange(0, signal, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok();
                 match julia.pid.load(std::sync::atomic::Ordering::SeqCst) {
-                    // A second one (a second Ctrl-C) is passed straight on; the first's steps still follow.
                     pid if pid > 0 && !first => {
                         // SAFETY: plain syscall.
                         unsafe { libc::kill(pid, signal) };
@@ -2088,12 +1702,6 @@ fn pass_on_stop_signals(set: libc::sigset_t, served: Arc<Served>) {
     });
 }
 
-/// When the core dies abruptly (an OOM kill, `kill -9`), nothing is left to stop Julia. On Linux it gets
-/// SIGTERM (`PR_SET_PDEATHSIG`), and a SIGTERM that reaches it while it compiles can leave it hung in its
-/// exit (#509); macOS has no such signal. So a shell waits on a pipe whose other end only the core holds: a
-/// line on it means Julia ended; its end without one, that the core died. Then it signals the Julia it was
-/// started for (macOS), and `stop_grace` later kills it if it still runs: the same pid with the same start
-/// time. On Windows the core's job ends Julia with it (`winproc::job_ending_with_this_process`).
 #[cfg(unix)]
 fn watch_for_core_death(pid: i32, mask: Option<libc::sigset_t>) -> Option<(std::process::Child, std::process::ChildStdin)> {
     const WATCH: &str = r#"julia=$1 grace=$2 term=$3
@@ -2108,7 +1716,6 @@ read -r _ && exit 0
 sleep "$grace"
 [ "$(started)" = "$was" ] && kill -KILL "$julia" 2>/dev/null
 exit 0"#;
-    // Linux's PR_SET_PDEATHSIG has sent it SIGTERM already.
     let term = if cfg!(target_os = "linux") { "0" } else { "1" };
     let mut command = Command::new("sh");
     command.args(["-c", WATCH, "sh", &pid.to_string(), &format!("{:.1}", stop_grace().as_secs_f64()), term]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -2126,8 +1733,6 @@ exit 0"#;
     Some((watch, ended))
 }
 
-/// After a shutdown asked of Julia (`pid`) for a stop signal: if it still runs `stop_grace` later, pass the
-/// signal on, then kill it as for any shutdown (`kill_unless_shut_down`).
 #[cfg(unix)]
 fn signal_unless_julia_ends(served: Arc<Served>, pid: i32, signal: i32) {
     std::thread::spawn(move || {
@@ -2142,8 +1747,6 @@ fn signal_unless_julia_ends(served: Arc<Served>, pid: i32, signal: i32) {
     });
 }
 
-/// How long Julia has to end after a stop signal, and again after the shutdown that follows, before the
-/// next step (`unless_julia_ends`, `kill_unless_shut_down`).
 fn stop_grace() -> std::time::Duration {
     #[cfg(debug_assertions)]
     if let Some(secs) = std::env::var("ENDEAVOR_TEST_STOP_GRACE_SECS").ok().and_then(|s| s.parse().ok()) {
@@ -2152,9 +1755,6 @@ fn stop_grace() -> std::time::Duration {
     std::time::Duration::from_secs(10)
 }
 
-/// In case a stop signal passed on to Julia (`pid`) doesn't end it (#316: once a core went on after a SIGTERM;
-/// a real Julia with two notebooks open ends in about 4 s), ask it to shut down, as `endeavor stop` does, and
-/// if it still runs, kill it; the core ends with it.
 #[cfg(unix)]
 fn unless_julia_ends(served: Arc<Served>, pid: i32) {
     std::thread::spawn(move || {
@@ -2169,7 +1769,6 @@ fn unless_julia_ends(served: Arc<Served>, pid: i32) {
     });
 }
 
-/// After a shutdown asked of Julia (`pid`): if it still runs after `stop_grace`, kill it; the core ends with it.
 fn kill_unless_shut_down(served: &Served, pid: i32) {
     std::thread::sleep(stop_grace());
     if served.julia.pid.load(std::sync::atomic::Ordering::SeqCst) == pid {
@@ -2180,7 +1779,6 @@ fn kill_unless_shut_down(served: &Served, pid: i32) {
         unsafe {
             libc::kill(pid, libc::SIGKILL)
         };
-        // Only the process that started when this Julia did.
         #[cfg(windows)]
         if let Some(process) = crate::winproc::Process::open(pid, Some(served.julia.started.load(std::sync::atomic::Ordering::SeqCst)).filter(|&t| t != 0)) {
             process.terminate();
@@ -2188,40 +1786,25 @@ fn kill_unless_shut_down(served: &Served, pid: i32) {
     }
 }
 
-/// What the runtime's port serves: the bridge, and once Julia is ready, Pluto.
 struct Served {
     bridge: Bridge,
-    /// Set once Julia is ready.
     pluto: OnceLock<Page>,
     julia: JuliaStarter,
-    /// The folder the app last gave Pluto for new notebooks (`endeavor/set_folder`), for a Julia started later.
     app_folder: std::sync::Mutex<Option<String>>,
     stops: std::sync::mpsc::Sender<Stop>,
-    /// Ember's, while it runs, for `/ember/`.
     ember: std::sync::Mutex<Option<Page>>,
-    /// marimo's, while it runs, for `/marimo/`.
     marimo: std::sync::Mutex<Option<Page>>,
-    /// Whether Endeavor's own R may be installed (`RStarter::allow_own`).
     allow_r_install: Arc<std::sync::atomic::AtomicBool>,
-    /// R notebooks' starter, for `endeavor/r_status`: set once, as the core starts.
     r: OnceLock<Arc<RStarter>>,
-    /// The pages' token (`crate::page_token`): the only key to Pluto's and Ember's pages.
     page_token: String,
-    /// The cookie that lets a browser into Pluto's page (`cookie_name`).
     cookie: String,
-    /// What a browser that hasn't been let in sees (`not_let_in`).
     not_let_in: String,
-    /// The state folder, whose `runtime.json` this core wrote (`record`).
     state_dir: PathBuf,
-    /// While the app's quit has left this runtime to the plugin (`leave_to_plugin`), or the app has gone
-    /// and left it running (`end_when_idle`), whether it ended when idle before.
     left: Mutex<Option<bool>>,
-    /// Moves on each leave and each take-back, so a stale watch (`watch_left`, `watch_empty`) stops.
     left_generation: std::sync::atomic::AtomicU64,
 }
 
 impl Served {
-    /// End the runtime: through Julia if it runs (it exits, and the core with it), else at once.
     fn shutdown(&self) {
         let julia = &self.julia;
         julia.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2234,8 +1817,6 @@ impl Served {
         }
     }
 
-    /// `shutdown`, for a runtime that ends on its own (idle, or left and no longer wanted), which no one
-    /// waits on: if Julia still runs `stop_grace` later, kill it (#458, #464).
     fn end_on_its_own(self: &Arc<Self>) {
         let pid = self.julia.pid.load(std::sync::atomic::Ordering::SeqCst);
         self.shutdown();
@@ -2245,7 +1826,6 @@ impl Served {
         }
     }
 
-    /// One of the app's calls about Julia (`mcp::JULIA_CALLS`), which the core answers here.
     fn julia_call(self: &Arc<Self>, method: &str, body: &[u8]) -> String {
         let message: Value = serde_json::from_slice(body).unwrap_or_default();
         let mut result = json!({});
@@ -2266,15 +1846,12 @@ impl Served {
             "endeavor/shutdown" => {
                 eprintln!("[ Info: Shutting down at the app's request");
                 let served = self.clone();
-                // After this reply is out.
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(200));
                     served.shutdown();
                 });
             }
             "endeavor/allow_julia_install" => self.julia.install.store(true, std::sync::atomic::Ordering::SeqCst),
-            // The Julia at `path`, for a start from now on: a start that failed for want of one is tried
-            // again when a notebook next needs it. Not a running Julia's.
             "endeavor/use_julia" => match message["params"]["path"].as_str().filter(|path| !path.is_empty()) {
                 Some(path) => *self.julia.source.lock().unwrap() = crate::julia::Source::Path(path.to_owned()),
                 None => result = json!({ "error": "use_julia needs a path" }),
@@ -2289,8 +1866,6 @@ impl Served {
     }
 }
 
-/// Serve the runtime's port: a thread per client, of which there are only a
-/// few (the helper's relayed streams).
 fn accept(listener: TcpListener, served: Arc<Served>) {
     std::thread::spawn(move || {
         each_connection(listener.incoming(), |client| {
@@ -2302,9 +1877,6 @@ fn accept(listener: TcpListener, served: Arc<Served>) {
     });
 }
 
-/// Give `serve` each connection `incoming` accepts, for as long as the port is open. A failed accept (a
-/// connection reset before it was taken, or no descriptors left) doesn't close the port, and a later one
-/// succeeds once descriptors are free; the pause keeps a lasting failure from spinning.
 fn each_connection<C>(incoming: impl Iterator<Item = io::Result<C>>, mut serve: impl FnMut(C)) {
     let mut said: Option<std::time::Instant> = None;
     for client in incoming {
@@ -2321,27 +1893,18 @@ fn each_connection<C>(incoming: impl Iterator<Item = io::Result<C>>, mut serve: 
     }
 }
 
-/// Where a request on the runtime's port goes, by its path.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Route {
-    /// The agent's MCP connection.
     Mcp,
-    /// The app's notebook state stream.
     Events,
-    /// The app's JSON-RPC calls (`endeavor/*`, and tools without a session).
     Call,
-    /// Any other path under `/endeavor/`.
     NotFound,
-    /// `/ember` and below: Ember's page, its files and its WebSocket.
     Ember,
-    /// `/marimo` and below: marimo's page, its API and its WebSocket.
     Marimo,
-    /// Everything else: Pluto's page, its files and its WebSocket.
     Pluto,
 }
 
 impl Route {
-    /// An engine's page, which a browser reaches with the cookie.
     fn is_page(self) -> bool {
         matches!(self, Route::Pluto | Route::Ember | Route::Marimo)
     }
@@ -2361,7 +1924,6 @@ impl Route {
     }
 }
 
-/// One client's requests in turn, until either side closes.
 fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
     let _ = client.set_nodelay(true);
     let mut client = wire::Shared::new(client);
@@ -2418,11 +1980,9 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
                 if !opens_a_page(&request) {
                     return refuse(&mut client, "503 Service Unavailable", "Julia isn't running");
                 }
-                // The runtime's own link, which an R user opens too, doesn't start Julia by itself.
                 if request.target() == "/" && served.julia.idle() {
                     http::respond(&mut client, "200 OK", Some("text/html; charset=utf-8"), JULIA_NOT_STARTED_PAGE.as_bytes(), request.keeps_alive())?;
                 } else {
-                    // A browser opening Pluto's page starts Julia, and sees how that goes until it's ready.
                     let page = julia_starting_page(served.julia.wait(served, Duration::ZERO).err().unwrap_or_default());
                     http::respond(&mut client, "503 Service Unavailable", Some("text/html; charset=utf-8"), page.as_bytes(), request.keeps_alive())?;
                 }
@@ -2447,8 +2007,6 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
                     }
                     (Ok(_), None) => return refuse(&mut client, "503 Service Unavailable", "R notebooks aren't running"),
                     (Ok(target), Some(ember)) => {
-                        // Ember takes its secret in the query, the only way its WebSocket does. Host stays the
-                        // browser's: Ember refuses a WebSocket whose Origin isn't its Host.
                         request.set_target(&with_secret(&target, &ember.secret));
                         request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Authorization") && !name.eq_ignore_ascii_case("Cookie"));
                         forward(request, None, &mut reader, ember.port, "R", &|response| {
@@ -2479,8 +2037,6 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
                     }
                     (MarimoTarget::Forward, None) => return refuse(&mut client, "503 Service Unavailable", "Python notebooks aren't running"),
                     (MarimoTarget::Forward, Some(marimo)) => {
-                        // marimo serves under `/marimo` itself (`--base-url`), so the target stays; it takes its
-                        // token as a bearer, the browser's cookie and authorization go no further.
                         request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Authorization") && !name.eq_ignore_ascii_case("Cookie"));
                         request.headers.push(("Authorization".into(), format!("Bearer {}", marimo.secret)));
                         forward(request, None, &mut reader, marimo.port, "Python", &|response| {
@@ -2494,7 +2050,6 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
                 http::respond(&mut client, "404 Not Found", None, b"", request.keeps_alive())?;
                 request.keeps_alive()
             }
-            // No server-initiated stream on /mcp, and a session lasts as long as the runtime: DELETE doesn't end one.
             _ => {
                 http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
                 http::respond(&mut client, "405 Method Not Allowed", None, b"", request.keeps_alive())?;
@@ -2508,8 +2063,6 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
     Ok(())
 }
 
-/// The runtime's own link before anything asked for Julia: starting it can mean a download, so it
-/// waits for a click. `/?start-julia` is any other Pluto page as far as Julia goes.
 const JULIA_NOT_STARTED_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Endeavor</title>
 <body style=\"font-family: system-ui, sans-serif; max-width: 40em; margin: 4em auto; line-height: 1.5\">
 <h1>Julia isn't running</h1>
@@ -2518,8 +2071,6 @@ const JULIA_NOT_STARTED_PAGE: &str = "<!doctype html><meta charset=utf-8><title>
 </body>
 ";
 
-/// What a browser opening Pluto's page sees while Julia isn't ready: that it's starting, and the page
-/// reloads itself; or why it couldn't start, and that reloading tries again.
 fn julia_starting_page(why: String) -> String {
     let (code, text) = why.split_once("::").unwrap_or(("", why.as_str()));
     let text = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
@@ -2538,13 +2089,6 @@ fn julia_starting_page(why: String) -> String {
     )
 }
 
-/// Answer one request on the app's listener while the app can't reach the
-/// runtime (`token` its bearer token), then close. The agent's MCP client
-/// gets an answer instead of a reset, which Claude Code counts toward giving
-/// up on the server for good: a tool call fails with `why`, and the rest is
-/// answered as the core would. Any other request is closed unanswered. With
-/// `restart` (the client's hook and the place's name), the agent can still ask
-/// the user to restart the runtime (`guard::restart_call`), and `tools/list` says so.
 pub fn serve_unreachable(client: TcpStream, token: &str, why: &str, restart: Option<(&crate::guard::AskRestart, &str)>) -> io::Result<()> {
     let mut client = wire::Shared::new(client);
     let mut reader = BufReader::new(client.clone());
@@ -2574,32 +2118,13 @@ pub fn serve_unreachable(client: TcpStream, token: &str, why: &str, restart: Opt
     Ok(())
 }
 
-/// Whether a request may go where its route sends it.
 #[derive(Debug, PartialEq)]
 enum Access {
     Granted,
-    /// A browser's first visit, with `token=` in its URL: it gets the cookie
-    /// and goes to `location`, the same URL without the token.
     SetCookie { location: String },
-    /// A status and an error code.
     Refused(&'static str, &'static str),
 }
 
-/// Whether a request may go where `route` sends it, given the runtime's bearer
-/// `token`, its pages' token `page_token` and the name of its browser `cookie`.
-/// Loopback isn't private on a shared machine, so the tokens are what keep
-/// other local users out, and a DNS-rebinding page sends a foreign Host.
-///
-/// Endeavor's own routes are a control API, never a web API: they take the
-/// bearer token only as a header, and any request with an Origin came from a
-/// browser page (MCP clients never send one). The pages (Pluto's and Ember's)
-/// take only the pages' token, as a header (the app's exports), in the URL
-/// (a browser's first visit) or as the cookie, as long as the request comes
-/// from that page itself: notebook output runs its own JavaScript there, and
-/// must not reach the app's calls (approving its own runs) or, through the
-/// cookie another runtime set on this loopback address (cookies ignore ports),
-/// that runtime's Pluto. The bearer token doesn't open them: an agent's MCP
-/// config carries it, and some agents keep that config on disk.
 fn access(request: &Head, route: Route, token: &str, page_token: &str, cookie: &str) -> Access {
     let host = request.header("Host").unwrap_or_default();
     if !loopback_host(host) {
@@ -2629,9 +2154,6 @@ fn access(request: &Head, route: Route, token: &str, page_token: &str, cookie: &
     }
 }
 
-/// What a browser that hasn't been let in sees when it opens one of the pages: the link in a tool
-/// result has no token, so the way in is a link the agent never sees. `open` is the command that
-/// gives one (`open_command`).
 fn not_let_in(open: &str) -> String {
     let open = open.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let terminal = if cfg!(windows) { "PowerShell window" } else { "terminal" };
@@ -2650,9 +2172,6 @@ fn not_let_in(open: &str) -> String {
     )
 }
 
-/// The command that lets a browser in to this runtime (`endeavor open`), as this program and the
-/// state folder `dir` are named here: the plugin's program isn't on the PATH. On Windows in
-/// PowerShell's form (`& "C:\…\endeavor.exe" …`), since a quoted path alone is a string there.
 pub(crate) fn open_command(dir: &Path) -> String {
     let quote = |text: &str| if text.is_empty() || text.contains([' ', '"', '\'', '$', '&']) { format!("\"{text}\"") } else { text.to_owned() };
     let program = std::env::current_exe().map_or_else(|_| "endeavor".to_owned(), |exe| exe.display().to_string());
@@ -2663,7 +2182,6 @@ pub(crate) fn open_command(dir: &Path) -> String {
     if cfg!(windows) { format!("& {line}") } else { line }
 }
 
-/// Whether `request` is a browser opening a page (not a script, an image or a WebSocket).
 fn opens_a_page(request: &Head) -> bool {
     request.method() == "GET"
         && match request.header("Sec-Fetch-Dest") {
@@ -2672,15 +2190,12 @@ fn opens_a_page(request: &Head) -> bool {
         }
 }
 
-/// The name of the cookie that holds `token` for browsers: one per runtime,
-/// so runtimes on the same loopback address don't overwrite each other's.
 fn cookie_name(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     let id: String = digest[..6].iter().map(|b| format!("{b:02x}")).collect();
     format!("endeavor-{id}")
 }
 
-/// Whether the request carries cookie `name` with the value `token`.
 fn has_cookie(request: &Head, name: &str, token: &str) -> bool {
     request
         .headers
@@ -2691,7 +2206,6 @@ fn has_cookie(request: &Head, name: &str, token: &str) -> bool {
         .any(|(n, value)| n == name && same(value, token))
 }
 
-/// A target's `token` query parameter, and the target without it.
 fn without_token(target: &str) -> (Option<&str>, String) {
     let Some((path, query)) = target.split_once('?') else { return (None, target.to_owned()) };
     let mut token = None;
@@ -2709,8 +2223,6 @@ fn without_token(target: &str) -> (Option<&str>, String) {
     (token, location)
 }
 
-/// Where a request under `/ember` goes on Ember's own port: its target without
-/// the prefix, or for bare `/ember`, where to send the browser instead.
 fn ember_target(target: &str) -> Result<String, String> {
     let rest = target.strip_prefix("/ember").unwrap_or(target);
     if rest.is_empty() || rest.starts_with('?') {
@@ -2719,23 +2231,14 @@ fn ember_target(target: &str) -> Result<String, String> {
     Ok(rest.to_owned())
 }
 
-/// What a request under `/marimo` gets.
 #[derive(Debug, PartialEq)]
 enum MarimoTarget {
     Forward,
-    /// For bare `/marimo`, where to send the browser instead.
     Moved(String),
-    /// marimo's terminal, and its file and home listings: the user's computer beyond the notebook, which
-    /// the page doesn't need for one notebook. Also a path that could decode to one of them.
     Refused,
-    /// A page or WebSocket for a file that isn't an open notebook allowed to run: marimo would build its
-    /// environment, installing what its header names, which runs code (safe preview).
     NotAllowed,
 }
 
-/// Where a request for `target` under `/marimo` goes. `allowed` says whether a file is an open notebook
-/// allowed to run. marimo's server decodes the path before it routes it, so the path is decoded here
-/// before it's matched, and one that decodes to something odd is refused.
 fn marimo_target(target: &str, allowed: impl Fn(&str) -> bool) -> MarimoTarget {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let Some(path) = percent_decoded(path, false) else { return MarimoTarget::Refused };
@@ -2750,9 +2253,6 @@ fn marimo_target(target: &str, allowed: impl Fn(&str) -> bool) -> MarimoTarget {
     if REFUSED.iter().any(|refused| rest == *refused || rest.starts_with(&format!("{refused}/"))) {
         return MarimoTarget::Refused;
     }
-    // A notebook's page and its WebSocket name its file; marimo makes the notebook's session (and its
-    // environment) when the WebSocket connects. marimo decodes the keys too and takes the last
-    // `file`, so every pair is decoded here, and only one `file` may be given.
     let mut files = Vec::new();
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -2769,8 +2269,6 @@ fn marimo_target(target: &str, allowed: impl Fn(&str) -> bool) -> MarimoTarget {
     }
 }
 
-/// `text` with its `%XX` escapes decoded (and `+` as a space, in a query): None when an escape is
-/// broken or the result isn't UTF-8.
 pub(crate) fn percent_decoded(text: &str, query: bool) -> Option<String> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -2795,7 +2293,6 @@ pub(crate) fn percent_decoded(text: &str, query: bool) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// What a browser sees for a Python notebook it may not open yet.
 const MARIMO_NOT_ALLOWED_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Endeavor</title>
 <body style=\"font-family: system-ui, sans-serif; max-width: 40em; margin: 4em auto; line-height: 1.5\">
 <h1>This notebook isn't allowed to run yet</h1>
@@ -2803,7 +2300,6 @@ const MARIMO_NOT_ALLOWED_PAGE: &str = "<!doctype html><meta charset=utf-8><title
 </body>
 ";
 
-/// `target` with Ember's `secret` as its only `secret` query parameter.
 fn with_secret(target: &str, secret: &str) -> String {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let mut pairs: Vec<&str> = query.split('&').filter(|pair| !pair.is_empty() && !pair.starts_with("secret=")).collect();
@@ -2812,7 +2308,6 @@ fn with_secret(target: &str, secret: &str) -> String {
     format!("{path}?{}", pairs.join("&"))
 }
 
-/// `Host` as clients send it: `127.0.0.1:2346`, `localhost`, `[::1]:2346`.
 pub(crate) fn loopback_host(host: &str) -> bool {
     let name = match host.strip_prefix('[') {
         Some(_) => host.find(']').map_or("", |end| &host[..=end]),
@@ -2821,15 +2316,10 @@ pub(crate) fn loopback_host(host: &str) -> bool {
     matches!(name, "127.0.0.1" | "localhost" | "[::1]")
 }
 
-/// Whether `given` is `expected`, compared in constant time.
 pub(crate) fn same(given: &str, expected: &str) -> bool {
     given.len() == expected.len() && given.bytes().zip(expected.bytes()).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0
 }
 
-/// Pass one request to the server at `port` (Pluto, Julia's bridge or Ember), which runs in `language`, on a
-/// connection of its own, its body from `client` or already read, and the
-/// response back as it comes, through `edit`. Whether the client connection
-/// can carry another request.
 fn forward(request: Head, body: Option<&[u8]>, client: &mut BufReader<wire::Shared>, port: u16, language: &str, edit: &dyn Fn(&mut Head)) -> io::Result<bool> {
     let upstream = match TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(5)) {
         Ok(upstream) => upstream,
@@ -2878,7 +2368,6 @@ mod tests {
         if cfg!(windows) {
             assert!(!env.contains_key("R_ENVIRON_USER"), "Windows: R's own rules for .Renviron");
         }
-        // R reads an empty profile; the adapter runs the user's, where an error in it doesn't stop R.
         assert_eq!(env["R_PROFILE_USER"].as_deref(), Some(empty.to_string_lossy().as_ref()));
         if std::env::var_os("R_PROFILE_USER").is_none() {
             assert_eq!(env["ENDEAVOR_R_PROFILE"].as_deref(), Some(""));
@@ -2891,7 +2380,6 @@ mod tests {
 
     #[test]
     fn a_call_made_while_an_install_runs_waits_for_it() {
-        // It ends: the call has its result as soon as it does (#175).
         let state = Arc::new(std::sync::Mutex::new(Install::Running));
         let began = std::time::Instant::now();
         std::thread::scope(|scope| {
@@ -2902,12 +2390,10 @@ mod tests {
             assert!(matches!(*wait_for_install(&state, Duration::from_secs(30)), Install::Done(Ok(false))));
         });
         assert!(began.elapsed() >= Duration::from_millis(600), "waited for it");
-        // It doesn't: the call waits as long as it may, and no longer.
         let began = std::time::Instant::now();
         *state.lock().unwrap() = Install::Running;
         assert!(matches!(*wait_for_install(&state, Duration::from_secs(1)), Install::Running));
         assert!(began.elapsed() >= Duration::from_secs(1), "waited as long as it may");
-        // Nothing running: no wait.
         *state.lock().unwrap() = Install::Idle;
         let began = std::time::Instant::now();
         assert!(matches!(*wait_for_install(&state, Duration::from_secs(30)), Install::Idle) && began.elapsed() < Duration::from_secs(1));
@@ -2920,9 +2406,7 @@ mod tests {
             assert!(said.contains(part), "{part}: {said}");
         }
         assert!(!said.contains("in a minute"), "{said}");
-        // The wait the call had, which an approval card can shorten.
         assert!(starting_message("Julia is starting", Duration::from_secs(40), Duration::from_secs(5)).contains("(40 seconds so far)") && starting_message("Julia is starting", Duration::from_secs(40), Duration::from_secs(5)).contains("waits up to 5 seconds"));
-        // The runtime's own page, which waits for nothing, doesn't tell anyone to call again.
         assert!(!starting_message("Julia is starting", Duration::from_secs(40), Duration::ZERO).contains("call again"));
     }
 
@@ -3001,7 +2485,6 @@ mod tests {
         let folder = std::env::temp_dir().join(format!("endeavor-ember-builds-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         assert_eq!(EmberBuilds::read(&folder), EmberBuilds::default(), "nothing installed");
-        // As R's write.dcf writes it.
         std::fs::write(folder.join("ember.dcf"), "Current: bbbbbbbbbbbb\nPrevious: aaaaaaaaaaaa\nFailed:\n").unwrap();
         let mut builds = EmberBuilds::read(&folder);
         assert_eq!(builds, EmberBuilds { current: "bbbbbbbbbbbb".into(), previous: "aaaaaaaaaaaa".into(), failed: String::new() });
@@ -3034,7 +2517,6 @@ mod tests {
     }
 
     const TOKEN: &str = "t0k3n";
-    /// The pages' token.
     const PAGES: &str = "p4g3s";
 
     fn access_to(request: &str) -> Access {
@@ -3137,11 +2619,9 @@ mod tests {
         for refused in ["/marimo/terminal", "/marimo/terminal/ws", "/marimo/api/files/list_files", "/marimo/api/home/workspace_files", "/marimo/api/home", "/marimo/api/files"] {
             assert_eq!(target(refused), MarimoTarget::Refused, "{refused}");
         }
-        // marimo's server decodes the path before routing it.
         for refused in ["/marimo/%74erminal/ws", "/marimo/api/%66iles/list_files", "/marimo/api%2Ffiles/list_files", "/marimo/api/%2566iles/x", "/marimo//api/files/x", "/marimo/x/../api/files/x", "/marimo/api/home%", "/marimo/%ff"] {
             assert_eq!(target(refused), MarimoTarget::Refused, "{refused}");
         }
-        // The page and WebSocket of an open notebook that may run, and nothing else: opening one builds its environment.
         assert_eq!(target("/marimo/?file=/w/a%20b.py"), MarimoTarget::Forward);
         assert_eq!(target("/marimo/ws?session_id=s&file=/w/a+b.py"), MarimoTarget::Forward);
         assert_eq!(target("/marimo/?file=/w/other.py"), MarimoTarget::NotAllowed);
@@ -3150,7 +2630,6 @@ mod tests {
         assert_eq!(target("/marimo/sse?session_id=s"), MarimoTarget::NotAllowed);
         assert_eq!(target("/marimo/ws_sync?session_id=s"), MarimoTarget::NotAllowed);
         assert_eq!(target("/marimo/?file=%zz"), MarimoTarget::NotAllowed);
-        // marimo decodes the keys and takes the last `file`: a second one, however it's spelled, isn't let through.
         for page in ["/marimo/", "/marimo/ws"] {
             for query in ["file=/w/a%20b.py&file=/w/other.py", "file=/w/a%20b.py&%66ile=/w/other.py", "file=/w/a%20b.py&%66%69%6c%65=/w/other.py", "file=/w/a%20b.py&fil%zz=x", "%66ile=/w/other.py"] {
                 assert_eq!(target(&format!("{page}?{query}&session_id=s")), MarimoTarget::NotAllowed, "{page}?{query}");
@@ -3174,7 +2653,6 @@ mod tests {
         );
     }
 
-    /// What a runtime serves, with no Julia started and none to be found.
     fn stand_in() -> Arc<Served> {
         let (stops, _) = std::sync::mpsc::channel();
         let argv = ["--state-dir", "/nonexistent", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent/runtime", "--depot", "/nonexistent/depot"].map(String::from);
@@ -3184,7 +2662,6 @@ mod tests {
 
     #[test]
     fn the_app_quitting_stops_a_runtime_the_plugin_is_not_in() {
-        // `Notebooks::shared` is tested with notebooks; with none open the runtime is the app's to stop (app #232).
         let served = stand_in();
         assert!(!leave_to_plugin(&served, Arc::new(|_: &crate::mcp::Front| true)));
         assert!(!served.bridge.notebooks.exits_when_idle.load(std::sync::atomic::Ordering::SeqCst), "it isn't switched to end when idle");
@@ -3197,7 +2674,6 @@ mod tests {
         let served = stand_in();
         keep_for_app(&served);
         assert!(!served.bridge.notebooks.exits_when_idle.load(SeqCst), "one that wasn't left is as it was");
-        // As `leave_to_plugin` leaves it, for a runtime the app started.
         *served.left.lock().unwrap() = Some(false);
         served.bridge.notebooks.exits_when_idle.store(true, SeqCst);
         let generation = served.left_generation.load(SeqCst);
@@ -3205,7 +2681,6 @@ mod tests {
         assert!(!served.bridge.notebooks.exits_when_idle.load(SeqCst), "no front of another build can take it for the plugin's");
         assert!(served.left.lock().unwrap().is_none());
         assert_ne!(served.left_generation.load(SeqCst), generation, "its watch stops");
-        // One the plugin started keeps ending when idle.
         *served.left.lock().unwrap() = Some(true);
         keep_for_app(&served);
         assert!(served.bridge.notebooks.exits_when_idle.load(SeqCst));
@@ -3226,7 +2701,6 @@ mod tests {
         keep_for_app(&served);
         assert!(!served.bridge.notebooks.exits_when_idle.load(SeqCst), "the app has it again");
         assert_ne!(served.left_generation.load(SeqCst), watching, "and the idle watch stops");
-        // A runtime that already ends when idle (started in the background) is as it was.
         let served = stand_in();
         served.bridge.notebooks.exits_when_idle.store(true, SeqCst);
         end_when_idle(&served);
@@ -3243,8 +2717,6 @@ mod tests {
         assert_eq!(watch.tick(at(15), true, Some(1), 0.0), None, "back: a Claude Code restart that opened its notebook again");
         assert_eq!(watch.tick(at(24), false, Some(1), 0.0), None);
         assert!(watch.tick(at(25), false, Some(1), 0.0).is_some_and(|why| why.contains("10 minutes")), "out for 10 minutes, with the limit Never");
-        // A plugin that stays in with no notebook open: hard to be, since `shared` needs one; the idle limit
-        // still ends it, and Never counts as 48 hours.
         let mut watch = LeftWatch::new(LEFT_GRACE, start);
         assert_eq!(watch.tick(at(47 * 60), true, Some(0), 0.0), None);
         assert!(watch.tick(at(48 * 60), true, Some(0), 0.0).is_some_and(|why| why.contains("48 hours")));
@@ -3252,7 +2724,6 @@ mod tests {
         assert!(watch.tick(at(60), true, Some(0), 1.0).is_some_and(|why| why.contains("1 hour")), "the app's limit when it has one");
     }
 
-    /// The runtime's port with a stand-in Ember on `ember` (none: not running), and its address.
     fn serving(ember: Option<u16>) -> u16 {
         let served = stand_in();
         let _ = served.pluto.set(Page { port: 1, secret: "p".into() });
@@ -3311,7 +2782,6 @@ mod tests {
         }
     }
 
-    /// POST `body` to the runtime's `/mcp` with `headers`, and the JSON-RPC reply.
     fn mcp_post(port: u16, headers: &str, body: &Value) -> Value {
         use std::io::Read;
         let body = crate::mcp::to_json(body);
@@ -3326,25 +2796,19 @@ mod tests {
 
     #[test]
     fn a_client_straight_on_the_port_cant_approve_a_download_itself() {
-        // `serve` gives agents the runtime's own /mcp: no front asks the user there, so the agent's
-        // call would be the user's yes (#391). The front says it asks; the app asks with its card.
         let port = serving(None);
         let approve = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "approve_install", "arguments": { "notebook_id": "1b2c3d4e-0000-4000-8000-000000000001" } } });
         let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
         let text = |reply: &Value| reply["result"]["content"][0]["text"].as_str().unwrap_or_default().to_owned();
         let description = |reply: &Value| reply["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "approve_install").unwrap()["description"].as_str().unwrap().to_owned();
-        // `serving` is a runtime the app started: a client that says nothing is answered as the app's,
-        // but no one asks for it, and it is the one `serve` sets up.
         for straight in ["", "X-Endeavor-Client: plugin\r\n", "X-Endeavor-Client: plugin\r\nX-Endeavor-Consent: yes\r\n"] {
             let refused = mcp_post(port, straight, &approve);
             assert_eq!(refused["result"]["isError"], true, "{refused}");
             assert!(text(&refused).contains("\"download_cant_ask\"") && text(&refused).contains("`endeavor mcp`") && text(&refused).contains("(its browser_url) can't approve it either"), "{refused}");
             let tools = mcp_post(port, straight, &list);
             assert!(description(&tools).contains("can't be approved here") && !description(&tools).contains(crate::mcp::ASK_IN_CHAT), "{tools}");
-            // No machine tools there, so no `install: true` either (#387 is the front's).
             assert!(!tools["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "add_machine"), "{tools}");
         }
-        // The front, which asks the user itself, and the app, which holds it on its card, reach the notebook.
         for asked in ["X-Endeavor-Client: plugin\r\nX-Endeavor-Consent: front\r\n", "X-Endeavor-Client: app\r\n"] {
             let reply = mcp_post(port, asked, &approve);
             assert!(!text(&reply).contains("download_cant_ask"), "{asked}: {reply}");
