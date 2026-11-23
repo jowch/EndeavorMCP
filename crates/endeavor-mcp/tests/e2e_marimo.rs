@@ -510,7 +510,7 @@ fn a_python_notebook_through_the_runtime() {
         // The header holds six at an old version and the notebook at a date; moving the date lets each exact
         // version go to that date's newest, and pins it there (#352).
         let file = folder.join("dated.py");
-        let header = "# /// script\n# requires-python = \">=3.10\"\n# dependencies = [\n#     \"marimo==0.25.1\",\n#     \"six==1.16.0\",\n# ]\n#\n# [tool.uv]\n# exclude-newer = \"2026-10-05T00:00:00Z\"\n# ///\n";
+        let header = "# /// script\n# requires-python = \">=3.10\"\n# dependencies = [\n#     \"marimo==0.25.1\",\n#     # old on purpose\n#     \"six==1.16.0\",\n# ]\n#\n# [tool.uv]\n# exclude-newer = \"2026-10-05T00:00:00Z\"\n# ///\n";
         let body = GROWTH.split_once("# ///\n\n").unwrap().1.replacen("    y = x + 1\n    y\n", "    import six\n    y = six.__version__\n    y\n", 1);
         std::fs::write(&file, format!("{header}\n{body}")).unwrap();
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
@@ -531,11 +531,20 @@ fn a_python_notebook_through_the_runtime() {
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains(&format!("\"six=={newer}\"")) && text.contains("exclude-newer = \"2026-11-01T23:59:59Z\"") && text.contains("\"marimo==0.25.1\""), "{text}");
         assert!(text.ends_with(&body), "the cells are as they were: {text}");
+        assert!(text.contains("#     # old on purpose\n"), "the header's comment stays: {text}");
         // A day before marimo 0.25.1 was published can't hold it.
         let early = agent.ok("preview_package_update", json!({ "notebook_id": id, "date": "2026-01-01" }));
         assert!(early["status"] == "failed" && early.to_string().contains("marimo 0.25.1"), "{early}");
         let (failed, refused) = agent.call("preview_package_update", json!({ "notebook_id": id, "package": "six" }));
         assert!(failed && refused.to_string().contains("not_supported"), "{refused}");
+        // A header that doesn't resolve as it is has nothing to compare with: no preview is ready, and none applies.
+        let good = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, good.replacen(&format!("\"six=={newer}\""), "\"six==0.0.1\"", 1)).unwrap();
+        let broken = agent.ok("preview_package_update", json!({ "notebook_id": id, "date": "2026-11-01" }));
+        assert!(broken["status"] == "failed" && broken.to_string().contains("doesn't resolve as it is") && broken["changes"] == json!([]), "{broken}");
+        let (failed, refused) = agent.call("apply_package_update", json!({ "notebook_id": id, "date": "2026-11-01" }));
+        assert!(failed && refused.to_string().contains("no_preview"), "{refused}");
+        std::fs::write(&file, good).unwrap();
         // Live, the sandbox has the version the header pins.
         agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": true }));
         let cells = agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"].clone();

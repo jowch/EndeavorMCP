@@ -1028,14 +1028,21 @@ def with_version(req, version):
 
 
 def with_deps_and_date(header, deps, stamp):
-    """`header` with `dependencies` and `[tool.uv] exclude-newer` replaced, the rest as written."""
+    """`header` with `dependencies` (one for one, as `header_deps` lists them) and `[tool.uv] exclude-newer`
+    replaced, the rest as written: each entry changes in place, so comments around it stay."""
     import tomlkit
     doc = tomlkit.parse(header)
-    array = tomlkit.array()
-    array.multiline(True)
-    for d in deps:
-        array.append(d)
-    doc["dependencies"] = array
+    if "dependencies" in doc:
+        array = doc["dependencies"]
+        for i, d in enumerate(deps):
+            if str(array[i]) != d:
+                array[i] = d
+    else:
+        array = tomlkit.array()
+        array.multiline(True)
+        for d in deps:
+            array.append(d)
+        doc["dependencies"] = array
     tool = doc.setdefault("tool", tomlkit.table())
     uv = tool.setdefault("uv", tomlkit.table())
     uv["exclude-newer"] = stamp
@@ -1646,9 +1653,7 @@ class Adapter:
             await self.marimo.post("/api/kernel/interrupt", await nb.session_id(), {})
         return {"interrupted": busy}
 
-    async def restart(self, nb, between=None):
-        """A new session for the notebook, every cell not run. `between` runs with no session, before the new
-        one starts (a change to the header, which the new sandbox is built from)."""
+    async def restart(self, nb):
         if not nb.allowed:
             raise argument_error("execution_blocked", "The notebook is in safe preview; Run notebook starts it")
         # marimo's restart closes the session (its page then reloads, which starts a new one); we start it.
@@ -1661,11 +1666,7 @@ class Adapter:
         nb.closing, nb.live, nb.asking = False, False, None
         for c in nb.cells.values():
             c.update(status="idle", ran_code=None, stale=False, output=None, console=[], errored=False, last_run=0.0, runtime=0.0, awaiting_install=False)
-        try:
-            if between:
-                between()
-        finally:
-            await self.start(nb)
+        await self.start(nb)
         return {"restarted": True}
 
     async def preview_packages(self, nb, date, package=None, version=None):
@@ -1679,11 +1680,16 @@ class Adapter:
         stamp = date_stamp(date)
         before = read_header(nb.path)
         after = let_go(before, stamp)
-        old, _ = await asyncio.to_thread(resolve, nb.path, before)
-        new, problem = await asyncio.to_thread(resolve, nb.path, after)
+        old, problem = await asyncio.to_thread(resolve, nb.path, before)
+        new = None
+        if old is None:
+            # With no versions to start from, every package would read as added.
+            problem = f"The notebook's header doesn't resolve as it is, so there is nothing to compare with: fix the header first (a version that doesn't exist, or one only buildable from source). uv said: {problem}"
+        else:
+            new, problem = await asyncio.to_thread(resolve, nb.path, after)
         if problem and f"no version of marimo=={marimo.__version__}" in " ".join(problem.split()):
             problem = f"marimo {marimo.__version__}, which runs the notebook, was published after this date, so it can't be the package date: pick a later day. uv said: {problem}"
-        changes = [] if new is None else version_changes(old or {}, new)
+        changes = [] if new is None else version_changes(old, new)
         nb.previewed = None if new is None else {"day": day_of(stamp), "stamp": stamp, "header": before, "changes": changes}
         return {"date": day_of(stamp), "asked": day_of(stamp), "current_date": day_of(package_date(nb.path)),
                 "status": "failed" if new is None else "ready", "changes": changes,
@@ -1693,29 +1699,32 @@ class Adapter:
     async def apply_packages(self, nb, date):
         """Move the package date to the one `preview_packages` showed for `date`, and pin each exactly pinned
         package at that date's version: refused unless the preview is ready and still what it would do. A live
-        notebook gets a new session, whose sandbox is built from the new header, and every cell is left not run.
+        notebook then gets a new session, whose sandbox is built from the new header, and every cell is left not run.
         In safe preview only the file changes."""
         shown = nb.previewed
         day = day_of(date_stamp(date))
         if not shown or shown["day"] != day:
             raise argument_error("no_preview", "there is no ready preview for that date. Call preview_package_update first and tell the user what it shows")
+        again = "the notebook's packages changed since the preview, so the update would change more or less than it showed. Call preview_package_update again and tell the user what it shows"
         before = read_header(nb.path)
-        new, problem = await asyncio.to_thread(resolve, nb.path, let_go(before, shown["stamp"]))
-        if before != shown["header"] or new is None or version_changes((await asyncio.to_thread(resolve, nb.path, before))[0] or {}, new) != shown["changes"]:
-            nb.previewed = None
-            raise argument_error("no_preview", "the notebook's packages changed since the preview, so the update would change more or less than it showed. Call preview_package_update again and tell the user what it shows")
-        header = pin_at(before, shown["stamp"], new)
-
-        def write():
-            from marimo._environments import script_metadata
-            script_metadata.write_manifest(nb.path, header, previous=before)
-
+        old = new = None
+        if before == shown["header"]:
+            old, _ = await asyncio.to_thread(resolve, nb.path, before)
+        if old is not None:
+            new, _ = await asyncio.to_thread(resolve, nb.path, let_go(before, shown["stamp"]))
         nb.previewed = None
+        if new is None or version_changes(old, new) != shown["changes"]:
+            raise argument_error("no_preview", again)
+        from marimo._environments import script_metadata
+        try:
+            # Before the restart: marimo's save keeps the header the file has, so the session can't write the
+            # old one back, and a header that changed under us (a start adding marimo) stops it with nothing done.
+            script_metadata.write_manifest(nb.path, pin_at(before, shown["stamp"], new), previous=before)
+        except script_metadata.ManifestConflictError:
+            raise argument_error("no_preview", again) from None
+        nb.mtime = os.stat(nb.path).st_mtime
         if nb.live:
-            await self.restart(nb, write)
-        else:
-            write()
-            nb.mtime = os.stat(nb.path).st_mtime
+            await self.restart(nb)
         return {"date": day, "changes": shown["changes"], "process_status": nb.process_status()}
 
     async def approve(self, nb, packages=None):
