@@ -3,6 +3,7 @@
 //! is relayed to the runtime of the moment. The port stays the same while the
 //! runtime goes away and comes back.
 
+use std::collections::HashSet;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -11,7 +12,7 @@ use std::time::Duration;
 use serde_json::Value;
 use wire::relay::Mux;
 
-use crate::guard::{AskRestart, Picture, Pictures, Snapshot};
+use crate::guard::{AskRestart, Older, Picture, Pictures, Snapshot};
 
 /// How long a connection that arrives while the runtime is away waits for it
 /// to come back, so a short drop goes unnoticed.
@@ -37,6 +38,11 @@ pub struct Messages {
     /// whose runs are held for the user's answer (one that sends `endeavor/set_policy`, as the app
     /// does) gains anything from the refusal; for any other, no runtime holds a run, old or new.
     pub no_run_gate: Option<fn(&str) -> String>,
+    /// On a runtime another build started that doesn't offer this build's interface, tell each agent
+    /// session so with its first tool result, and in every `session_status` (`guard::Older`). True, the
+    /// default, for the app, whose agent has no other way to know (#239); the plugin's front tells its
+    /// agent itself (`Relay::decorate`), so it turns this off.
+    pub tell_other_build: bool,
 }
 
 impl Default for Messages {
@@ -46,6 +52,7 @@ impl Default for Messages {
             restart_needs_install: |name, items| format!("Julia on {name} couldn't start. {} Endeavor is asking the user whether it may install that; Julia starts once they agree.", wire::needs_text(items, name)),
             not_connected: |name| format!("Endeavor isn't connected to {name}. Reconnect it to use its notebook again."),
             no_run_gate: None,
+            tell_other_build: true,
         }
     }
 }
@@ -77,8 +84,9 @@ enum Upstream {
     None,
     /// `asks`: the runtime says its build or its interface, so it is new enough to hold a run for
     /// the user's answer. One that says neither runs no code (`Messages::no_run_gate`). `other`: another
-    /// build started it, and it doesn't offer this build's interface (`crate::usable_as_is`).
-    Up { mux: Arc<Mux>, token: String, asks: bool, other: bool },
+    /// build started it, and it doesn't offer this build's interface (`crate::usable_as_is`); the interface
+    /// its core offers, if it says one. `told`: the agent sessions told so already (`guard::Older`).
+    Up { mux: Arc<Mux>, token: String, asks: bool, other: Option<Option<u32>>, told: Arc<Mutex<HashSet<String>>> },
     /// The runtime was up and is being got back. A connection waits for it up
     /// to `HOLD`; then an MCP request is answered with `why`
     /// (`serve_unreachable`), and anything else closed.
@@ -158,12 +166,12 @@ impl Listener {
         let upstream = self.upstream.lock().unwrap();
         let (upstream, _) = self.changed.wait_timeout_while(upstream, HOLD, |u| matches!(u, Upstream::Away { .. })).unwrap();
         match &*upstream {
-            Upstream::Up { mux, asks, other, .. } => {
-                let (mux, asks, other) = (mux.clone(), *asks, *other);
+            Upstream::Up { mux, asks, other, told, .. } => {
+                let (mux, asks, other, told) = (mux.clone(), *asks, *other, told.clone());
                 drop(upstream);
                 // The runtime runs code unless it doesn't ask and this client holds runs for the user's answer.
                 let no_run_gate = if asks { None } else { self.messages.no_run_gate };
-                if self.refuse.is_none() && no_run_gate.is_none() && self.snapshot.get().is_none() && restart.is_none() && !other {
+                if self.refuse.is_none() && no_run_gate.is_none() && self.snapshot.get().is_none() && restart.is_none() && other.is_none() {
                     drop(mux.open(connection));
                     return;
                 }
@@ -182,8 +190,8 @@ impl Listener {
                         None => format!("Ask the user to restart Julia on {}: that closes its open notebooks, and starts this version.", self.name),
                     };
                     let no_r = || crate::no_r_text(&self.name, &how);
-                    let no_r: Option<&dyn Fn() -> String> = other.then_some(&no_r);
-                    let _ = crate::serve_guarded(connection, ours, &refuse, self.snapshot.get().map(|s| &**s), no_r, restart);
+                    let older = other.map(|interface| Older { no_r: &no_r, notice: self.messages.tell_other_build.then(|| older_notice(&self.name, interface, &how)), told: &told });
+                    let _ = crate::serve_guarded(connection, ours, &refuse, self.snapshot.get().map(|s| &**s), older.as_ref(), restart);
                 }
             }
             Upstream::Away { token, why } => {
@@ -221,9 +229,11 @@ impl Listener {
     /// (EndeavorMCP b0cab29) or close to it, and the listener refuses its code runs when the client
     /// asked for that (`Messages::no_run_gate`). The rule is set with the runtime, so no call reaches
     /// it before the rule does. `other`: another build started it, and it doesn't offer this build's
-    /// interface; a refusal of an R notebook's path for want of R notebooks then says so (`serve_guarded`).
-    pub(super) fn attach(&self, mux: Arc<Mux>, token: String, asks: bool, other: bool) {
-        *self.upstream.lock().unwrap() = Upstream::Up { mux, token, asks, other };
+    /// interface, with the interface its core offers if it says one. Each agent session is then told so
+    /// once, `session_status` says it every time, and a refusal of an R notebook's path for want of R
+    /// notebooks says why (`guard::Older`).
+    pub(super) fn attach(&self, mux: Arc<Mux>, token: String, asks: bool, other: Option<Option<u32>>) {
+        *self.upstream.lock().unwrap() = Upstream::Up { mux, token, asks, other, told: Arc::default() };
         self.changed.notify_all();
     }
 
@@ -372,6 +382,16 @@ fn loopback_pair() -> std::io::Result<(TcpStream, TcpStream)> {
     let _ = ours.set_nodelay(true);
     let _ = theirs.set_nodelay(true);
     Ok((ours, theirs))
+}
+
+/// What the agent is told of a runtime on `name` that another build started, whose core offers
+/// `interface`; `how` is how it gets restarted. As the plugin's front says it (`other_version_text`),
+/// with this client's way to restart in place of `stop_machine`.
+fn older_notice(name: &str, interface: Option<u32>, how: &str) -> String {
+    format!(
+        "Endeavor on {name} was started by {} version, and it keeps running as it is. Some notebook tools may not work as described, or may be refused. If that happens: {how}",
+        crate::which_version(interface, Some(crate::core::INTERFACE))
+    )
 }
 
 #[cfg(test)]

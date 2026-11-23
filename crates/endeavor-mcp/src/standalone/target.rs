@@ -322,7 +322,7 @@ pub(super) fn other_build_notice(name: &str, id: &str, interface: Option<u32>, o
 /// Names only: a proxy's address can carry a password.
 pub(super) fn network_notice(differ: &[&str]) -> String {
     format!(
-        "Note: Endeavor on this computer was started by another session, with other network settings than this session's ({}). Its downloads, package installs among them, use that session's settings. If one fails to reach the network, ask the user whether to stop Endeavor, since stopping it closes its notebooks. To stop it, call `stop_machine` with machine \"{LOCAL}\"; the next notebook call then starts it with this session's settings.",
+        "Note: Endeavor on this computer was started by another session, with other network settings than this session's ({}). Its downloads, package installs among them, use that session's settings. If one fails to reach the network, don't stop Endeavor yourself: tell the user, and ask whether to restart it, which closes the notebooks open in it. Only if the user says yes, call `stop_machine` with machine \"{LOCAL}\"; the next notebook call then starts it with this session's settings.",
         differ.join(", ")
     )
 }

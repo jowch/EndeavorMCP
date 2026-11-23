@@ -244,9 +244,15 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   replaces an older version's runtime that has no notebook open with its own
   build's, and a refusal of an R notebook's path by a runtime from before R
   notebooks ("must end in .jl") reaches the agent as why, and how to restart
-  it, from the front and from the app's relay (`client::Listener`). A kept
-  older runtime still isn't told to the app's agent up front, and a pathless
-  `new_notebook` in an R session on one makes a Pluto notebook (#239).
+  it, from the front and from the app's relay (`client::Listener`). Since
+  2026-11-23 the app's relay to a kept older runtime, on a server or on this
+  computer, also tells each agent session once, with its first tool result,
+  and adds `other_version` to every `session_status`, as the front does
+  (`guard::Older`; `Messages::tell_other_build`, which the front turns off).
+  These texts no longer name `stop_machine` as the remedy: the agent asks the
+  user first, and calls it only on their yes (#239). One part is the app's to
+  do, since only it knows a session's kind: a pathless `new_notebook` in an R
+  session on such a runtime still makes a Pluto notebook (Endeavor#326).
   Since 2026-11-20 `connect`, `serve`, `mcp`, `status` and `stop` with no
   state folder named use the plugin's folder, or while a runtime the app
   started in its older `~/.cache/endeavor/state` is alive on that machine,
