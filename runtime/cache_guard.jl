@@ -71,8 +71,12 @@ function endeavor_drop_unreadable_caches(depot::AbstractString=first(DEPOT_PATH)
                 now - seen > ENDEAVOR_UNUSED_AGE && push!(orphans, stem)
             end
         end
-        # A mark whose set Julia evicted.
-        union!(orphans, splitext(name)[1] for name in names if endswith(name, ENDEAVOR_USED_EXT) && !(splitext(name)[1] in jis) && old(joinpath(dir, name)))
+        # A mark whose set Julia evicted goes by itself: through `orphans` it would take any
+        # compiled file of its stem, even an image a precompile is still renaming into place.
+        for name in names
+            endswith(name, ENDEAVOR_USED_EXT) && !(splitext(name)[1] in jis) && old(joinpath(dir, name)) || continue
+            try rm(joinpath(dir, name); force=true) catch end
+        end
         isempty(bad) && isempty(orphans) && continue
         for name in names
             # On macOS a native image may have a debug bundle beside it, `<stem>.dylib.dSYM`, which
