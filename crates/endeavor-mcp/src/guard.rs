@@ -214,8 +214,11 @@ pub fn serve_guarded(
             let view = snapshot.filter(|_| call && tool == "view_cell_output");
             let no_r = older.map(|o| o.no_r).filter(|_| call && crate::mcp::names_r_notebook(tool, arguments));
             let list = restart.is_some() && message["method"] == "tools/list" && !message["id"].is_null();
-            // Only the calls that get the notice are read whole: a call that waits on the user keeps its stream.
-            let notice = older.and_then(|o| o.notice.as_deref().map(|notice| (o, notice))).filter(|(o, _)| call && (tool == "session_status" || !o.told.lock().unwrap().contains(&session)));
+            // The notice comes with a call that can't wait on the user, which is read whole: one that may be
+            // held for the user's answer, in any policy, keeps its stream, and the session's next call says it.
+            let notice = older.and_then(|o| o.notice.as_deref().map(|notice| (o, notice))).filter(|(o, _)| {
+                call && (tool == "session_status" || (!crate::mcp::asks_first(tool, arguments, "ask", true) && !o.told.lock().unwrap().contains(&session)))
+            });
             request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Transfer-Encoding") && !name.eq_ignore_ascii_case("Content-Length"));
             request.headers.push(("Content-Length".into(), body.len().to_string()));
             let whole = view.is_some() || no_r.is_some() || list || notice.is_some();
@@ -300,8 +303,8 @@ fn closed(socket: &TcpStream) -> bool {
 }
 
 /// `result`, the answer to the agent's call to `tool` in `session`, with what it is told of an older
-/// runtime: `notice` as `other_version` in a `session_status` that worked, and as a note after the
-/// first tool result of each session.
+/// runtime: `notice` as `other_version` in a `session_status` that worked, which tells the session,
+/// and otherwise as a note after the session's first tool result.
 fn told_of_older(result: &mut Value, tool: &str, session: &str, older: &Older, notice: &str) {
     if tool == "session_status"
         && result["isError"] != true
@@ -309,6 +312,8 @@ fn told_of_older(result: &mut Value, tool: &str, session: &str, older: &Older, n
     {
         fields.insert("other_version".into(), notice.into());
         result["content"][0]["text"] = to_json(&Value::Object(fields)).into();
+        older.told.lock().unwrap().insert(session.to_owned());
+        return;
     }
     if let Some(content) = result["content"].as_array_mut()
         && older.told.lock().unwrap().insert(session.to_owned())
@@ -663,20 +668,29 @@ mod tests {
     fn each_session_is_told_once_of_another_builds_runtime_and_session_status_says_it_every_time() {
         let told = Arc::default();
         let mut client = without_r_told(true, Some("Endeavor on lab was started by an older version."), Arc::clone(&told));
-        let first = call_from(&mut client, "7", "new_notebook", "/work/a.jl");
+        let first = call_from(&mut client, "7", "list_notebooks", "");
         assert_eq!(first["content"][0]["text"], "[]", "the runtime's answer stays first");
         assert_eq!(first["content"][1]["text"], "Note: Endeavor on lab was started by an older version.");
-        assert_eq!(call_from(&mut client, "7", "new_notebook", "/work/b.jl")["content"].as_array().unwrap().len(), 1, "once per session");
+        assert_eq!(call_from(&mut client, "7", "list_notebooks", "")["content"].as_array().unwrap().len(), 1, "once per session");
         let status = call_from(&mut client, "7", "session_status", "");
         let fields: Value = serde_json::from_str(status["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(fields, json!({ "pluto": "running", "other_version": "Endeavor on lab was started by an older version." }), "every time");
         assert_eq!(status["content"].as_array().unwrap().len(), 1, "with no second note");
-        let other = call_from(&mut client, "8", "new_notebook", "/work/c.R");
+        let other = call_from(&mut client, "8", "open_notebook", "/work/c.R");
         assert_eq!((other["isError"].clone(), other["content"][1]["text"].as_str().map(|t| t.starts_with("Note: "))), (json!(true), Some(true)), "another session is told too, after a refusal it explains");
         assert_eq!(other["content"][0]["text"], json!(tool_error("unsupported::No R here; restart it.", false)["content"][0]["text"]));
+        // A session whose first call is session_status is told there, and not again with a note.
+        let status = call_from(&mut client, "9", "session_status", "");
+        assert_eq!(status["content"].as_array().unwrap().len(), 1);
+        assert_eq!(call_from(&mut client, "9", "list_notebooks", "")["content"].as_array().unwrap().len(), 1, "told by the status");
+        // A call that may wait on the user (approve_install, a run, an edit in Manual) keeps its stream: the session's next call that can't says it.
+        let waits = json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": { "name": "approve_install", "arguments": {} } }).to_string();
+        let waited: Value = serde_json::from_str(post(&mut client, "/mcp", "10", &waits).strip_prefix("200 ").unwrap()).unwrap();
+        assert_eq!(waited["result"]["content"].as_array().unwrap().len(), 1, "no note on a call that may wait");
+        assert_eq!(call_from(&mut client, "10", "list_notebooks", "")["content"][1]["text"].as_str().map(|t| t.starts_with("Note: ")), Some(true));
         // A new connection of a session told already, to the same runtime: not again.
         let mut again = without_r_told(true, Some("Endeavor on lab was started by an older version."), told);
-        assert_eq!(call_from(&mut again, "7", "new_notebook", "/work/d.jl")["content"].as_array().unwrap().len(), 1);
+        assert_eq!(call_from(&mut again, "7", "list_notebooks", "")["content"].as_array().unwrap().len(), 1);
     }
 
     /// A runtime that answers `tools/list` with one tool and anything else with what it was sent,
