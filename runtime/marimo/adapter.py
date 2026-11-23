@@ -332,6 +332,25 @@ def _meaning(code):
     return ast.dump(tree)
 
 
+def kept_ids(ours, loaded):
+    """The ids we gave cells, for the cells marimo has just loaded from the file: {loaded id: our id}.
+
+    marimo doesn't keep ids in the file. It numbers the cells by position when it loads it, so after a
+    cell above was added, deleted or moved, a cell comes back under another cell's id (#353). Cells are
+    paired by code, the way marimo pairs them when the file changes under a session: the same code
+    first, then the most similar. A cell that pairs with none keeps marimo's id. `ours` and `loaded`
+    map each id to its code."""
+    if not ours or not loaded:
+        return {}
+    from marimo._utils.cell_matching import match_cell_ids_by_similarity
+    try:
+        # {the id to use: the loaded id}
+        return {got: keep for keep, got in match_cell_ids_by_similarity(ours, loaded).items()}
+    except Exception as e:  # noqa: BLE001 - marimo's ids then stay, as before
+        print(f"endeavor marimo: couldn't pair the file's cells with ours: {e}", file=sys.stderr)
+        return {}
+
+
 def new_cell(code, name=""):
     return {"code": code, "name": name, "status": "idle", "ran_code": None, "stale": False, "output": None,
             "console": [], "errored": False, "started": 0.0, "last_run": 0.0, "runtime": 0.0, "hide_code": False}
@@ -359,9 +378,9 @@ class Notebook:
         self.watcher = None
         self.closing = False
         self.watch = None
-        # Whether safe preview wrote an edit, so the ids it handed out may not be the ones marimo gives the
-        # cells when it loads the file (`rekey`).
-        self.edited_in_preview = False
+        # Whether the ids safe preview handed out may not be the ones marimo gives the cells when it loads the
+        # file (`rekey`): safe preview wrote an edit, or read the file again after a change and kept its ids.
+        self.own_ids = False
 
     # -- reading the file (safe preview) --
 
@@ -371,10 +390,13 @@ class Notebook:
             raise argument_error("not_a_notebook", f"'{self.path}' isn't a marimo notebook")
         manager = app._cell_manager
         old = self.cells
+        loaded = [(cid, manager.get_cell_data(cid)) for cid in manager.cell_ids()]
+        codes = {cid: file_form(data.code) for cid, data in loaded}
+        # Read again after a change to the file, each cell keeps the id it had (#353).
+        ids = kept_ids({c: old[c]["code"] for c in self.order}, codes)
         self.order, self.cells = [], {}
-        for cid in manager.cell_ids():
-            data = manager.get_cell_data(cid)
-            code = file_form(data.code)
+        for got, data in loaded:
+            cid, code = ids.get(got, got), codes[got]
             cell = old.get(cid) or new_cell(code, data.name)
             cell["code"], cell["name"] = code, data.name
             cell["hide_code"] = bool(data.config.hide_code)
@@ -382,6 +404,8 @@ class Notebook:
             cell["config"] = data.config.asdict()
             self.order.append(cid)
             self.cells[cid] = cell
+        if self.order != [got for got, _ in loaded]:
+            self.own_ids = True
         self.mtime = os.stat(self.path).st_mtime
 
     def write_file(self):
@@ -396,7 +420,7 @@ class Notebook:
             cell_ids=list(self.order), codes=[c["code"] for c in cells], names=[c["name"] or "_" for c in cells],
             configs=configs, filename=self.path, persist=True))
         self.mtime = os.stat(self.path).st_mtime
-        self.edited_in_preview = True
+        self.own_ids = True
 
     def reload_if_changed(self):
         if not self.live and os.stat(self.path).st_mtime != self.mtime:
@@ -440,8 +464,10 @@ class Notebook:
                     break
         except asyncio.TimeoutError:
             pass
-        # Copies: kernel_ready reuses a cell's dict under the same id, and writes marimo's code into it.
-        preview = [(c, dict(self.cells[c])) for c in self.order] if self.edited_in_preview else None
+        # The ids we handed out before this session: safe preview's, or the last session's before a restart,
+        # which marimo numbers again by position (#353). A resumed session keeps marimo's, as its cells may have
+        # run, unless safe preview gave out its own.
+        ours = {c: self.cells[c]["code"] for c in self.order} if self.order and (self.own_ids or not msg["data"].get("resumed")) else None
         # A new session's cells come from the file as written, which may not be how marimo's file writes them
         # (a hand-written `mo.md("## A")`). Its first save would then make the file and the session differ, and a
         # change to the file under marimo (a package install) has marimo pair them by similar code, which can give
@@ -450,31 +476,36 @@ class Notebook:
         reformed = self.kernel_ready(msg["data"], reform=not msg["data"].get("resumed"))
         self.live = True
         self.watch = asyncio.create_task(self.follow())
-        if preview:
-            await self.rekey(preview)
+        if ours:
+            ids = await self.rekey(ours)
+            reformed = [ids.get(c, c) for c in reformed]
         if reformed:
             await self.reform(reformed)
 
-    async def rekey(self, preview):
-        """Give marimo's session the cell ids safe preview handed out.
+    async def rekey(self, ours):
+        """Give marimo's session the cell ids we handed out before it started, and return {marimo's id: ours}.
 
-        marimo numbers a file's cells by position when it loads it, so after a preview edit that added,
-        deleted or moved a cell, its ids differ from the ones the agent holds (and the core's staged
-        runs name). One transaction puts them back: a cell id only marimo has is deleted, one only the
-        preview has is created, one both have takes the preview's code, name and config, and the order
-        becomes the preview's. No id is deleted and created again, because marimo drops a create whose
-        id the same transaction deleted. Nothing runs, since nothing has. If the file changed since the
-        preview wrote it, or marimo refuses, marimo's ids stay and the tools hear the topology changed.
+        marimo numbers a file's cells by position when it loads it, so after a cell was added, deleted or
+        moved, in safe preview, by another editor, or by the agent before a restart, its ids differ from the
+        ones the agent holds (and the core's staged runs name). `ours` maps each id we had to its code; the
+        file's cells are paired with them by code (`kept_ids`). One transaction then puts our ids back: a
+        cell id only marimo has is deleted, one only we have is created, one both have takes the code, name
+        and config of the cell the file holds under our id, and the order is the file's. Each cell's code
+        and config are the file's; only the ids change. No id is deleted and created again, because marimo
+        drops a create whose id the same transaction deleted. Nothing runs, since nothing has. If marimo
+        refuses, its ids stay and the tools hear the topology changed.
         """
         ids = list(self.order)
-        if [c for c, _ in preview] == ids:
-            return
+        mine = kept_ids(ours, {c: self.cells[c]["code"] for c in ids})
+        target = [mine.get(c, c) for c in ids]
+        if target == ids:
+            return {}
         try:
-            if [cell["code"] for _, cell in preview] != [self.cells[c]["code"] for c in ids]:
-                raise RuntimeError("the file changed on disk since safe preview wrote it")
-            ours = {c for c, _ in preview}
-            changes = [{"type": "delete-cell", "cellId": c} for c in ids if c not in ours]
-            for cid, cell in preview:
+            # Copies: the changes below write into the cells under the ids they name.
+            theirs = {c: dict(self.cells[c]) for c in ids}
+            changes = [{"type": "delete-cell", "cellId": c} for c in ids if c not in set(target)]
+            for got, cid in zip(ids, target):
+                cell = theirs[got]
                 config = {**(cell.get("config") or {}), "hide_code": bool(cell["hide_code"])}
                 camel = {"column": config.get("column"), "disabled": bool(config.get("disabled")),
                          "hideCode": config["hide_code"], "expandOutput": bool(config.get("expand_output"))}
@@ -487,16 +518,18 @@ class Notebook:
                 if (self.cells[cid]["name"] or "_") != (cell["name"] or "_"):
                     changes.append({"type": "set-name", "cellId": cid, "name": cell["name"] or "_"})
                 changes.append({"type": "set-config", "cellId": cid, **camel})
-            changes.append({"type": "reorder-cells", "cellIds": [c for c, _ in preview]})
+            changes.append({"type": "reorder-cells", "cellIds": target})
             await self.m.post("/api/document/transaction", self.watcher, {"changes": changes})
             for ch in changes:
                 self.document_change(ch)
-            for cid, cell in preview:
-                self.cells[cid]["config"] = cell.get("config")
+            for got, cid in zip(ids, target):
+                self.cells[cid]["config"] = theirs[got].get("config")
             await self.adapter.save(self, self.watcher)
+            return dict(zip(ids, target))
         except Exception as e:  # noqa: BLE001 - the notebook is live either way; only the ids differ
             print(f"endeavor marimo: kept marimo's cell ids for {self.path}: {e}", file=sys.stderr)
             self.adapter.notify("topology_changed", notebook_id=self.id)
+            return {}
 
     async def reform(self, cells):
         """Give marimo's session the code `kernel_ready` kept in file form for `cells`, and save, so the session and
@@ -522,6 +555,9 @@ class Notebook:
             cell["code"], cell["name"] = code, d["names"][i]
             config = (d.get("configs") or [{}] * len(d["cell_ids"]))[i] or {}
             cell["hide_code"] = bool(config.get("hide_code"))
+            # The rest as the file has it (disabled, column), for `save` and `rekey`.
+            if config:
+                cell["config"] = {k: config[k] for k in ("disabled", "column", "expand_output") if k in config}
             self.order.append(cid)
             self.cells[cid] = cell
         return reformed

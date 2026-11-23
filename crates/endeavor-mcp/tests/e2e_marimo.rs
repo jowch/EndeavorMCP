@@ -393,6 +393,79 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("close_notebook", json!({ "notebook_id": id }));
     });
 
+    step("cells keep their ids when the file changes outside, and after a restart", || {
+        // marimo numbers a file's cells by position each time it loads it, so a cell put above the others
+        // gave each of them the id of the one before (#353).
+        let file = folder.join("ids.py");
+        std::fs::write(&file, GROWTH).unwrap();
+        let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        let id = agent.ok("open_notebook", json!({ "path": "ids.py" }))["notebook_id"].clone();
+        let order = |agent: &mut Agent| -> Vec<String> {
+            agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_owned()).collect()
+        };
+        let code = |agent: &mut Agent, cell: &str| agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell, "include_code": true }))["code"].clone();
+        let before = order(&mut agent);
+        // In safe preview: another editor adds a cell at the top.
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&file, GROWTH.replacen("@app.cell\ndef _():\n    x = 20", "@app.cell\ndef _():\n    w = 0\n    return\n\n\n@app.cell\ndef _():\n    x = 20", 1)).unwrap();
+        let now = order(&mut agent);
+        assert_eq!(now.len(), 3, "{now:?}");
+        assert_eq!(now[1..], before[..], "the cells keep their ids: {now:?} {before:?}");
+        assert_eq!(code(&mut agent, &before[0]), "x = 20");
+        assert_eq!(code(&mut agent, &now[0]), "w = 0");
+        // Going live, marimo numbers them again; the ids still hold.
+        agent.ok("allow_execution", json!({ "notebook_id": id, "run_notebook": false }));
+        assert_eq!(order(&mut agent), now, "the ids survive going live");
+        assert_eq!(code(&mut agent, &before[0]), "x = 20");
+        agent.ok("close_notebook", json!({ "notebook_id": id }));
+
+        // A restart is a new session of marimo's, which numbers the cells again: a cell the agent added came
+        // back under another id.
+        let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        let made = agent.ok("new_notebook", json!({ "path": "restarted.py" }));
+        let id = made["notebook_id"].clone();
+        let file = folder.join("restarted.py");
+        let order = |agent: &mut Agent| -> Vec<String> {
+            agent.ok("get_cell_order", json!({ "notebook_id": id }))["cell_ids"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_owned()).collect()
+        };
+        let code = |agent: &mut Agent, cell: &str| agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell, "include_code": true }))["code"].clone();
+        let first = made["cell_ids"][0].as_str().unwrap().to_owned();
+        agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": first }));
+        agent.ok("edit_cell", json!({ "notebook_id": id, "cell_id": first, "code": "x = 20" }));
+        let added = agent.ok("add_cell", json!({ "notebook_id": id, "code": "y = x + 1\ny", "after_cell_id": first }))["cell_id"].as_str().unwrap().to_owned();
+        let last = agent.ok("add_cell", json!({ "notebook_id": id, "code": "v = y * 2\nv", "after_cell_id": added }))["cell_id"].as_str().unwrap().to_owned();
+        agent.ok("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }));
+        let live = order(&mut agent);
+        assert_eq!(live, [first.clone(), added.clone(), last.clone()]);
+        agent.ok("restart_notebook", json!({ "notebook_id": id }));
+        assert_eq!(order(&mut agent), live, "the ids survive a restart");
+        assert_eq!(code(&mut agent, &added), "y = x + 1\ny");
+        assert_eq!(code(&mut agent, &last), "v = y * 2\nv");
+        agent.ok("run_all_cells", json!({ "notebook_id": id, "wait_for_completion": true }));
+        for cell in &live {
+            let read = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": cell }));
+            assert!(read["errored"] == false && read["not_run"] != true, "{read}");
+        }
+        assert_eq!(agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": last }))["output"], "42");
+        // Live: another editor adds a cell at the top, and marimo, watching the file, pairs the cells by code.
+        let saved = std::fs::read_to_string(&file).unwrap();
+        let top = "@app.cell\ndef _():\n    x = 20";
+        assert!(saved.contains(top), "{saved}");
+        std::fs::write(&file, saved.replacen(top, &format!("@app.cell\ndef _():\n    u = 0\n    return\n\n\n{top}"), 1)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut now = order(&mut agent);
+        while now.len() == live.len() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+            now = order(&mut agent);
+        }
+        assert_eq!(now[1..], live[..], "the cells keep their ids under marimo too: {now:?} {live:?}");
+        assert_eq!(code(&mut agent, &now[0]), "u = 0");
+        assert_eq!(code(&mut agent, &last), "v = y * 2\nv");
+        agent.ok("close_notebook", json!({ "notebook_id": id }));
+    });
+
     step("a new notebook pins marimo and a package date", || {
         // A session works on one notebook: another agent makes it.
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };

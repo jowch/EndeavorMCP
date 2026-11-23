@@ -453,9 +453,11 @@ Next:
   another form (a backslash at the end of its text, `"""` with a backslash, or keyword arguments
   to `mo.md`) carries a `markdown_in_file` note saying how to keep it (#449). A deleted cell
   leaves marimo's kernel too, so what it defined is gone from the session as it is from the file,
-  and the cells that read it turn stale (#410). Not on
+  and the cells that read it turn stale (#410). marimo doesn't keep cell ids in the file, so
+  each time the file is read again (a change from another editor, going live, a restart) the
+  cells are paired with the ones the agent knows by code, and keep their ids (#353). Not on
   Windows. Known gaps: no tool moves
-  the package date (#352), ids shift after a reload (#353), `set_input` and
+  the package date (#352), `set_input` and
   `view_cell_output` of HTML aren't there, and uv isn't installed for the user
   (#354).
 - In R and Python notebooks, as in Julia ones (#393), `view_cell_output` tells the
