@@ -11,6 +11,11 @@
 # A native image with no `.ji` beside it is never used, and Julia never removes it either: its
 # own eviction works from the `.ji` files (#382). It is removed too, once it is old enough
 # that no precompile can still be writing it.
+#
+# A compiled set whose source files are gone can't be used again either: each unpacked runtime
+# folder (one per build) compiles its own set, and Julia keeps up to 10 a package before it evicts
+# the oldest (#382). Once the folder is removed (`remove_unused` in standalone.rs, a day after its
+# last use), its set is removed at the next start.
 
 # How old a native image with no `.ji` must be before it is removed: a precompile renames its
 # files into place one at a time.
@@ -24,7 +29,8 @@ Remove the compiled files of Endeavor's own packages in `depot` (the first entry
 DEPOT_PATH, ours, where Julia writes) that this user can't read, with the files of the
 same name beside them (a `.ji` and its native image, and on macOS the image's `.dSYM`, go
 together). Also remove a native image that has no `.ji` of its name and is older than
-`ENDEAVOR_ORPHAN_AGE`, with its `.dSYM`. Only the EndeavorRuntime and EndeavorRuntimeWarm
+`ENDEAVOR_ORPHAN_AGE`, with its `.dSYM`, and a set whose `.ji` names a source file of the
+package that no longer exists (`endeavor_source_gone`). Only the EndeavorRuntime and EndeavorRuntimeWarm
 folders, and never in the user's own depot (`~/.julia`). Temporary files (`jl_…`) a precompile
 may be writing are left alone. The paths removed.
 """
@@ -43,6 +49,7 @@ function endeavor_drop_unreadable_caches(depot::AbstractString=first(DEPOT_PATH)
         old(path) = try now - mtime(path) > ENDEAVOR_ORPHAN_AGE catch; false end
         image(name) = compiled_file(name) && !endswith(name, ".ji")
         orphans = Set(splitext(name)[1] for name in names if image(name) && !(splitext(name)[1] in jis) && !(splitext(name)[1] in bad) && old(joinpath(dir, name)))
+        union!(orphans, stem for stem in jis if !startswith(stem, "jl_") && !(stem in bad) && endeavor_source_gone(joinpath(dir, stem * ".ji")))
         isempty(bad) && isempty(orphans) && continue
         for name in names
             # On macOS a native image may have a debug bundle beside it, `<stem>.dylib.dSYM`, which
@@ -66,4 +73,23 @@ function endeavor_drop_unreadable_caches(depot::AbstractString=first(DEPOT_PATH)
     append!(removed, dropped)
     flush(log)
     return removed
+end
+
+"""
+Whether the compiled file `ji` names a source file of its package (the first, the package's own
+entry file) that no longer exists by an absolute path, so Julia can never use it again. False when
+the header can't be read, or names a path relative to a depot (`@depot`): such a set is kept.
+"""
+function endeavor_source_gone(ji::AbstractString)
+    try
+        open(ji) do io
+            Base.isvalid_cache_header(io) == 0 && return false
+            includes = Base.parse_cache_header(io, ji)[2][1]
+            isempty(includes) && return false
+            file = first(includes).filename
+            isabspath(file) && !ispath(file)
+        end
+    catch
+        false
+    end
 end
