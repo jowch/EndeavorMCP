@@ -20,7 +20,7 @@ use super::install_page::Clicked;
 use super::projects::Remembered;
 use super::target::{OtherBuild, Provider, Target, local_server};
 use super::{Relay, Route, tool_failure};
-use crate::client::{Cluster, Config, InstallInfo, Launcher, Messages, Outcome, Running, RuntimeInfo, Server, Session, State, Status, Transport, Want, ssh_config_hosts, this_platform};
+use crate::client::{Asker, Auth, Cluster, Config, InstallInfo, Launcher, Messages, Outcome, Running, RuntimeInfo, Server, Session, State, Status, Transport, Want, ssh_config_hosts, this_platform};
 use crate::mcp::{browser_link, to_json, tool_error};
 use crate::notebooks::Folder;
 
@@ -59,8 +59,9 @@ pub(super) fn test_var(name: &str) -> Option<std::ffi::OsString> {
 /// are the machine's own default folders (`{id}` in them is the machine's id, so that two machines don't
 /// share a runtime); `ENDEAVOR_TEST_JULIA_AT_START` starts Julia with the runtime; `ENDEAVOR_TEST_ASK` is a command that runs in the shell before each connect
 /// (`Transport::Shell`'s `ask`), and a failure of it fails the connect.
-fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>) -> Result<Session, String> {
+fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>, wanted: &Arc<Mutex<Instant>>) -> Result<(Session, Option<Asker>), String> {
     let id = server.id.clone();
+    let asker = sign_in(&server, wanted);
     let var = |name: &str| test_var(name).and_then(|v| v.into_string().ok()).unwrap_or_default().replace("{id}", &id);
     let helper = |os: &str, arch: &str| {
         if (os.to_owned(), arch.to_owned()) == this_platform() {
@@ -87,7 +88,49 @@ fn open_session(server: Server, allow_install: bool, launcher: Option<Launcher>)
         // The front tells its agent of another build's runtime itself (`Relay::decorate`), with `stop_machine`.
         tell_other_build: false,
     };
-    Session::new(config)
+    if let Some(asker) = &asker {
+        config.auth = Auth::Env(asker.env(&askpass_program()?));
+    }
+    Ok((Session::new(config)?, asker))
+}
+
+/// This program, as ssh runs it to ask (`SSH_ASKPASS`). On Linux not `/proc/self/exe`, which in ssh
+/// is ssh itself, but this process's own link, which holds even when an update replaced the file.
+fn askpass_program() -> Result<std::path::PathBuf, String> {
+    if cfg!(target_os = "linux") {
+        return Ok(format!("/proc/{}/exe", std::process::id()).into());
+    }
+    crate::this_program()
+}
+
+/// How lately a machine tool must have asked for a machine's connection for ssh's sign-in questions on it
+/// to be put to the user: a connection made again in the background, when no one asked for it, isn't.
+const SIGN_IN_WINDOW: Duration = Duration::from_secs(2 * 60);
+
+/// How long one sign-in question waits for the user's answer on its page.
+const SIGN_IN_WAIT: Duration = Duration::from_secs(2 * 60);
+
+/// The sign-in pages of this front's machines (`signin_page`).
+static SIGN_IN: std::sync::LazyLock<super::signin_page::SignIn> = std::sync::LazyLock::new(Default::default);
+
+/// What answers ssh's questions (a password, a code, a new host key) on `server`'s connection: the user,
+/// on a page in their browser (#106), while a machine tool asked for the connection within
+/// `SIGN_IN_WINDOW` (`wanted`). None where no browser can be opened: ssh then runs in batch mode and
+/// signs in only with keys, as before.
+fn sign_in(server: &Server, wanted: &Arc<Mutex<Instant>>) -> Option<Asker> {
+    if !super::browser::shows(|name| std::env::var(name).ok()) {
+        return None;
+    }
+    let (name, wanted) = (server.display_name(), wanted.clone());
+    Asker::start(move |ask| {
+        if wanted.lock().unwrap().elapsed() > SIGN_IN_WINDOW {
+            eprintln!("[ Info: {name} asked to sign in while no machine tool waited for it; not asking the user");
+            return None;
+        }
+        SIGN_IN.ask(&name, &ask, SIGN_IN_WAIT, &open_page)
+    })
+    .map_err(|e| eprintln!("┌ Warning: {e}; {} signs in with keys only", server.display_name()))
+    .ok()
 }
 
 /// A machine's connection and the settings it was made with, which a `Session` doesn't give back.
@@ -99,11 +142,23 @@ struct Held {
     saved: bool,
     /// The launcher the connection was asked for, when not the record's (`Config::launcher`).
     launcher: Option<Launcher>,
+    /// When a machine tool last asked for this connection (`sign_in`).
+    wanted: Arc<Mutex<Instant>>,
+    /// What answers ssh's sign-in questions, for as long as the connection lasts.
+    _asker: Option<Asker>,
 }
 
 impl Held {
     fn new(server: &Server, allow_install: bool, saved: bool, launcher: Option<Launcher>) -> Result<Held, String> {
-        Ok(Held { server: server.clone(), session: Arc::new(open_session(server.clone(), allow_install, launcher)?), saved, launcher })
+        let wanted = Arc::new(Mutex::new(Instant::now()));
+        let (session, asker) = open_session(server.clone(), allow_install, launcher, &wanted)?;
+        Ok(Held { server: server.clone(), session: Arc::new(session), saved, launcher, wanted, _asker: asker })
+    }
+
+    /// The connection, for a machine tool that asks for it now.
+    fn asked_for(&self) -> Arc<Session> {
+        *self.wanted.lock().unwrap() = Instant::now();
+        self.session.clone()
     }
 
     /// Whether nothing hangs on the connection, so that a new one can take its place without breaking
@@ -154,7 +209,7 @@ fn settings_changed(name: &str) -> String {
 impl Connections {
     /// The connection to saved machine `id`, if the front has one. Makes none.
     fn get(&self, id: &str) -> Option<Arc<Session>> {
-        self.held.lock().unwrap().get(id).filter(|held| held.saved).map(|held| held.session.clone())
+        self.held.lock().unwrap().get(id).filter(|held| held.saved).map(Held::asked_for)
     }
 
     /// The connection to `server`'s machine: the one held if it was made with the same settings, else a
@@ -164,7 +219,7 @@ impl Connections {
         let mut held = self.held.lock().unwrap();
         if let Some(old) = held.get(&server.id).filter(|old| old.saved) {
             if old.server.same_connection(server) {
-                return Ok(old.session.clone());
+                return Ok(old.asked_for());
             }
             if !old.replaceable() {
                 return Err(settings_changed(&server.display_name()));
@@ -189,7 +244,7 @@ impl Connections {
         let unsaved = || Unsaved { connections: self, id: record.id.clone(), leave: false };
         match held.get(&record.id) {
             // A connection asked for another launcher may run Slurm jobs where the user said not to, or the reverse.
-            Some(old) if old.server.same_connection(record) && (launcher.is_none() || old.launcher == launcher) => return Ok((old.session.clone(), unsaved())),
+            Some(old) if old.server.same_connection(record) && (launcher.is_none() || old.launcher == launcher) => return Ok((old.asked_for(), unsaved())),
             Some(old) if old.saved && !old.replaceable() => return Err(settings_changed(&record.display_name())),
             _ => {}
         }
@@ -222,7 +277,8 @@ impl Connections {
 
     /// Where machine `id`'s connection stands, if there is one.
     fn status(&self, id: &str) -> Option<Status> {
-        self.get(id).map(|session| session.status())
+        // Not `get`: a look at where a connection stands isn't a call that waits for it to sign in.
+        self.held.lock().unwrap().get(id).filter(|held| held.saved).map(|held| held.session.status())
     }
 
     /// The input ended: every connection lets go of its machine, which leaves each runtime running.

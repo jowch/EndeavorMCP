@@ -416,7 +416,7 @@ fn in_batch_mode_a_sign_in_failure_says_what_to_do() {
     let ssh = ssh_program().display().to_string().replace('\\', "/");
     assert!(host_key.contains(&format!("Run `{ssh} lab` once in a terminal and accept its host key")), "{host_key}");
     let denied = say("jc@lab: Permission denied (publickey).");
-    assert!(denied.contains("ssh-add") && denied.contains("password or a code, which Endeavor can't ask for yet"), "{denied}");
+    assert!(denied.contains("ssh-add") && denied.contains("password or a code, and Endeavor couldn't open a page in a browser here"), "{denied}");
     // Windows ships its agent turned off, so there it also says how to turn it on.
     assert_eq!(denied.contains("Start-Service ssh-agent"), cfg!(windows), "{denied}");
     // The same words for a password server: ssh lists its methods.

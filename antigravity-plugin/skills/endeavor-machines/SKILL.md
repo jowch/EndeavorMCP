@@ -13,7 +13,7 @@ Without these tools the notebooks run on the user's own computer. With them (`li
 ## Rules
 
 - **Only when the user asks.** Don't add a machine, switch machines, submit a job or stop Endeavor there unless the user asked. A project remembers the machine and folder its last session used, so a new session may already be on one: `list_machines` says which.
-- **Never a password.** Endeavor signs in with the user's own ssh keys and agent. Never ask for a password or passphrase, never type one, and never run `ssh` yourself to get past a failed sign-in. When `add_machine` or `use_machine` fails, tell the user what it says: usually the user runs `ssh-add` once in a terminal, or `ssh <host>` once to accept the server's identity. Servers that ask for a password or a code at every login can't be used yet.
+- **Never a password.** Endeavor signs in with the user's own ssh keys and agent. Never ask for a password or passphrase, never type one, and never run `ssh` yourself to get past a failed sign-in. When `add_machine` or `use_machine` fails, tell the user what it says: usually the user runs `ssh-add` once in a terminal, or `ssh <host>` once to accept the server's identity. When a server asks for a password, a code or a passphrase, Endeavor opens a page in the user's browser for it: tell the user to answer there. They never type it in the chat.
 - **Never install without a yes.** See below.
 - **Never submit a job with resources the user hasn't agreed to.** See step 3.
 - **A call that fails leaves the session where it was.**

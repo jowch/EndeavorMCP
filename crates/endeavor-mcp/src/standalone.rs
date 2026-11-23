@@ -39,6 +39,7 @@ mod browser;
 pub mod claude_mode;
 mod consent;
 mod install_page;
+mod signin_page;
 mod machines;
 mod projects;
 mod status;
