@@ -184,6 +184,45 @@ for something that needs it:
   to know (#239); the plugin's front tells its agent itself, so it turns this
   off.
 
+### How the guard serves a connection (`guard.rs`)
+
+- Requests on a connection are served one at a time, each checked the same
+  way. Everything but an agent's tool call that is refused or answered here
+  (the app's own calls and event stream, Pluto's page and its WebSocket, the
+  agent's other messages) passes through as it is. A `100 Continue` from the
+  runtime is passed on before the real response.
+- **A snapshot** replaces a `view_cell_output` the runtime has no picture for.
+  The client gives none when the notebook isn't open in the app, or the output
+  is empty or not drawn yet, which would give the agent a blank picture. In
+  safe preview the runtime can't render the value but the notebook still shows
+  it, so a snapshot is asked for any output there, text too. A picture from
+  the output's HTML may be only part of it, so the notebook's picture wins; a
+  value's own picture stands, as does an error a picture wouldn't help with.
+  A picture taller than the client can show says so, and the agent is told
+  the rest is missing.
+- **Another build's runtime**: the notice goes as `other_version` in a
+  `session_status` that worked, which tells the session, else as a note after
+  the session's first tool result, once per session for as long as that
+  runtime is the one relayed to. A call that may wait on the user (a run, an
+  install, an edit in Manual) keeps its stream, so the session's next call
+  that can't wait says it. A runtime from before R notebooks refused an R
+  notebook's path saying only that it must end in .jl; the guard says why
+  instead.
+- **`request_restart`** is answered here, so it works whatever build the
+  runtime is and while it is gone. It waits up to 50 s for the user, under the
+  60 s agents give a call; the question stays on the user's screen after
+  that. Its words follow those for a kept older runtime: small models take a
+  named way to stop something as a recipe, so it says plainly that only the
+  user's yes restarts anything. The answer can wait on the user, so it is
+  streamed to an agent that takes a stream, and the connection closes after
+  it: once the user restarts, the old connection leads to the runtime that
+  stopped.
+- **Between requests**, the guard checks every second whether the runtime's
+  end closed. If it did (the runtime stopped or restarted), the agent's
+  connection closes as an unguarded one would, and the agent's next request
+  comes through the listener to the runtime of the moment instead of failing
+  unanswered (#292).
+
 ## The session
 
 A caller says what it wants (`Want::Attach` or `Want::Start`) and hears how

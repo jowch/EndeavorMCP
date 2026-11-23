@@ -1,28 +1,10 @@
-//! Finding the julia to start the runtime with: a path the user gave, the one a
-//! shell line of theirs sets up (`module load julia`), the one on their login
-//! shell's PATH, or else Endeavor's own.
-//!
-//! Endeavor's own Julia is the pinned version, `JULIA_VERSION`. Where the computer
-//! has juliaup, it is juliaup's channel for that version, which Endeavor adds
-//! (`juliaup`); otherwise Endeavor downloads it into its cache folder and checks it
-//! here. On Windows juliaup is the only way, and Endeavor installs juliaup first
-//! when there is none. `own_installed`, `install_own` and `remove_own` are for the
-//! app's Settings, without a runtime.
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// The oldest Julia the runtime starts on: its Manifest.toml is resolved on 1.12, and 1.11's
-/// Pkg can't instantiate it (#370). `--julia auto` passes over an older one for Endeavor's own.
-/// The app reads it from here (`min_version`), so this is the one place to change it.
 const MIN_JULIA: (u32, u32) = (1, 12);
 
-/// Endeavor's own Julia, the tested version, pinned with the official tarballs'
-/// SHA-256 and size. The app reads it from here; bump it with the cloud script
-/// (scripts/cloud-setup.sh and Endeavor's copy) and e2e.yml's `version`.
 pub const JULIA_VERSION: &str = "1.12.6";
-/// About how much Julia's Windows download is (its x64 zip), for the consent question there.
 const WINDOWS_SIZE: u64 = 300_000_000;
 const TARBALLS: [(&str, &str, &str, &str, u64); 4] = [
     (
@@ -57,18 +39,13 @@ const TARBALLS: [(&str, &str, &str, &str, u64); 4] = [
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
-    /// `--julia PATH`
     Path(String),
-    /// `--julia auto`: the login shell's (on Windows the PATH's), else Endeavor's own (not on Windows).
     Auto,
-    /// `--julia-shell LINE`: what `LINE` puts on the login shell's PATH.
     Shell(String),
-    /// `--julia own`: Endeavor's own Julia only, the pinned version, never the PATH's.
     Own,
 }
 
 impl Source {
-    /// The VALUE of `--julia VALUE` that means this, or None for a shell line (`--julia-shell`).
     pub fn value(&self) -> Option<String> {
         match self {
             Source::Path(path) => Some(path.clone()),
@@ -78,7 +55,6 @@ impl Source {
         }
     }
 
-    /// What `--julia VALUE` means: `auto`, `own`, or a path (a julia called `own` is `./own`).
     pub fn from_value(value: String) -> Source {
         match value.as_str() {
             "auto" => Source::Auto,
@@ -88,11 +64,8 @@ impl Source {
     }
 }
 
-/// Why Julia wasn't found.
 #[derive(Debug, PartialEq)]
 pub enum Failure {
-    /// None was found and `find`'s `download` was false: nothing was downloaded.
-    /// The download that was not allowed.
     Missing(wire::Item),
     Failed(String),
 }
@@ -104,7 +77,6 @@ impl From<String> for Failure {
 }
 
 impl Failure {
-    /// The words for an error, whichever it is.
     pub fn message(self) -> String {
         match self {
             Failure::Missing(item) => format!("Julia wasn't found on this machine. Endeavor can download its own copy: {item}."),
@@ -113,14 +85,10 @@ impl Failure {
     }
 }
 
-/// The julia binary and its version ("1.12.6"). `progress` hears about a
-/// download, which only happens when `download` is true.
 pub fn find(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -> Result<(String, String), Failure> {
     find_whose(source, download, progress).map(|(path, version, _)| (path, version))
 }
 
-/// `find`, and whether the Julia is Endeavor's own (`--julia own`, or `auto` with none of the
-/// user's), so the runtime can say which one it started.
 pub fn find_whose(source: &Source, download: bool, progress: &mut dyn FnMut(String)) -> Result<(String, String, bool), Failure> {
     let endeavors = std::cell::Cell::new(false);
     let (path, version) = found(source, download, &endeavors, progress)?;
@@ -136,7 +104,6 @@ fn found(source: &Source, download: bool, endeavors: &std::cell::Cell<bool>, pro
         }
         Source::Shell(line) => {
             let (path, err, ended_early) = login_shell_julia(Some(line));
-            // Ended well with no path: the lookup didn't run, or `julia` is a shell function or alias.
             if ended_early && line.contains('#') {
                 return Err(format!("Running `{line}` in a login shell ended before it looked for julia, because a `#` in it comments out the rest. Take the comment out.").into());
             }
@@ -170,41 +137,27 @@ fn found(source: &Source, download: bool, endeavors: &std::cell::Cell<bool>, pro
     }
 }
 
-/// The user's own Julia, which `--julia auto` runs before Endeavor's: the login shell's `julia` (on
-/// Windows the PATH's), with its version, or why it can't be used (too old, doesn't run), in which
-/// case `auto` runs Endeavor's. None when there is none.
 pub fn users_julia() -> Option<Result<(String, String), String>> {
     let path = users_path_julia()?;
     Some(checked_version(&path, &format!("Found {path}, but it doesn't run.")).map(|version| (real_julia(path), version)))
 }
 
-/// Which Julia the app's Settings ask for on this computer. The library decides what that runs
-/// (`choose`), so the app and a server pick Julia the same way.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Preference {
-    /// The user's own Julia when they have one new enough, else Endeavor's (`--julia auto`).
     #[default]
     Auto,
-    /// Endeavor's own Julia, the pinned version, even when the user has one (`--julia own`).
     Endeavors,
-    /// This julia, while it runs and is new enough; else as `Auto`.
     Path(PathBuf),
 }
 
-/// What a julia the user chose turned out to be.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Chosen {
-    /// It runs and is new enough; its version, e.g. "1.12.6".
     Usable(String),
-    /// Nothing is at the path any more.
     Gone,
-    /// Something is there, but it didn't answer as Julia does.
     NotJulia,
-    /// Julia, but older than Endeavor needs; its version.
     TooOld(String),
 }
 
-/// Run the chosen file once to read its version (blocking; Julia answers in well under a second).
 pub fn check_chosen(path: &Path) -> Chosen {
     if !path.is_file() {
         return Chosen::Gone;
@@ -217,7 +170,6 @@ pub fn check_chosen(path: &Path) -> Chosen {
     }
 }
 
-/// `julia --version`'s answer, as a check of the chosen file.
 fn chosen_from_version(text: &str) -> Chosen {
     let Some(version) = text.trim().strip_prefix("julia version ") else { return Chosen::NotJulia };
     match parse_version(version) {
@@ -227,13 +179,10 @@ fn chosen_from_version(text: &str) -> Chosen {
     }
 }
 
-/// The oldest Julia Endeavor runs, for saying so ("1.12").
 pub fn min_version() -> String {
     format!("{}.{}", MIN_JULIA.0, MIN_JULIA.1)
 }
 
-/// The `--julia` a preference gives the runtime: a chosen julia that can't be used counts as
-/// `Auto`. `chosen` is `check_chosen`'s answer for a `Path`, when it has been asked.
 pub fn choose(preference: &Preference, chosen: Option<&Chosen>) -> Source {
     match preference {
         Preference::Auto => Source::Auto,
@@ -252,11 +201,6 @@ fn expand_home(path: &str) -> String {
     }
 }
 
-/// The user's own julia on the PATH (`path_julia`). When that is juliaup's launcher and juliaup has no
-/// channel yet, there is none: the launcher's first run would install juliaup's latest Julia and make
-/// it the default, which the person never chose and Endeavor would then count as theirs (#512). So
-/// juliaup is asked first, which installs nothing; Endeavor's channel, added next, becomes its default.
-/// Otherwise the launcher is run as before, so `JULIAUP_CHANNEL` and `juliaup override` still choose.
 fn users_path_julia() -> Option<String> {
     let julia = path_julia()?;
     if is_real_julia(Path::new(&julia)) {
@@ -266,8 +210,6 @@ fn users_path_julia() -> Option<String> {
     launchers_julia(julia, listed.as_deref())
 }
 
-/// What `users_path_julia` takes for juliaup's launcher `julia`, given juliaup's listing: none before
-/// juliaup has a channel, else the launcher.
 fn launchers_julia(julia: String, listed: Option<&str>) -> Option<String> {
     match listed.and_then(crate::juliaup::default_julia) {
         Some(None) => None,
@@ -275,14 +217,11 @@ fn launchers_julia(julia: String, listed: Option<&str>) -> Option<String> {
     }
 }
 
-/// The julia on the login shell's PATH.
 #[cfg(unix)]
 fn path_julia() -> Option<String> {
     login_shell_julia(None).0
 }
 
-/// The first `julia.exe` on the PATH: Windows has no login shell. juliaup from
-/// the Microsoft Store puts an app alias there, which runs like any julia.exe.
 #[cfg(windows)]
 fn path_julia() -> Option<String> {
     julia_in(&std::env::var_os("PATH")?)
@@ -293,14 +232,6 @@ fn julia_in(path: &std::ffi::OsStr) -> Option<String> {
     std::env::split_paths(path).map(|dir| dir.join("julia.exe")).find(|exe| exe.is_file()).map(|exe| exe.display().to_string())
 }
 
-/// juliaup's `julia` (its launcher, or on Windows the Store app's alias) only
-/// starts the real one, from the channel juliaup picks when it starts. Started
-/// through it, the version checked and the Julia run can differ, and on
-/// Windows that launcher and the Julia under it ran outside the core's job, so
-/// ending the core left Julia running (EndeavorMCP #55). Start the `julia` in
-/// that Julia's own `Sys.BINDIR` instead (only for juliaup's launcher: see
-/// `is_real_julia`). If asking
-/// fails, the path as found.
 fn real_julia(julia: String) -> String {
     if is_real_julia(Path::new(&julia)) {
         return julia;
@@ -308,7 +239,6 @@ fn real_julia(julia: String) -> String {
     let mut command = Command::new(&julia);
     crate::client::no_window(&mut command);
     let output = command.args(["--startup-file=no", "--history-file=no", "-e", "print(Sys.BINDIR)"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
-    // Started through the launcher, the Julia run can differ from the one checked (#55): say so in the log.
     let as_found = |why: String| {
         eprintln!("Couldn't find the Julia behind {julia} ({why}), so it is started as found.");
         julia.clone()
@@ -325,10 +255,6 @@ fn real_julia(julia: String) -> String {
     }
 }
 
-/// Whether `julia` is the one to start as it is. On Windows: libjulia.dll beside it (anything else
-/// may be juliaup's launcher or alias). Elsewhere, anything but juliaup's launcher, which the `julia`
-/// on the PATH links to (`julialauncher`): a wrapper script someone put there is left alone, not run
-/// to ask where its Julia is.
 fn is_real_julia(julia: &Path) -> bool {
     let julia = std::fs::canonicalize(julia).unwrap_or_else(|_| julia.to_path_buf());
     if cfg!(windows) {
@@ -337,18 +263,11 @@ fn is_real_julia(julia: &Path) -> bool {
     !julia.file_name().is_some_and(|name| name.to_string_lossy().starts_with("julialauncher"))
 }
 
-/// The julia in the `Sys.BINDIR` Julia printed (the last line: a startup
-/// message may come first).
 fn bindir_julia(printed: &str) -> Option<std::path::PathBuf> {
     let bindir = printed.lines().map(str::trim).rfind(|l| !l.is_empty())?;
     Some(Path::new(bindir).join(if cfg!(windows) { "julia.exe" } else { "julia" }))
 }
 
-/// The julia the user's login shell finds, after `line` when there is one: the
-/// last absolute path it prints (profiles can print other things first), what
-/// it wrote to stderr, and whether it ended well without printing a path.
-/// `command -v` fails when it finds nothing, so that means the lookup never ran:
-/// a `#` in the line commented it out.
 fn login_shell_julia(line: Option<&str>) -> (Option<String>, String, bool) {
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
     let Ok(output) = lookup_command(&shell, line).stdin(Stdio::null()).output() else {
@@ -357,7 +276,6 @@ fn login_shell_julia(line: Option<&str>) -> (Option<String>, String, bool) {
     looked_up(&output)
 }
 
-/// `login_shell_julia`'s answer from the shell's output.
 fn looked_up(output: &std::process::Output) -> (Option<String>, String, bool) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let path = stdout.lines().rev().map(str::trim).find(|l| l.starts_with('/')).map(str::to_owned);
@@ -365,9 +283,6 @@ fn looked_up(output: &std::process::Output) -> (Option<String>, String, bool) {
     (path.filter(|_| output.status.success()), String::from_utf8_lossy(&output.stderr).into_owned(), ended_early)
 }
 
-/// `shell` asked for julia's path, after `line`. csh and tcsh take `-l` only as their one flag, so they
-/// run a plain `-c`, which still reads ~/.cshrc or ~/.tcshrc, where module setup goes, and sh looks
-/// julia up on the PATH they leave (as R's setting does: `r::Source::command`).
 fn lookup_command(shell: &str, line: Option<&str>) -> Command {
     let mut command = Command::new(shell);
     if crate::r::is_csh(shell) {
@@ -380,7 +295,6 @@ fn lookup_command(shell: &str, line: Option<&str>) -> Command {
     command
 }
 
-/// `julia --version`, if it's new enough.
 fn checked_version(julia: &str, missing: &str) -> Result<String, String> {
     let mut command = Command::new(julia);
     crate::client::no_window(&mut command);
@@ -394,7 +308,6 @@ fn checked_version(julia: &str, missing: &str) -> Result<String, String> {
     }
 }
 
-/// "1.12.6" -> (1, 12)
 fn parse_version(text: &str) -> Option<(u32, u32)> {
     let mut parts = text.split('.');
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
@@ -404,28 +317,18 @@ pub(crate) fn uname(flag: &str) -> String {
     Command::new("uname").arg(flag).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default()
 }
 
-/// Endeavor's own Julia as it is installed on this computer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OwnJulia {
-    /// Its `julia`.
     pub julia: PathBuf,
     pub from: OwnFrom,
 }
 
-/// Where Endeavor's own Julia came from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OwnFrom {
-    /// Endeavor downloaded it into its cache folder (`~/.cache/endeavor/julia-<version>`).
     Download,
-    /// It is juliaup's channel for the pinned version. `added`: Endeavor added the channel, so
-    /// removing it is Endeavor's to do; otherwise the person added it, and it stays theirs.
-    /// `default`: it is juliaup's default (as the first channel of a juliaup that had none), which
-    /// juliaup won't remove, so `remove_own` says what to do instead.
     Juliaup { added: bool, default: bool },
 }
 
-/// Endeavor's own Julia if it is installed; nothing is downloaded. Asks juliaup, if there is one,
-/// which takes a moment.
 pub fn own_installed() -> Option<OwnJulia> {
     if let Some(julia) = downloaded().filter(|julia| julia.exists()) {
         return Some(OwnJulia { julia, from: OwnFrom::Download });
@@ -439,10 +342,6 @@ pub fn own_installed() -> Option<OwnJulia> {
     Some(OwnJulia { julia: channel.julia, from: OwnFrom::Juliaup { added: marked(), default: channel.default } })
 }
 
-/// Delete the mark that says Endeavor added juliaup's channel when juliaup's `listed` channels have
-/// none for its Julia: the channel went some other way (`juliaup remove`), so one added later is the
-/// person's, and Remove must leave it (#118). A juliaup that couldn't say (`None`), or said something
-/// that isn't its listing, leaves the mark.
 fn forget_if_gone(listed: Option<&str>, mark: &Path) {
     let read = |listed: &str| serde_json::from_str::<serde_json::Value>(listed.trim()).is_ok_and(|config| config.get("DefaultChannel").is_some());
     if listed.is_some_and(|listed| read(listed) && crate::juliaup::channel(listed, JULIA_VERSION).is_none()) {
@@ -450,9 +349,6 @@ fn forget_if_gone(listed: Option<&str>, mark: &Path) {
     }
 }
 
-/// Install Endeavor's own Julia unless it is installed: with juliaup when the computer has it (on
-/// Windows, installing juliaup first when it hasn't), else by downloading it. `progress` hears each
-/// step ("Downloading Julia 1.12.6… 42%").
 pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<OwnJulia, String> {
     if let Some(own) = own_installed() {
         return Ok(own);
@@ -464,19 +360,14 @@ pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<OwnJulia, String>
         #[cfg(unix)]
         None => return download_own(progress),
     };
-    // Endeavor adds the channel only if juliaup said it has none. When juliaup can't say, the channel
-    // may already be the person's (and juliaup counts adding it again as done), so it isn't marked ours.
     let ours = crate::juliaup::listing(&juliaup).is_some_and(|listed| crate::juliaup::channel(&listed, JULIA_VERSION).is_none());
     let channel = match crate::juliaup::add(&juliaup, JULIA_VERSION, progress) {
         Ok(channel) => channel,
-        // Elsewhere there is the checked download, so a juliaup that fails (a locked config, an old
-        // juliaup, a mirror that's down) costs a second Julia rather than none.
         #[cfg(unix)]
         Err(why) => {
             progress(format!("{why} Downloading Endeavor's own Julia {JULIA_VERSION} instead."));
             return download_own(progress);
         }
-        // A failed add was already retried once, but a failure like Windows' "Access is denied" can still pass later.
         #[cfg(windows)]
         Err(why) => return Err(format!("{why} Trying again may work.")),
     };
@@ -487,7 +378,6 @@ pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<OwnJulia, String>
     Ok(OwnJulia { julia: channel.julia, from: OwnFrom::Juliaup { added: marked(), default: channel.default } })
 }
 
-/// Download Endeavor's own Julia into its cache folder.
 #[cfg(unix)]
 fn download_own(progress: &mut dyn FnMut(String)) -> Result<OwnJulia, String> {
     let dir = download_dir().ok_or("HOME isn't set")?;
@@ -496,9 +386,6 @@ fn download_own(progress: &mut dyn FnMut(String)) -> Result<OwnJulia, String> {
     Ok(OwnJulia { julia: dir.join("bin").join("julia"), from: OwnFrom::Download })
 }
 
-/// Remove Endeavor's own Julia: the one it downloaded, and juliaup's channel if Endeavor added it.
-/// A channel the person added stays, so `own_installed` may still find one. Stop the runtimes that
-/// use it first.
 pub fn remove_own() -> Result<(), String> {
     if let Some(dir) = download_dir().filter(|dir| dir.exists()) {
         not_in_use(&dir)?;
@@ -514,9 +401,6 @@ pub fn remove_own() -> Result<(), String> {
                         "juliaup uses Julia {JULIA_VERSION} as its default, so it stays. To remove it, make another Julia juliaup's default first (`juliaup add release`, then `juliaup default release`), then remove it again."
                     ));
                 }
-                // juliaup keeps one folder per Julia version for all its channels: when another channel
-                // (`release`, say) is the same Julia, removing this one leaves the files, and a REPL of
-                // the person's on that channel mustn't hold Remove up.
                 if !another_channel_has(&listed, &channel.julia)
                     && let Some(dir) = channel.julia.parent().and_then(Path::parent)
                 {
@@ -530,10 +414,6 @@ pub fn remove_own() -> Result<(), String> {
     Ok(())
 }
 
-/// Refuse while a process here runs a program from the Julia in `dir` (Julia, or a worker it started):
-/// a runtime the app doesn't know about, started with `endeavor serve` or by the plugin, may run it,
-/// and its notebooks break once it is gone (#117). The app stops its own runtime first, so its Julia
-/// gets a few seconds to end.
 fn not_in_use(dir: &Path) -> Result<(), String> {
     let until = std::time::Instant::now() + IN_USE_WAIT;
     while running_from(dir, crate::old_builds::processes().as_deref().unwrap_or_default()) {
@@ -547,47 +427,37 @@ fn not_in_use(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether a channel in juliaup's `listed` channels other than Endeavor's (`JULIA_VERSION`) runs `julia`.
 fn another_channel_has(listed: &str, julia: &Path) -> bool {
     let Ok(config) = serde_json::from_str::<serde_json::Value>(listed.trim()) else { return false };
     let others = config["OtherChannels"].as_array().into_iter().flatten();
     std::iter::once(&config["DefaultChannel"]).chain(others).any(|c| c["Name"] != JULIA_VERSION && c["File"].as_str().is_some_and(|file| Path::new(file) == julia))
 }
 
-/// How long `not_in_use` waits for a Julia that is ending.
 const IN_USE_WAIT: Duration = Duration::from_secs(5);
 
-/// Whether one of the processes' `texts` (`old_builds::processes`: a command line, and on Linux each
-/// argument and the binary on a line of its own) runs a program from `dir`.
 fn running_from(dir: &Path, texts: &[String]) -> bool {
     let prefix = format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR);
     texts.iter().any(|text| text.lines().any(|line| line.starts_with(&prefix)))
 }
 
-/// Whether Endeavor added juliaup's channel for its Julia.
 fn marked() -> bool {
     added_mark().is_some_and(|mark| mark.exists())
 }
 
-/// The `julia` Endeavor downloads into its cache folder.
 fn downloaded() -> Option<PathBuf> {
     download_dir().map(|dir| dir.join("bin").join("julia"))
 }
 
-/// Where Endeavor downloads its Julia: `~/.cache/endeavor/julia-<version>`. Windows has none: Julia
-/// there comes from juliaup.
 fn download_dir() -> Option<PathBuf> {
     let env = crate::paths::Env::here();
     (cfg!(unix) && !env.home.as_os_str().is_empty()).then(|| env.server_root().join(format!("julia-{JULIA_VERSION}")))
 }
 
-/// The file that says Endeavor added juliaup's channel for its Julia, beside its cache folder's Julia.
 fn added_mark() -> Option<PathBuf> {
     let env = crate::paths::Env::here();
     (!env.home.as_os_str().is_empty()).then(|| env.server_root().join(format!("julia-{JULIA_VERSION}.juliaup")))
 }
 
-/// The official tarball for this machine: its URL, SHA-256 and size.
 pub fn tarball() -> Result<(&'static str, &'static str, u64), String> {
     let (os, arch) = (uname("-s"), uname("-m").replace("arm64", "aarch64"));
     let &(_, _, url, sha256, size) = TARBALLS
@@ -597,8 +467,6 @@ pub fn tarball() -> Result<(&'static str, &'static str, u64), String> {
     Ok((url, sha256, size))
 }
 
-/// Endeavor's own Julia, getting it the first time when `download` allows; else what getting it
-/// would download.
 fn own_julia(download: bool, progress: &mut dyn FnMut(String)) -> Result<String, Failure> {
     if let Some(own) = own_installed() {
         return Ok(own.julia.display().to_string());
@@ -609,7 +477,6 @@ fn own_julia(download: bool, progress: &mut dyn FnMut(String)) -> Result<String,
     Ok(install_own(progress)?.julia.display().to_string())
 }
 
-/// What getting Endeavor's own Julia downloads, and where it goes.
 fn own_item() -> Result<wire::Item, String> {
     let item = |name: String, size: Option<u64>, place: Option<PathBuf>| wire::Item {
         kind: wire::KIND_RUNTIME.into(),
@@ -637,7 +504,6 @@ fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progres
     }
     download(&part, url, sha256, size, &format!("Julia {JULIA_VERSION}"), progress)?;
     progress(format!("Unpacking Julia {JULIA_VERSION}…"));
-    // Unpacked beside the target, then renamed, so a half-unpacked Julia is never used.
     let staging = cache.join(format!("{top}.unpacking"));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
@@ -653,11 +519,8 @@ fn install(cache: &Path, dir: &Path, url: &str, sha256: &str, size: u64, progres
     Ok(())
 }
 
-/// Download `url` into `part`, resuming what an earlier try left, and check it is the `size` bytes
-/// with SHA-256 `sha256`; `name` is what a person calls it ("Julia 1.12.6"). A corrupt download is deleted.
 pub(crate) fn download(part: &Path, url: &str, sha256: &str, size: u64, name: &str, progress: &mut dyn FnMut(String)) -> Result<(), String> {
     let mut command = if has("curl") {
-        // A download that stalls (under 1 kB/s for 5 minutes) fails, rather than wait for good; the next try resumes it.
         let mut curl = Command::new("curl");
         curl.args(["-fsSL", "--retry", "3", "--speed-limit", "1000", "--speed-time", "300", "-C", "-", "-o"]).arg(part).arg(url);
         curl
@@ -668,7 +531,6 @@ pub(crate) fn download(part: &Path, url: &str, sha256: &str, size: u64, name: &s
     } else {
         return Err(format!("Couldn't download {name}: there is neither curl nor wget."));
     };
-    // Stopped with the core, not left downloading because the core's mask blocks Ctrl-C (#181).
     crate::host_tools::with_command_mask(&mut command);
     let mut download = command.stderr(Stdio::piped()).spawn()
     .map_err(|e| format!("Couldn't start the download of {name}: {e}"))?;
@@ -716,7 +578,6 @@ fn sha256_of(path: &Path) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    // Unix paths; on Windows `processes` lists nothing, so the check never fires.
     #[cfg(unix)]
     #[test]
     fn a_julia_is_in_use_while_a_process_runs_a_program_from_its_folder() {
@@ -847,7 +708,6 @@ mod tests {
         assert_eq!(expand_home("/opt/julia"), "/opt/julia");
     }
 
-    /// Windows has no login shell, so `--julia auto` looks in the PATH's folders itself.
     #[cfg(windows)]
     #[test]
     fn windows_finds_julia_exe_on_the_path() {
@@ -860,9 +720,7 @@ mod tests {
     #[test]
     fn juliaups_launcher_isnt_run_on_a_juliaup_with_no_channel_yet() {
         let launcher = "/home/someone/.juliaup/bin/julia".to_owned();
-        // Running it would install juliaup's latest Julia (#512).
         assert_eq!(launchers_julia(launcher.clone(), Some(r#"{"DefaultChannel":null,"OtherChannels":[]}"#)), None);
-        // With a channel, the launcher still picks, so JULIAUP_CHANNEL and overrides hold; also when juliaup can't say.
         let listed = serde_json::json!({ "DefaultChannel": { "Name": "release", "File": "/j/bin/julia" }, "OtherChannels": [] }).to_string();
         assert_eq!(launchers_julia(launcher.clone(), Some(&listed)), Some(launcher.clone()));
         assert_eq!(launchers_julia(launcher.clone(), None), Some(launcher));
@@ -878,7 +736,6 @@ mod tests {
         assert_eq!(bindir_julia(bindir), Some(Path::new(bindir).join(exe)));
         assert_eq!(bindir_julia(&format!("a startup message\n{bindir}\r\n")), Some(Path::new(bindir).join(exe)));
         assert_eq!(bindir_julia(" \n"), None);
-        // juliaup's launcher isn't Julia's own binary; Julia's, beside its library, is.
         let root = crate::client::scratch("julia-libjulia");
         std::fs::create_dir_all(root.join("launcher")).unwrap();
         std::fs::create_dir_all(root.join("julia").join("bin")).unwrap();
@@ -888,12 +745,10 @@ mod tests {
         std::fs::write(root.join("julia").join("bin").join("libjulia.dll"), "").unwrap();
         assert!(!is_real_julia(&launcher));
         assert!(is_real_julia(&root.join("julia").join("bin").join(exe)));
-        // Julia's own binary (an empty file, which can't run) is started as it is, without being asked.
         let real = root.join("julia").join("bin").join(exe).display().to_string();
         assert_eq!(real_julia(real.clone()), real);
     }
 
-    /// The cloud VMs' setup script installs this Julia and the pinned Rust too (Endeavor's docs/cloud.md).
     #[test]
     fn the_cloud_setup_script_pins_the_same_julia() {
         let script = include_str!("../../../scripts/cloud-setup.sh");
