@@ -573,7 +573,7 @@
       text.placeholder = `${label}\u2026`;
       text.setAttribute("aria-label", text.placeholder);
     });
-    function drawBox(b) {
+    function drawBox2(b) {
       box.classList.toggle("shown", !!b);
       if (!b) return;
       Object.assign(box.style, { left: `${b.left}px`, top: `${b.top}px`, width: `${b.right - b.left}px`, height: `${b.bottom - b.top}px` });
@@ -617,7 +617,7 @@
         p.el?.classList.add("annotate-picked");
         for (const line of p.lines ?? []) line.classList.add("annotate-line");
       }
-      drawBox([...picks].reverse().find((p) => p.box)?.box ?? null);
+      drawBox2([...picks].reverse().find((p) => p.box)?.box ?? null);
       field.setWhat("point", "", pickStatus(picks.map((p) => p.pick)));
       place();
     }
@@ -634,10 +634,9 @@
       switch (target.part) {
         case "cell":
           return { pick: { part: "cell", cell: cell.id, code }, el };
-        case "code": {
-          const lines = code.split("\n").length;
-          return { pick: { part: "lines", cell: cell.id, code, lines: [1, lines], text: code }, el };
-        }
+        // A click on the code picks the cell; a drag over its lines picks those lines.
+        case "code":
+          return { pick: { part: "cell", cell: cell.id, code }, el };
         case "output":
           return { pick: { part: "output", cell: cell.id, code, text: (el.innerText ?? el.textContent ?? "").trim() || widgetValues(el) }, el };
         case "figure":
@@ -681,7 +680,8 @@
         if (!answered && (p.pick.part === "box" || p.pick.part === "figure")) {
           const b = p.box ?? (p.el ? pageBox(p.el.getBoundingClientRect()) : null);
           out.push(b ? { ...p.pick, shot: await shoot(b) } : p.pick);
-        } else out.push(p.pick);
+        } else if (answered && p.pick.part === "box" && p.box) out.push({ ...p.pick, rect: p.box });
+        else out.push(p.pick);
       }
       sendQuote(out, comment, add, ref);
     }
@@ -734,7 +734,7 @@
           return;
         }
         document.body.classList.add("annotate-drawing");
-        drawBox(dragBox(e));
+        drawBox2(dragBox(e));
       },
       true
     );
@@ -988,6 +988,88 @@ ${text.value}` : sent.comment;
       if (!soon) soon = window.setTimeout(() => (soon = 0, search(true)), 300);
     }).observe(document.body, { childList: true, subtree: true, characterData: true });
     return { open };
+  }
+
+  // src/crop.ts
+  var SIDE_MAX = 2400;
+  var OURS = "#annotate-frame, #annotate-box, #annotate-tag, #annotate-hint, #annotate-bar, #endeavor-bar, #endeavor-sent";
+  async function drawable(el) {
+    if (el instanceof HTMLImageElement) return el.complete && el.naturalWidth ? el : null;
+    if (el instanceof HTMLCanvasElement) return el.width && el.height ? el : null;
+    if (el instanceof SVGSVGElement) {
+      const copy = el.cloneNode(true);
+      const r = el.getBoundingClientRect();
+      copy.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+      copy.setAttribute("width", String(r.width));
+      copy.setAttribute("height", String(r.height));
+      const img = new Image();
+      img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(copy));
+      try {
+        await img.decode();
+        return img;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  function readable(source) {
+    const test = document.createElement("canvas");
+    test.width = test.height = 8;
+    const g = test.getContext("2d");
+    if (!g) return false;
+    try {
+      g.drawImage(source, 0, 0, 8, 8);
+      const data = g.getImageData(0, 0, 8, 8).data;
+      for (let i = 3; i < data.length; i += 4) if (data[i]) return true;
+      return false;
+    } catch {
+      return false;
+    }
+  }
+  function inBox(box) {
+    const found = [];
+    for (const el of document.querySelectorAll("img, canvas, svg:not(svg svg)")) {
+      if (el.closest(OURS)) continue;
+      const r = el.getBoundingClientRect();
+      const [left, top] = [r.left + window.scrollX, r.top + window.scrollY];
+      if (!r.width || !r.height || left >= box.right || left + r.width <= box.left || top >= box.bottom || top + r.height <= box.top) continue;
+      found.push({ el, left, top, width: r.width, height: r.height });
+    }
+    return found;
+  }
+  function mayDraw(box) {
+    if (box.right - box.left < 2 || box.bottom - box.top < 2) return false;
+    return inBox(box).some(
+      ({ el }) => el instanceof SVGSVGElement || (el instanceof HTMLImageElement ? el.complete && el.naturalWidth > 0 && readable(el) : el instanceof HTMLCanvasElement && el.width > 0 && el.height > 0 && readable(el))
+    );
+  }
+  async function drawBox(box) {
+    const width = box.right - box.left;
+    const height = box.bottom - box.top;
+    if (width < 2 || height < 2) return null;
+    const scale = Math.min(window.devicePixelRatio || 1, SIDE_MAX / Math.max(width, height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(width * scale);
+    canvas.height = Math.round(height * scale);
+    const g = canvas.getContext("2d");
+    if (!g) return null;
+    g.fillStyle = getComputedStyle(document.body).backgroundColor || "white";
+    g.fillRect(0, 0, canvas.width, canvas.height);
+    g.scale(scale, scale);
+    let drawn = 0;
+    for (const { el, left, top, width: w, height: h } of inBox(box)) {
+      const source = await drawable(el);
+      if (!source || !readable(source)) continue;
+      g.drawImage(source, left - box.left, top - box.top, w, h);
+      drawn++;
+    }
+    if (!drawn) return null;
+    try {
+      return canvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
+    } catch {
+      return null;
+    }
   }
 
   // src/narrow.ts
@@ -1411,90 +1493,48 @@ footer form#feedback { display: none !important; }
   }
 
   // src/view.ts
-  var format = (engine) => "A quote's uri, notebook://" + engine + "/{notebook_id}/cell/{cell_id}, names its cell (it is not a fetchable URL); `lines` are line numbers in the cell's code, counting from 1. `part` says what was quoted when it isn't code: `output` (text from the cell's output), `figure` (the cell's output, a picture) or `box` (a box the user drew over the notebook; `uri` lists the cells under it). No picture comes with a figure or box here: read current code and outputs with the notebook MCP tools.";
-  var quoteNote = (engine = "pluto") => "[Endeavor] The user quoted parts of the notebook in this message, each as a <quote> followed by their comment on it. " + format(engine);
+  var format = (engine) => "A quote's uri, notebook://" + engine + "/{notebook_id}/cell/{cell_id}, names its cell (it is not a fetchable URL); `lines` are line numbers in the cell's code, counting from 1. `part` says what was picked when it isn't code: `output` (the cell's output), `figure` (the cell's output, a picture) or `box` (a box the user drew over the notebook; `uri` lists the cells under it). A `lines` quote holds the lines the user picked, as they were then; the others hold no code or output. Read what the cells hold now with the notebook MCP tools (read_cell, view_cell_output). A box's `crop` names a picture of what was in it: see it with view_cell_output, with that `crop` and one of the box's cells. Only what could be drawn is in it, and when nothing could be, there's none.";
+  var quoteNote = (engine = "pluto") => "[Endeavor] The user picked parts of the notebook in this message, each as a <quote> followed by their comment on it. " + format(engine);
   var LEAD = "\u2193";
   var LEAD_NOTE = " A \u2193 just before this note only marks where the quotes start; it isn't part of the user's words.";
   var uri = (notebook, cell, engine) => `notebook://${engine}/${notebook}/cell/${cell}`;
-  var OUTPUT_MAX = 4e3;
-  var OUTPUT_END = 500;
-  function cutMiddle(text, max, keepEnd, why) {
-    if (text.length <= max) return text;
-    const low = (i) => (text.charCodeAt(i) & 64512) === 56320;
-    let end = max - keepEnd;
-    if (end > 0 && low(end)) end--;
-    let start2 = text.length - keepEnd;
-    if (low(start2)) start2++;
-    return `${text.slice(0, end)}
-[${(start2 - end).toLocaleString("en-US")} characters ${why}]
-${text.slice(start2)}`;
-  }
-  function outputText(text) {
-    return cutMiddle(text, OUTPUT_MAX, OUTPUT_END, "of this output left out here.");
-  }
   var MESSAGE_MAX = 8e3;
   function chatSafe(text) {
     return text.replace(/\r\n?/g, "\n").replace(/[\u00ad\u180e\u200b\u2060\ufeff]/g, "").replace(/(?:[ \t]*\n){4,}/g, "\n\n\n").replace(/[ \t]{65,}/g, (run) => run.slice(0, 64));
   }
-  var bodyOf = (pick) => pick.part === "cell" ? pick.code : pick.part === "lines" ? pick.text : pick.part === "output" ? outputText(pick.text) : void 0;
   function chatMessage(notebook, quoted, engine = "pluto") {
-    const head = `${LEAD}
-
-${quoteNote(engine)}${LEAD_NOTE}
-
-`;
-    const cut = "left out here to fit Claude's message box; read the cell with the notebook tools.";
-    const shortened = quoted.some((q) => q.picks.some((p) => {
-      const body = bodyOf(p);
-      return body !== void 0 && chatSafe(body) !== body.replace(/\r\n?/g, "\n");
-    }));
-    const note = shortened ? `${head.slice(0, -2)} Runs of more than 3 line breaks or 64 spaces in a quote were shortened to fit Claude's message box, and invisible characters left out.
-
-` : head;
-    const build = (cap) => chatSafe(
-      note + quoted.map(({ picks, comment }) => {
-        const blocks = picks.map((p) => {
-          const body = bodyOf(p);
-          return quoteBlock(notebook, p, engine, body === void 0 ? void 0 : cutMiddle(chatSafe(body), cap, Math.min(OUTPUT_END, Math.floor(cap / 4)), cut));
-        });
-        return comment ? `${blocks.join("\n\n")}
-${comment}` : blocks.join("\n\n");
-      }).join("\n\n")
+    const shortened = quoted.some(
+      (q) => q.picks.some((p) => p.part === "lines" && chatSafe(p.text) !== p.text.replace(/\r\n?/g, "\n"))
     );
-    const whole = build(Infinity);
-    if (whole.length <= MESSAGE_MAX) return whole;
-    let fits = -1;
-    let over = Math.max(...quoted.flatMap((q) => q.picks.map((p) => bodyOf(p)?.length ?? 0)));
-    while (over - fits > 1) {
-      const cap = Math.floor((fits + over) / 2);
-      if (build(cap).length <= MESSAGE_MAX) fits = cap;
-      else over = cap;
-    }
-    return fits < 0 ? null : build(fits);
+    const note = shortened ? `${quoteNote(engine)} Runs of more than 3 line breaks or 64 spaces in a quote were shortened to fit Claude's message box, and invisible characters left out.` : quoteNote(engine);
+    const message = chatSafe(
+      `${LEAD}
+
+${note}${LEAD_NOTE}
+
+` + quoted.map(({ picks, comment, crops }) => quoteText(notebook, picks, comment, engine, crops)).join("\n\n")
+    );
+    return message.length <= MESSAGE_MAX ? message : null;
   }
-  function quoteBlock(notebook, pick, engine = "pluto", body = bodyOf(pick)) {
-    if (pick.part === "box") return `<quote part="box" uri="${pick.cells.map((c) => uri(notebook, c, engine)).join(" ")}"/>`;
+  function quoteBlock(notebook, pick, engine = "pluto", crop) {
+    if (pick.part === "box") return `<quote part="box" uri="${pick.cells.map((c) => uri(notebook, c, engine)).join(" ")}"${crop ? ` crop="${crop}"` : ""}/>`;
     const at = `cell="${cellName(pick.code).replace(/"/g, "'")}"`;
     const where = uri(notebook, pick.cell, engine);
     switch (pick.part) {
       case "cell":
-        return `<quote ${at} uri="${where}">
-${body}
-</quote>`;
+        return `<quote ${at} uri="${where}"/>`;
       case "lines":
         return `<quote ${at} lines="${pick.lines[0]}-${pick.lines[1]}" uri="${where}">
-${body}
+${pick.text}
 </quote>`;
       case "output":
-        return `<quote ${at} part="output" uri="${where}">
-${body}
-</quote>`;
+        return `<quote ${at} part="output" uri="${where}"/>`;
       case "figure":
         return `<quote ${at} part="figure" uri="${where}"/>`;
     }
   }
-  function quoteText(notebook, picks, comment, engine = "pluto") {
-    const blocks = picks.map((p) => quoteBlock(notebook, p, engine));
+  function quoteText(notebook, picks, comment, engine = "pluto", crops = []) {
+    const blocks = picks.map((p, i) => quoteBlock(notebook, p, engine, crops[i]));
     return comment ? `${blocks.join("\n\n")}
 ${comment}` : blocks.join("\n\n");
   }
@@ -1641,7 +1681,6 @@ ${comment}` : blocks.join("\n\n");
     if (started) return;
     started = true;
     const engine = host2.engine === "ember" ? "ember" : "pluto";
-    const added = [];
     const receive = (msg) => window.__endeavor?.receive(msg);
     const sent = document.createElement("div");
     sent.id = "endeavor-sent";
@@ -1653,15 +1692,28 @@ ${comment}` : blocks.join("\n\n");
       if (ms) hide = window.setTimeout(() => sent.classList.remove("shown"), ms);
     };
     const point = (on2) => receive({ type: "annotate", on: on2 });
+    const ids = (picks) => picks.map(
+      (p) => p.part === "box" && p.rect && host2.crop && mayDraw(p.rect) ? [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, "0")).join("") : void 0
+    );
+    const draw = (q) => ({
+      ...q,
+      pngs: q.picks.map((p, i) => q.crops?.[i] && p.part === "box" && p.rect ? drawBox(p.rect).catch(() => null) : Promise.resolve(null))
+    });
+    const keep = (q) => q.pngs.forEach((png, i) => {
+      const id = q.crops?.[i];
+      if (id) png.then((png2) => png2 ? host2.crop?.(png2, id) : void 0).catch(() => {
+      });
+    });
+    const added = [];
     setHost((msg) => {
       if (msg.type !== "quote" || !msg.picks.length) return;
       if (msg.add) {
-        added.push({ picks: msg.picks, comment: msg.comment });
+        added.push(draw({ picks: msg.picks, comment: msg.comment, crops: ids(msg.picks) }));
         return say(`${added.length} added. ${mac ? "\u21A9" : "Enter"} passes ${added.length === 1 ? "it" : "them"} to the chat with the next pick.`);
       }
       const enter = mac ? "\u21A9" : "Enter";
       const max = `${MESSAGE_MAX.toLocaleString("en-US")} characters`;
-      const now = { picks: msg.picks, comment: msg.comment };
+      const now = { picks: msg.picks, comment: msg.comment, crops: ids(msg.picks) };
       const giveBack = () => msg.ref !== void 0 && receive({ type: "quote_sent", ref: msg.ref, ok: false });
       let message = chatMessage(notebook, [...added, now], engine);
       let held = false;
@@ -1680,14 +1732,17 @@ ${comment}` : blocks.join("\n\n");
       }
       const earlier = added.splice(0);
       say("Sending to Claude's chat\u2026", 0);
-      host2.send(message).then(
+      const sending = host2.send(message);
+      const going = held ? earlier : [...earlier, draw(now)];
+      sending.then(
         () => {
+          going.forEach(keep);
           if (held) return say(`Sent what ${mac ? "\u2318\u21A9" : "Ctrl+Enter"} added: together they were too long for Claude's message box. Send it from there, then press ${enter} to send this one.`, 8e3);
           if (msg.ref !== void 0) receive({ type: "quote_sent", ref: msg.ref, ok: true });
           say("On its way to Claude's message box. Send it from there.", 8e3);
           const end = () => {
-            const now2 = pointState();
-            if (!now2.picks.length && !now2.comment.trim()) point(false);
+            const left = pointState();
+            if (!left.picks.length && !left.comment.trim()) point(false);
           };
           if (!document.hasFocus()) end();
           else window.addEventListener("blur", end, { once: true });
