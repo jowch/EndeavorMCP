@@ -995,8 +995,9 @@ impl Notebooks {
     ///   {"notebooks": [the list_notebooks summary],
     ///    "cells": {notebook_id: [{cell_id, running, errored, unrun, author, before, version, name}, ...]},
     ///    "idle_stopped": [{path, hours, safe_preview}, ...],
-    ///    "engine_ended": [{path, language, why}, ...]: notebooks that closed because their
-    ///      engine (R's) ended, until each is opened again,
+    ///    "engine_ended": [{path, language, why, ended_at}, ...]: notebooks that closed because
+    ///      their engine (R's) ended, until each is opened again; `ended_at` (ms since 1970) tells
+    ///      one ending of a path from the next,
     ///    "asks": [{id, owner, call_id, tool, arguments, since}, ...],
     ///    "build": the app build this runtime came from, if it was told}
     /// with cells in notebook order. `unrun`: edited by the agent and not run
@@ -1052,7 +1053,7 @@ impl Notebooks {
             cells.insert(nb.id.clone(), Value::Array(states));
         }
         let idle_stopped: Vec<Value> = state.idle_stopped.iter().map(|(_, entry)| entry.clone()).collect();
-        let engine_ended: Vec<Value> = self.engines.closed().iter().map(|c| json!({ "path": c.path, "language": c.language, "why": c.why })).collect();
+        let engine_ended: Vec<Value> = self.engines.closed().iter().map(|c| json!({ "path": c.path, "language": c.language, "why": c.why, "ended_at": c.ended_at })).collect();
         let mut event = json!({ "notebooks": list, "cells": cells, "idle_stopped": idle_stopped, "engine_ended": engine_ended, "asks": self.asks.list() });
         if let Some(build) = self.build.get() {
             event["build"] = build.clone().into();

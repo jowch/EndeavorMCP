@@ -34,6 +34,9 @@ pub struct Closed {
     pub language: &'static str,
     /// Why the engine ended, as far as the core can tell.
     pub why: String,
+    /// When, in milliseconds since 1970: with the path, it tells one ending from the next, so the
+    /// app sees an ending after a reopen as new even when both fall between two of its events.
+    pub ended_at: u64,
 }
 
 impl Engines {
@@ -135,13 +138,14 @@ impl Engines {
             gone
         };
         let why = upstream.why_ended().unwrap_or_else(|| format!("{} stopped answering", language(backend)));
+        let ended_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
         eprintln!("┌ Warning: {} notebooks' engine ended: {why}", language(backend));
         let mut paths = self.paths.lock().unwrap();
         let mut closed = self.closed.lock().unwrap();
         for id in gone {
             if let Some(path) = paths.remove(&id) {
                 closed.retain(|c| c.path != path);
-                closed.push(Closed { id, path, language: language(backend), why: why.clone() });
+                closed.push(Closed { id, path, language: language(backend), why: why.clone(), ended_at });
             }
         }
     }
@@ -467,8 +471,10 @@ mod tests {
         call(&engines, "snapshot", json!({}));
         assert!(engines.closed().is_empty());
         engines.drop_engine(Backend::Ember, &ember);
-        let closed = |id: &str, path: &str| Closed { id: id.into(), path: path.into(), language: "R", why: "signal: 9 (SIGKILL)".into() };
         let mut list = engines.closed();
+        let ended_at = list[0].ended_at;
+        assert!(ended_at > 0 && list.iter().all(|c| c.ended_at == ended_at), "one ending, one time: {list:?}");
+        let closed = |id: &str, path: &str| Closed { id: id.into(), path: path.into(), language: "R", why: "signal: 9 (SIGKILL)".into(), ended_at };
         list.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(list, [closed("e1", "/a/e1.R"), closed("e2", "/a/e2.R")], "Julia's notebook isn't one");
         asked(&pluto);

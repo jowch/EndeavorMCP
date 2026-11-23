@@ -103,7 +103,7 @@ again (an open's reply, or a snapshot that lists it) or the app's
 its process ended and the last lines it wrote to stderr, which the core
 passes on to the runtime log and keeps. A call that names one of them answers
 `notebook_closed` with that reason, and `/endeavor/events` lists them under
-`engine_ended` (`{path, language, why}`). The core keeps one `AdapterProcess` per engine kind;
+`engine_ended` (`{path, language, why, ended_at}`, with `ended_at` in ms telling one ending of a path from the next). The core keeps one `AdapterProcess` per engine kind;
 what differs per kind (launch command, detection, page adapter, skills) is
 the small `Backend` enum in `crates/wire/src/backend.rs`.
 

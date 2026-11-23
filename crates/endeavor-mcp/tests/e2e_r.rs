@@ -982,7 +982,7 @@ fn an_r_notebook_through_the_runtime() {
         assert!(failed && read["error"] == "notebook_closed" && message.starts_with(&format!("{growth} closed because R ended (signal: 9")), "{read}");
         let ended = next_event(&mut stream, |event| event["engine_ended"].as_array().is_some_and(|ended| !ended.is_empty()));
         let entry = ended["engine_ended"].as_array().unwrap().iter().find(|e| e["path"] == growth.as_str()).unwrap_or_else(|| panic!("{ended}"));
-        assert_eq!((&entry["language"], entry["why"].as_str().is_some_and(|why| why.starts_with("signal: 9"))), (&json!("R"), true), "{entry}");
+        assert_eq!((&entry["language"], entry["why"].as_str().is_some_and(|why| why.starts_with("signal: 9")), entry["ended_at"].as_u64().is_some_and(|at| at > 0)), (&json!("R"), true, true), "{entry}");
         let opened = agent.ok("open_notebook", json!({ "path": "growth.R" }));
         let read = agent.ok("read_cell", json!({ "notebook_id": opened["notebook_id"], "cell_id": A }));
         assert_eq!(read["code"], "x <- 41", "Ember saved the edit: {read}");
