@@ -336,6 +336,8 @@ pub struct Notebooks {
     /// Whether the runtime ends itself once no notebook has been open for the idle limit (`core::exit_when_idle`).
     /// It can be switched on later, when the app quits and leaves the runtime to the plugin (`core::leave_to_plugin`).
     pub exits_when_idle: std::sync::atomic::AtomicBool,
+    /// Set once the runtime is ending: its engine may be gone mid-call, which is no news for anyone.
+    pub stopping: std::sync::atomic::AtomicBool,
     /// Runs waiting for the user's answer.
     pub asks: Asks,
     /// Each agent session's notebook kind, when its client said it (`endeavor/set_session_folder`'s
@@ -655,6 +657,7 @@ impl Notebooks {
             events: Mutex::default(),
             build: OnceLock::new(),
             exits_when_idle: Default::default(),
+            stopping: Default::default(),
             kinds: Mutex::default(),
             auto: Mutex::default(),
             openings: Mutex::default(),
@@ -1065,6 +1068,7 @@ impl Notebooks {
         let _publishing = self.publishing.lock().unwrap();
         let json = match self.compose() {
             Ok(json) => json,
+            Err(_) if self.stopping.load(std::sync::atomic::Ordering::SeqCst) => return,
             Err(e) => return eprintln!("┌ Warning: Couldn't summarize notebooks for the app: {e}"),
         };
         let mut events = self.events.lock().unwrap();
