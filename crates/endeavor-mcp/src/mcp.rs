@@ -776,7 +776,7 @@ impl Bridge {
                 text(&result)
             }
             Ok(Reply::Image { meta, png_base64 }) => image_result(&meta, png_base64),
-            Err(error) => tool_error(&crate::core::own_r_offer_for(&error, caller.app), help),
+            Err(error) => tool_error(&crate::core::offer_for(&error, caller.app), help),
         }
     }
 

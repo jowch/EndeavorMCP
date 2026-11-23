@@ -1441,8 +1441,22 @@ fn find_uv() -> Option<PathBuf> {
 
 const NO_UV: &str = "python_not_found::Python notebooks need uv, which isn't installed. Install it (https://docs.astral.sh/uv/getting-started/installation/), then try again.";
 
+const UV_OFFER: (&str, &str) = (
+    "python_not_found::Python notebooks need uv, which isn't installed here, and Endeavor may download its own only if the user agrees: ",
+    ". Ask the user; only if they agree, call `use_machine` with `machine` \"local\" and `install: true`, then make this call again. The user can also install uv themselves: https://docs.astral.sh/uv/getting-started/installation/.",
+);
+
+const NO_UV_IN_APP: &str = "python_not_found::Python notebooks need uv, which isn't installed on this computer. Tell the user to install it (https://docs.astral.sh/uv/getting-started/installation/), then open the notebook again.";
+
 fn uv_offer(item: &wire::Item) -> String {
-    format!("python_not_found::Python notebooks need uv, which isn't installed here, and Endeavor may download its own only if the user agrees: {item}. Ask the user; only if they agree, call `use_machine` with `machine` \"local\" and `install: true`, then make this call again. The user can also install uv themselves: https://docs.astral.sh/uv/getting-started/installation/.")
+    format!("{}{item}{}", UV_OFFER.0, UV_OFFER.1)
+}
+
+pub(crate) fn offer_for(error: &str, app: bool) -> std::borrow::Cow<'_, str> {
+    if app && error.starts_with(UV_OFFER.0) && error.ends_with(UV_OFFER.1) {
+        return NO_UV_IN_APP.into();
+    }
+    own_r_offer_for(error, app)
 }
 
 const STOPPED_STARTING: &str = "r_failed::R stopped while starting";
@@ -2509,6 +2523,16 @@ mod tests {
         assert!(standalone.starts_with("r_not_found::") && standalone.contains("`use_machine`") && standalone.contains("R 4.6.1 (about 165 MB"), "{standalone}");
         let app = own_r_offer(&item, true);
         assert!(app.starts_with("r_not_found::") && app.contains("Install R in the notebook pane") && app.contains("Settings under Notebooks, then R") && !app.contains("use_machine"), "{app}");
+    }
+
+    #[test]
+    fn the_app_has_no_way_to_say_yes_to_endeavors_own_uv_so_its_agent_is_told_to_have_the_user_install_uv() {
+        let item = wire::Item { kind: wire::KIND_RUNTIME.into(), name: "uv 0.11.32".into(), size_mb: Some(22), place: Some("/x/uv-0.11.32".into()) };
+        let offer = uv_offer(&item);
+        assert_eq!(offer_for(&offer, false), offer);
+        let app = offer_for(&offer, true);
+        assert!(app.starts_with("python_not_found::") && !app.contains("use_machine") && app.contains("docs.astral.sh/uv"), "{app}");
+        assert_eq!(offer_for(NO_UV, true), NO_UV);
     }
 
     #[test]
