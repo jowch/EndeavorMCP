@@ -84,7 +84,7 @@ Several agents can work in one notebook. When a write is refused with `stale_rea
 
 ## When the user quotes the notebook
 
-A message can quote the notebook, each part as a `<quote>` whose `uri` names its cell (`notebook://…/cell/{cell_id}`; a `box` quote lists every cell under the box, separated by spaces). Since you last read them, the user may have edited or rerun those cells, or the cells they read. A `figure` or `box` quote has no text, only a picture when one follows it. Before you answer, `read_cell` each quoted cell and the cells it reads (`get_cell_dependencies`), and answer from what they hold now, not from the quote's text or what you remember.
+A message can quote the notebook, each part as a `<quote>` whose `uri` names its cell (`notebook://…/cell/{cell_id}`; a `box` quote lists every cell under the box, separated by spaces). Since you last read them, the user may have edited or rerun those cells, or the cells they read. A quote holds text only for lines the user picked or text they selected; otherwise it only names what was picked. See a `figure` with `view_cell_output`. A `box` quote's picture follows it, or its `crop` names it: pass that `crop` to `view_cell_output` with one of the box's cells. A box with neither is over text, so read its cells. Before you answer, `read_cell` each quoted cell and the cells it reads (`get_cell_dependencies`), and answer from what they hold now, not from the quote's text or what you remember.
 
 For any other error code or warning, see [reference/errors.md](reference/errors.md).
 

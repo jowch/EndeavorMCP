@@ -735,6 +735,18 @@ impl Bridge {
         if let Some(refusal) = self.notebooks.refusal(&caller.owner, name, &arguments, &folder) {
             return tool_error(&refusal, help);
         }
+        // A box the user drew with Point in the notebook view: the picture the view drew of it.
+        if name == "view_cell_output" && let Some(crop) = arguments["crop"].as_str() {
+            let notebook = arguments["notebook_id"].as_str().unwrap_or_default();
+            return match self.views.crop(notebook, crop) {
+                Some(png) => image_result(
+                    &json!({ "notebook_id": notebook, "crop": crop, "source": "view",
+                        "message": "The box the user drew in the notebook view, as the view could draw it: its pictures, plots and drawings. Text, tables and 3D plots under the box don't show in it; read those cells with read_cell or view_cell_output." }),
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, png.as_slice()),
+                ),
+                None => tool_error(&format!("not_found: no picture {crop} for notebook {notebook}. No picture was kept for this box: nothing in it could be drawn (text, HTML and 3D views can't be), it wasn't saved, or it's over an hour old. Read the box's cells instead."), false),
+            };
+        }
         let run = match self.ask_first(call, name, &mut arguments) {
             Ok(run) => run,
             Err(result) => return result,
@@ -1550,7 +1562,7 @@ mod tests {
         // When this fails, the notebook tools' names or arguments changed: raise `core::INTERFACE`, then
         // record the new fingerprint with the new number. An addition counts too, since a newer front
         // lists its own tools to an agent whose calls an older core with the same number would refuse.
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (46, "83a03363ad0d42c5"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (47, "31806aaaff1c73b0"), "see the comment in this test");
     }
 
     /// The code of `source` before its tests.
@@ -1597,7 +1609,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result", "use_julia",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (46, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (47, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

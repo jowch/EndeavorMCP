@@ -589,6 +589,9 @@ fn left_running(args: &Args, attached: Option<Attached>, routes: &Routes, inbox:
     std::process::exit(0)
 }
 
+/// The first `core::INTERFACE` whose core keeps a box's picture (`notebook_crop`, `view_cell_output`'s `crop`).
+pub(crate) const CROP_SINCE: u32 = 47;
+
 /// The first `core::INTERFACE` whose core has `endeavor/end_when_idle`.
 const END_WHEN_IDLE_SINCE: u32 = 46;
 

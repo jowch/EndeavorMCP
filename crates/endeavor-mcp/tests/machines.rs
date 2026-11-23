@@ -1252,6 +1252,33 @@ fn a_front_that_ends_leaves_the_runtime_and_a_new_front_attaches_to_it_with_the_
 }
 
 #[test]
+fn a_box_picture_asked_of_a_runtime_an_older_version_started_says_why_it_cant_be_shown() {
+    let place = Place::new("machine-older-crop");
+    place.add_lab();
+    let path = place.notebook("kept.jl");
+    let mut first = place.front();
+    first.initialize();
+    first.ok("use_machine", json!({ "machine": "lab" }));
+    let notebook = first.ok("open_notebook", json!({ "path": path }))["notebook_id"].as_str().unwrap().to_owned();
+    first.finish();
+    wait_for("the connection to end", || place.helpers().is_empty());
+    // Kept while its notebook is open, as a runtime from before box pictures (interface 46).
+    let mut record = read_record(&place.state);
+    record["build"] = ANOTHER_BUILD.into();
+    record["interface"] = 46.into();
+    std::fs::write(place.state.join("runtime.json"), record.to_string()).unwrap();
+    let mut second = place.front();
+    second.initialize();
+    second.ok("use_machine", json!({ "machine": "lab" }));
+    let cell = "6e6a1b70-dda7-11f1-a148-b56bbb7771a3";
+    let (failed, said) = second.call("view_cell_output", json!({ "notebook_id": notebook, "cell_id": cell, "crop": "0123456789abcdef" }));
+    let said = said.as_str().map_or_else(|| said.to_string(), str::to_owned);
+    assert!(failed && said.contains("was started by an older version, which can't keep or show a box's picture") && said.contains("Read the box's cells"), "{said}");
+    assert!(!said.contains("not an argument"), "the front's words, not the older core's: {said}");
+    second.finish();
+}
+
+#[test]
 fn a_machines_runtime_of_another_interface_is_kept_and_the_agent_is_told_once_and_one_offering_this_interface_is_not_mentioned() {
     let place = Place::new("machine-other-build");
     place.add_lab();

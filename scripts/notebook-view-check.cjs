@@ -29,7 +29,8 @@ const notebookPath = path.join(dir, R ? "view-check.R" : "view-check.jl");
 // The same three cells in each language: a title, `n`, and `squares`, which reads `n`.
 const SQUARES = "6e6a1b70-dda7-11f1-a148-b56bbb7771a3";
 const LANGUAGE = R ? "R" : "Julia";
-const CELLS = WIDGET ? 4 : 3;
+// A Julia notebook has a picture too (an SVG), for a box Point draws.
+const CELLS = WIDGET || !R ? 4 : 3;
 fs.writeFileSync(notebookPath, R ? `### An Ember notebook ###
 # /// environment
 # snapshot = "2026-11-01"
@@ -78,10 +79,14 @@ md"# View check"
 # ╔═╡ 6e6a1b70-dda7-11f1-a148-b56bbb7771a3
 squares = [i^2 for i in 1:something(n, 5)]
 
+# ╔═╡ 6e6a1b70-dda7-11f1-a148-b56bbb7771a5
+html"<svg width='160' height='80' xmlns='http://www.w3.org/2000/svg'><rect width='160' height='80' fill='#c33'/></svg>"
+
 # ╔═╡ Cell order:
 # ╠═6e6a1b70-dda7-11f1-a148-b56bbb7771a1
 # ╠═6e6a1b70-dda7-11f1-a148-b56bbb7771a2
 # ╠═6e6a1b70-dda7-11f1-a148-b56bbb7771a3
+# ╠═6e6a1b70-dda7-11f1-a148-b56bbb7771a5
 `);
 
 const depot = process.env.JULIA_DEPOT ? ["--depot", process.env.JULIA_DEPOT] : [];
@@ -111,8 +116,8 @@ const check = (ok, what) => { console.log((ok ? "ok   " : "FAIL ") + what); if (
   const tools = (await rpc("tools/list", {})).result.tools;
   const open = tools.find(t => t.name === "open_notebook");
   check(open?._meta?.ui?.resourceUri === "ui://endeavor/notebook", "open_notebook shows the notebook view");
-  const VIEW_TOOLS = ["notebook_page", "notebook_socket_open", "notebook_socket_send", "notebook_socket_recv", "notebook_socket_close", "notebook_file"];
-  check(tools.filter(t => VIEW_TOOLS.includes(t.name)).length === 6 && tools.filter(t => VIEW_TOOLS.includes(t.name)).every(t => t._meta?.ui?.visibility?.[0] === "app"), "the view's tools are for the view only");
+  const VIEW_TOOLS = ["notebook_page", "notebook_socket_open", "notebook_socket_send", "notebook_socket_recv", "notebook_socket_close", "notebook_file", "notebook_crop"];
+  check(tools.filter(t => VIEW_TOOLS.includes(t.name)).length === VIEW_TOOLS.length && tools.filter(t => VIEW_TOOLS.includes(t.name)).every(t => t._meta?.ui?.visibility?.[0] === "app"), "the view's tools are for the view only");
   const view = (await rpc("resources/read", { uri: "ui://endeavor/notebook" })).result.contents[0];
   check(view.mimeType === "text/html;profile=mcp-app" && view.text.length > 100000, `the view is served (${view.text.length} bytes)`);
 
@@ -279,7 +284,7 @@ window.addEventListener("message", async e => {
   await frame.click("#endeavor-point");
   const message = await page.evaluate(() => window.messages[0]);
   const said = message?.content?.[0]?.text || "";
-  check(message?.role === "user" && said.startsWith("\u2193\n\n[Endeavor] The user quoted") && said.includes("A \u2193 just before this note only marks where the quotes start") && new RegExp(`<quote cell="squares[^"]*" part="output" uri="notebook://${R ? "ember" : "pluto"}/[^"]+/cell/${SQUARES}">\\n[\\s\\S]+\\n</quote>\\nWhy squares\\?$`).test(said), `↩ sends the pick and the comment as the user's message, on a new paragraph: ${JSON.stringify(said.slice(-220))}`);
+  check(message?.role === "user" && said.startsWith("\u2193\n\n[Endeavor] The user picked") && said.includes("A \u2193 just before this note only marks where the quotes start") && new RegExp(`<quote cell="squares[^"]*" part="output" uri="notebook://${R ? "ember" : "pluto"}/[^"]+/cell/${SQUARES}"/>\\nWhy squares\\?$`).test(said), `↩ sends the pick and the comment as the user's message, on a new paragraph: ${JSON.stringify(said.slice(-220))}`);
   // ⌘↩ (Ctrl+Enter off macOS) keeps the pick in the view; the next ↩ passes both in one message.
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await frame.locator("#annotate-bar textarea").fill("First");
@@ -317,7 +322,26 @@ window.addEventListener("message", async e => {
   await frame.locator("#annotate-bar textarea").press("Enter");
   await page.waitForFunction(() => window.messages.length === 4, null, { timeout: 5000 }).catch(() => {});
   const boxed = await page.evaluate(() => window.messages[3]?.content?.[0]?.text || "");
-  check(/<quote part="box" uri=/.test(boxed) && Date.now() - boxAt < 1500, `a box goes at once, with no picture (${Date.now() - boxAt} ms)`);
+  check(/<quote part="box" uri="[^"]+"\/>/.test(boxed) && Date.now() - boxAt < 1500, `a box over text goes at once, with no picture (${Date.now() - boxAt} ms)`);
+  if (!R) {
+    // A box over a picture: the view draws it, the message names it at once, and the agent sees it.
+    const svgBox = await frame.locator("pluto-cell").nth(3).locator("pluto-output svg").boundingBox();
+    await page.mouse.move(svgBox.x - 4, svgBox.y - 4);
+    await page.mouse.down();
+    await page.mouse.move(svgBox.x + 80, svgBox.y + 40, { steps: 5 });
+    await page.mouse.up();
+    const drewAt = Date.now();
+    await frame.locator("#annotate-bar textarea").press("Enter");
+    await page.waitForFunction(() => window.messages.length === 5, null, { timeout: 5000 }).catch(() => {});
+    const drew = await page.evaluate(() => window.messages[4]?.content?.[0]?.text || "");
+    const id = /<quote part="box" uri="[^"]+" crop="([0-9a-f]{16})"\/>/.exec(drew)?.[1];
+    check(id && Date.now() - drewAt < 1500, `a box over a picture goes at once, naming its picture (${Date.now() - drewAt} ms): ${JSON.stringify(drew.slice(-160))}`);
+    await new Promise(r => setTimeout(r, 1000));
+    const pic = (await rpc("tools/call", { name: "view_cell_output", arguments: { notebook_id: fields.notebook_id, cell_id: SQUARES, crop: id } })).result;
+    const png = Buffer.from(pic.content?.find(c => c.type === "image")?.data || "", "base64");
+    fs.writeFileSync(path.join(dir, "crop.png"), png);
+    check(!pic.isError && png.length > 100 && png.readUInt32BE(16) >= 80, `the agent sees the box's picture (${png.length} bytes, ${png.length > 24 ? png.readUInt32BE(16) + "x" + png.readUInt32BE(20) : "?"} px)`);
+  }
   // Nor is one that fails any other way (a timeout), which could still arrive late.
   await page.evaluate(() => { window.fail = true; });
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
@@ -325,7 +349,7 @@ window.addEventListener("message", async e => {
   await frame.locator("#annotate-bar textarea").press("Enter");
   await frame.waitForFunction(() => document.querySelector("#annotate-bar textarea").value === "Timed out", null, { timeout: 5000 }).catch(() => {});
   await new Promise(r => setTimeout(r, 1000));
-  check((await page.evaluate(() => window.failed === 1 && window.messages.length === 4)), "a timed-out send isn't tried again, and its pick comes back");
+  check((await page.evaluate(sent => window.failed === 1 && window.messages.length === sent, R ? 4 : 5)), "a timed-out send isn't tried again, and its pick comes back");
   await frame.locator("pluto-cell").nth(2).locator("pluto-output").click();
   await page.screenshot({ path: path.join(dir, "point.png") });
   await frame.locator("#annotate-bar textarea").press("Escape");
@@ -349,6 +373,14 @@ window.addEventListener("message", async e => {
   // Back in the pane, Claude closes the notebook: the view says so, instead of Pluto's endless "Reconnecting…".
   await frame.click("#endeavor-open");
   await frame.waitForFunction(() => document.querySelector("#endeavor-card").hidden, null, { timeout: 10000 });
+  // A box Point drew: the view keeps its picture, and the agent sees it with view_cell_output's `crop`.
+  const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const kept = (await rpc("tools/call", { name: "notebook_crop", arguments: { notebook_id: fields.notebook_id, png: PNG } })).result;
+  const crop = kept.structuredContent?.crop;
+  const seen = (await rpc("tools/call", { name: "view_cell_output", arguments: { notebook_id: fields.notebook_id, cell_id: SQUARES, crop } })).result;
+  check(!kept.isError && !seen.isError && seen.content.find(c => c.type === "image")?.data === PNG, `the agent sees the box's picture the view kept (${JSON.stringify(seen.content?.[0]).slice(0, 160)})`);
+  const lost = (await rpc("tools/call", { name: "view_cell_output", arguments: { notebook_id: fields.notebook_id, cell_id: SQUARES, crop: "0123456789abcdef" } })).result;
+  check(lost.isError && /No picture was kept/.test(lost.content?.[0]?.text || ""), "a box with no picture kept says so");
   const closed = (await rpc("tools/call", { name: "close_notebook", arguments: { notebook_id: fields.notebook_id } })).result;
   check(!closed.isError, "close_notebook closed it");
   await frame.waitForFunction(() => /was closed/.test(document.querySelector("#endeavor-card.cover:not([hidden]) .note")?.textContent || ""), null, { timeout: 30000 }).catch(() => {});
