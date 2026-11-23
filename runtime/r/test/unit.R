@@ -93,6 +93,9 @@ check("a package the code doesn't name: the fix names it in the cell, not the he
 d <- A$structure_error(list(kind = "missing_package", message = "there is no package called 'cli'; its install may have failed",
                             names = "cli", fixes = character()))
 check("a missing package with no header fix: no fixes", is.null(d$fixes))
+check("an error's call is kept (#288)", identical(A$structure_error(list(kind = "error", message = "x", call = "f()"))$call, "f()"))
+check("an error with no call, or an empty one, has none", is.null(A$structure_error(list(kind = "error", message = "x"))$call) &&
+      is.null(A$structure_error(list(kind = "error", message = "x", call = ""))$call))
 d <- A$structure_error(list(kind = "error", message = "boom", fixes = "Do this"))
 check("another error keeps its fixes and reads as runtime", identical(d$kind, "runtime") && identical(unclass(d$fixes), "Do this"))
 d <- A$structure_error(list(kind = "error", message = "The textdata package is required to download the AFINN lexicon.", fixes = "Add textdata to [extra_packages]"))
