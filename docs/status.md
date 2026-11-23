@@ -614,6 +614,11 @@ Next:
   packages, once per runtime folder, Julia and depot, but only where Julia
   notebooks ran before and Julia is already installed. So the first open after
   an update doesn't run without the warm package: about 24 s instead of 45 s here.
+  That precompile isn't part of the runtime, so `endeavor stop` leaves it to
+  finish, a minute or two, as a Julia process with no runtime around it. That
+  is meant, so a short session doesn't throw the work away. It holds a lock in
+  the runtime folder, so a server started meanwhile doesn't start a second one,
+  and it writes its marker when it's done.
   Before either loads anything, a compiled file of those two packages in our own
   depot that the user can't read is removed, so Julia compiles it again. One left
   `--w-------`, once another runtime version had compiled there too, made every
