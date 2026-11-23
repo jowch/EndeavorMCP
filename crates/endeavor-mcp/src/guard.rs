@@ -1,14 +1,3 @@
-//! The app's watch over a runtime from an older build: the app relays every
-//! connection to a host's runtime, and on one that is older than the app it
-//! answers the agent's tool calls the app won't let that runtime carry out,
-//! passing everything else through unchanged. And where the app can draw a
-//! notebook, it shows the agent a cell's output as the notebook draws it when
-//! the runtime has no picture of it (`Snapshot`). On a runtime from before R
-//! notebooks, it says why an R notebook's path is refused. Where the client can
-//! ask the user to restart the runtime (`AskRestart`), it adds `request_restart`
-//! to the agent's tools and answers it here, so it works whatever build the
-//! runtime is, and while the runtime is gone.
-
 use std::io::{self, BufRead, BufReader, ErrorKind, Write};
 use std::collections::HashSet;
 use std::net::TcpStream;
@@ -21,22 +10,13 @@ use crate::http::{self, Framing, Head};
 use crate::mcp::{to_json, tool_error};
 use crate::notebooks::{screenshot_result, short_cell_id, snapshot_may_help, uuid_value};
 
-/// A picture of a cell's output as the user's notebook draws it, given the session's key, the
-/// notebook's id and the cell's: a PNG, in base64. None if it can't be taken: the notebook isn't
-/// open in the app, or the output is empty or not drawn yet (a cell that hasn't run), which would
-/// give the agent a blank picture. In safe preview it is asked for any output, text too.
 pub type Snapshot = dyn Fn(&str, &str, &str) -> Option<String> + Send + Sync;
 
-/// A `Snapshot` that also says when the picture stops short of the output (`Picture::cut`).
 pub type Pictures = dyn Fn(&str, &str, &str) -> Option<Picture> + Send + Sync;
 
-/// A picture of a cell's output (`Pictures`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Picture {
-    /// The PNG, in base64.
     pub png: String,
-    /// When the output is taller than the client could show at once: (the height the picture
-    /// shows, the output's whole height), in CSS pixels. The agent is told the rest is missing.
     pub cut: Option<(u32, u32)>,
 }
 
@@ -46,44 +26,24 @@ impl From<String> for Picture {
     }
 }
 
-/// What the agent is told of a runtime from another build that doesn't offer this build's interface
-/// (`serve_guarded`). The plugin's front tells its agent once, and in every `session_status`
-/// (`Relay::decorate`); the app's agent had only the refusal of an R notebook's path (#239).
 pub struct Older<'a> {
-    /// A refusal of an R notebook's path for want of R notebooks (`mcp::refuses_r_for_want_of_it`),
-    /// which says only that the path must end in .jl, gets this instead.
     pub no_r: &'a dyn Fn() -> String,
-    /// Added to each session's first tool result, and as `other_version` to every `session_status`.
     pub notice: Option<String>,
-    /// The sessions told already, by key, for as long as this runtime is the one relayed to.
     pub told: &'a Mutex<HashSet<String>>,
 }
 
-/// The agent's tool that asks the user to restart the runtime, which the client answers (`AskRestart`).
 pub const REQUEST_RESTART: &str = "request_restart";
 
-/// Show the user an agent's request to restart the runtime and wait for their answer, given the
-/// session's key, the agent's reason, a check to call while waiting (whether the agent hung up;
-/// it also keeps the agent's wait going), and when to stop waiting. Nothing restarts unless the
-/// user agrees, in any mode: the client restarts it itself once they do.
 pub type AskRestart = dyn Fn(&str, &str, &dyn Fn() -> bool, Instant) -> RestartAnswer + Send + Sync;
 
-/// What the user did with a `request_restart`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RestartAnswer {
-    /// They pressed Restart, and the runtime is restarting.
     Restarting,
-    /// They chose not to.
     Declined,
-    /// Not yet, by the deadline (or the agent hung up): the question stays on their screen.
     Unanswered,
-    /// The client can't ask now: why, as the agent reads it.
     Unavailable(String),
 }
 
-/// `request_restart`'s entry in `tools/list`. Its words follow those for a kept older runtime
-/// (`no_r_text`'s callers): small models take a named way to stop something as a recipe, so it
-/// says plainly that only the user's yes restarts anything.
 pub fn restart_schema() -> Value {
     json!({
         "name": REQUEST_RESTART,
@@ -103,7 +63,6 @@ The result says whether they restarted, declined, or haven't answered yet.",
     })
 }
 
-/// The result of a `request_restart` on `place`, from the user's answer.
 fn restart_result(answer: RestartAnswer, place: &str) -> Value {
     match answer {
         RestartAnswer::Restarting => json!({ "content": [{ "type": "text", "text": format!(
@@ -121,12 +80,8 @@ Don't stop or restart it any other way: tell the user why a restart would help, 
     }
 }
 
-/// How long a `request_restart` waits for the user: under the 60 seconds agents give a call.
 const RESTART_WAIT: Duration = Duration::from_secs(50);
 
-/// The reply to `message` when it is a `request_restart` call (asking the user through `restart`'s
-/// hook, on `restart`'s place) or a `tools/list` reply to add the tool to; None for anything else.
-/// `gone` is the agent's wait (`mcp::post`'s check).
 pub(crate) fn restart_call(message: &Value, session: &str, restart: (&AskRestart, &str), gone: &dyn Fn() -> bool) -> Option<Value> {
     if message["method"] != "tools/call" || message["id"].is_null() || message["params"]["name"] != REQUEST_RESTART {
         return None;
@@ -141,7 +96,6 @@ pub(crate) fn restart_call(message: &Value, session: &str, restart: (&AskRestart
     Some(json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }))
 }
 
-/// `tools/list`'s `result` with `request_restart` added, once.
 pub(crate) fn with_restart_tool(result: &Value) -> Option<Value> {
     let tools = result["tools"].as_array()?;
     if tools.iter().any(|t| t["name"] == REQUEST_RESTART) {
@@ -152,17 +106,6 @@ pub(crate) fn with_restart_tool(result: &Value) -> Option<Value> {
     Some(result)
 }
 
-/// Serve `client`'s requests through `upstream`, a connection to the runtime's
-/// port, one at a time. An agent's MCP tool call that `refuse` refuses, given
-/// the session's key (its `X-Endeavor-Session`), the tool and its arguments,
-/// fails here with that text as its error. Every other request (the app's own
-/// calls and event stream, Pluto's page and its WebSocket, and the agent's
-/// other messages) passes through as it is, and the requests after it on the
-/// same connection are checked the same way. With `snapshot`, a `view_cell_output`
-/// the runtime has no picture for gets the snapshot instead (`relay_result`). With
-/// `older`, the runtime is another build's, and the agent is told so (`Older`).
-/// With `restart` (the client's hook and the place's name), `tools/list` gets `request_restart`, and
-/// a call to it is answered here (`restart_call`): the runtime never sees it.
 pub fn serve_guarded(
     client: TcpStream,
     upstream: TcpStream,
@@ -189,9 +132,6 @@ pub fn serve_guarded(
                 && message["method"] == "tools/call"
                 && message["params"]["name"] == REQUEST_RESTART
             {
-                // The answer can wait on the user: `mcp::reply` streams it to an agent that takes a stream.
-                // The connection closes after it: once the user restarts, `upstream` leads to the runtime
-                // that stopped, and the agent's next request must come through the listener again.
                 crate::mcp::reply(&request, &mut client, &message, false, false, |message, gone| {
                     restart_call(message, &session, restart, gone).map(|reply| to_json(&reply))
                 })?;
@@ -214,8 +154,6 @@ pub fn serve_guarded(
             let view = snapshot.filter(|_| call && tool == "view_cell_output");
             let no_r = older.map(|o| o.no_r).filter(|_| call && crate::mcp::names_r_notebook(tool, arguments));
             let list = restart.is_some() && message["method"] == "tools/list" && !message["id"].is_null();
-            // The notice comes with a call that can't wait on the user, which is read whole: one that may be
-            // held for the user's answer, in any policy, keeps its stream, and the session's next call says it.
             let notice = older.and_then(|o| o.notice.as_deref().map(|notice| (o, notice))).filter(|(o, _)| {
                 call && (tool == "session_status" || (!crate::mcp::asks_first(tool, arguments, "ask", true) && !o.told.lock().unwrap().contains(&session)))
             });
@@ -223,7 +161,6 @@ pub fn serve_guarded(
             request.headers.push(("Content-Length".into(), body.len().to_string()));
             let whole = view.is_some() || no_r.is_some() || list || notice.is_some();
             if whole {
-                // Only a call that waits on the user streams its answer; this keeps the answer one JSON body even so.
                 request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Accept"));
                 request.headers.push(("Accept".into(), "application/json".into()));
             }
@@ -263,13 +200,8 @@ pub fn serve_guarded(
     Ok(())
 }
 
-/// How often a connection waiting for the agent's next request looks whether its runtime's end closed.
 const IDLE_CHECK: Duration = Duration::from_secs(1);
 
-/// Wait for the agent's next request on `reader`, `client`'s connection. False when the agent hung up,
-/// or when `upstream` closed meanwhile: its runtime stopped or restarted, so it would answer nothing. The
-/// connection then closes, as one relayed without the guard does, and the agent's next request comes
-/// through the listener again to the runtime of the moment, instead of failing unanswered (#292).
 fn next_request(reader: &mut BufReader<wire::Shared>, client: &TcpStream, upstream: &TcpStream) -> io::Result<bool> {
     let before = client.read_timeout()?;
     client.set_read_timeout(Some(IDLE_CHECK))?;
@@ -289,7 +221,6 @@ fn next_request(reader: &mut BufReader<wire::Shared>, client: &TcpStream, upstre
     waited
 }
 
-/// Whether the other end of `socket` closed it, as far as can be seen without reading from it.
 fn closed(socket: &TcpStream) -> bool {
     if socket.set_nonblocking(true).is_err() {
         return false;
@@ -302,9 +233,6 @@ fn closed(socket: &TcpStream) -> bool {
     closed
 }
 
-/// `result`, the answer to the agent's call to `tool` in `session`, with what it is told of an older
-/// runtime: `notice` as `other_version` in a `session_status` that worked, which tells the session,
-/// and otherwise as a note after the session's first tool result.
 fn told_of_older(result: &mut Value, tool: &str, session: &str, older: &Older, notice: &str) {
     if tool == "session_status"
         && result["isError"] != true
@@ -322,12 +250,9 @@ fn told_of_older(result: &mut Value, tool: &str, session: &str, older: &Older, n
     }
 }
 
-/// Pass on the runtime's answer to a tool call, unless `instead` gives a result in place of the
-/// runtime's: then the answer is that. Whether the client connection can carry another request.
 fn relay_result(request: &Head, client: &mut wire::Shared, from_runtime: &mut BufReader<wire::Shared>, instead: &dyn Fn(&Value) -> Option<Value>) -> io::Result<bool> {
     let mut response = loop {
         let response = Head::read(from_runtime)?.ok_or(io::ErrorKind::UnexpectedEof)?;
-        // `100 Continue` comes before the real response; the client sent its whole body already.
         if !(100..200).contains(&response.status()) {
             break response;
         }
@@ -360,9 +285,6 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Arc;
 
-    /// A runtime that answers every request with what it was sent, and an
-    /// upgrade with `101` and then an echo, and a client connected to it
-    /// through `serve_guarded`, refusing runs of session 7.
     fn guarded() -> (TcpStream, std::sync::mpsc::Receiver<String>) {
         let runtime = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = runtime.local_addr().unwrap().port();
@@ -405,7 +327,6 @@ mod tests {
 
     #[test]
     fn an_idle_connection_whose_runtime_went_closes_so_the_next_request_finds_the_new_one() {
-        // A runtime that answers one request and then ends, as one that stops or restarts.
         let runtime = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = runtime.local_addr().unwrap().port();
         let (end_tx, end) = std::sync::mpsc::channel::<()>();
@@ -426,7 +347,6 @@ mod tests {
         std::thread::spawn(move || done_tx.send(serve_guarded(accepted, upstream, &|_, _, _| None, None, None, None).is_ok()).unwrap());
         let read = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_cell","arguments":{}}}"#;
         assert_eq!(post(&mut client, "/mcp", "7", read), "200 first");
-        // Idle past a check while the runtime is still there: the connection stays.
         std::thread::sleep(IDLE_CHECK + Duration::from_millis(300));
         assert!(done.try_recv().is_err(), "still open while its runtime is");
         end_tx.send(()).unwrap();
@@ -499,9 +419,6 @@ mod tests {
     const UNDRAWN: &str = "c0000000-0000-4000-8000-000000000005";
     const PREVIEW: &str = "c0000000-0000-4000-8000-000000000006";
 
-    /// A runtime that answers `view_cell_output` as a real one would for each of the cells above,
-    /// and a client connected to it through `serve_guarded` with a snapshot of every cell but
-    /// `UNDRAWN`. What the runtime is sent as `Accept`, and the snapshots asked for.
     fn viewing() -> (TcpStream, std::sync::mpsc::Receiver<String>, std::sync::mpsc::Receiver<String>) {
         let runtime = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = runtime.local_addr().unwrap().port();
@@ -524,7 +441,6 @@ mod tests {
                     _ => tool_error(&format!("ArgumentError: no_image::Cell {cell} errored; read_cell shows the error"), false),
                 };
                 let reply = to_json(&json!({ "jsonrpc": "2.0", "id": message["id"], "result": result }));
-                // Chunked, so the guard can't just pass a length on.
                 write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
                 http::write_chunk(&mut socket, reply.as_bytes()).unwrap();
                 http::write_chunk(&mut socket, b"").unwrap();
@@ -572,16 +488,13 @@ mod tests {
         assert_eq!(html["content"][1], json!({ "type": "image", "data": "c25hcHNob3Q=", "mimeType": "image/png" }));
         assert_eq!(meta(&html), json!({ "cell_id": HTML, "source": "screenshot", "png_bytes": 8, "shown_as": "text/html" }), "what it is, from the error");
 
-        // A picture from the output's HTML may be only part of it: the notebook's picture is what the user sees.
         let widget = view(&mut client, WIDGET);
         assert_eq!((&meta(&widget)["source"], &meta(&widget)["shown_as"]), (&json!("screenshot"), &json!("text/html")));
         assert_eq!(asked.try_recv().unwrap(), format!("7 {NOTEBOOK} {WIDGET}"));
-        // In safe preview the runtime can't render the value, but the notebook still shows the output.
         let preview = meta(&view(&mut client, PREVIEW));
         assert_eq!((&preview["source"], preview.get("shown_as")), (&json!("screenshot"), None), "the runtime didn't say");
         assert_eq!(asked.try_recv().unwrap(), format!("7 {NOTEBOOK} {PREVIEW}"));
 
-        // The value's own picture stands, and so does an error the notebook's picture wouldn't help with.
         let plot = view(&mut client, PLOT);
         assert_eq!(meta(&plot)["shown_as"], "image/svg+xml");
         assert_eq!(plot["content"][1]["data"], "iVBORw0KGgoAAAA=");
@@ -589,16 +502,12 @@ mod tests {
         assert_eq!(broken["isError"], true);
         assert!(asked.try_recv().is_err(), "no snapshot for either");
 
-        // No snapshot: the runtime's answer as it was.
         let undrawn = view(&mut client, UNDRAWN);
         assert_eq!(asked.try_recv().unwrap(), format!("7 {NOTEBOOK} {UNDRAWN}"));
         assert_eq!(undrawn["isError"], true);
         assert!(undrawn["content"][0]["text"].as_str().unwrap().contains("has no PNG rendering"));
     }
 
-    /// A runtime from before R notebooks: it answers a new or opened notebook's path that doesn't end in
-    /// .jl as such a core did, and any other call with an empty list. A client connected to it through
-    /// `serve_guarded`, as another build's runtime if `older_runtime`, which with `notice` the agent is told of.
     fn without_r(older_runtime: bool) -> TcpStream {
         without_r_told(older_runtime, None, Arc::default())
     }
@@ -657,7 +566,6 @@ mod tests {
         assert_eq!(call_tool(&mut client, "new_notebook", "/work/a.R")["message"], "Notebook path must end in .jl: '/work/a.R'", "a runtime of this build's interface answers as it does");
     }
 
-    /// The whole result of a call to `tool` with `path` from `session`.
     fn call_from(client: &mut TcpStream, session: &str, tool: &str, path: &str) -> Value {
         let call = json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": { "name": tool, "arguments": { "path": path } } }).to_string();
         let reply: Value = serde_json::from_str(post(client, "/mcp", session, &call).strip_prefix("200 ").unwrap()).unwrap();
@@ -679,23 +587,17 @@ mod tests {
         let other = call_from(&mut client, "8", "open_notebook", "/work/c.R");
         assert_eq!((other["isError"].clone(), other["content"][1]["text"].as_str().map(|t| t.starts_with("Note: "))), (json!(true), Some(true)), "another session is told too, after a refusal it explains");
         assert_eq!(other["content"][0]["text"], json!(tool_error("unsupported::No R here; restart it.", false)["content"][0]["text"]));
-        // A session whose first call is session_status is told there, and not again with a note.
         let status = call_from(&mut client, "9", "session_status", "");
         assert_eq!(status["content"].as_array().unwrap().len(), 1);
         assert_eq!(call_from(&mut client, "9", "list_notebooks", "")["content"].as_array().unwrap().len(), 1, "told by the status");
-        // A call that may wait on the user (approve_install, a run, an edit in Manual) keeps its stream: the session's next call that can't says it.
         let waits = json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": { "name": "approve_install", "arguments": {} } }).to_string();
         let waited: Value = serde_json::from_str(post(&mut client, "/mcp", "10", &waits).strip_prefix("200 ").unwrap()).unwrap();
         assert_eq!(waited["result"]["content"].as_array().unwrap().len(), 1, "no note on a call that may wait");
         assert_eq!(call_from(&mut client, "10", "list_notebooks", "")["content"][1]["text"].as_str().map(|t| t.starts_with("Note: ")), Some(true));
-        // A new connection of a session told already, to the same runtime: not again.
         let mut again = without_r_told(true, Some("Endeavor on lab was started by an older version."), told);
         assert_eq!(call_from(&mut again, "7", "list_notebooks", "")["content"].as_array().unwrap().len(), 1);
     }
 
-    /// A runtime that answers `tools/list` with one tool and anything else with what it was sent,
-    /// as JSON, and tells `seen` the method of each message; a client connected to it through
-    /// `serve_guarded` with a restart hook that answers `answer` and tells `asked` what it was asked.
     fn with_restart(answer: RestartAnswer) -> (TcpStream, std::sync::mpsc::Receiver<String>, std::sync::mpsc::Receiver<String>) {
         let runtime = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = runtime.local_addr().unwrap().port();

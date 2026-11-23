@@ -1,10 +1,3 @@
-//! Windows process control for the runtime (Endeavor's docs/windows.md,
-//! process control).
-//! Unix keeps the runtime together as a process group; here the core puts
-//! itself in a Job Object that ends every process in it when the core ends,
-//! and a recorded pid is trusted only while the process's start time matches,
-//! since Windows hands pids out again quickly.
-
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 
@@ -18,13 +11,9 @@ use windows_sys::Win32::System::Threading::{
     WaitForSingleObject,
 };
 
-/// A process this one opened, known to be the one recorded.
 pub struct Process(OwnedHandle);
 
 impl Process {
-    /// The process `pid`, if it is still the one that started at `started`
-    /// (`start_time`). None when it's gone, its pid now names another
-    /// process, or nothing says when it started.
     pub fn open(pid: i32, started: Option<u64>) -> Option<Process> {
         let started = started?;
         let process = Process::open_pid(u32::try_from(pid).ok().filter(|&pid| pid != 0)?)?;
@@ -38,28 +27,22 @@ impl Process {
         (!raw.is_null()).then(|| Process(unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) }))
     }
 
-    /// An open handle keeps an exited process's record, so ask whether it
-    /// has exited rather than whether it can be opened.
     pub fn alive(&self) -> bool {
         // SAFETY: a process handle we own; a zero timeout only polls.
         unsafe { WaitForSingleObject(self.0.as_raw_handle() as HANDLE, 0) == WAIT_TIMEOUT }
     }
 
-    /// End it at once, as SIGKILL would.
     pub fn terminate(&self) {
         // SAFETY: a process handle we own, opened with PROCESS_TERMINATE.
         unsafe { TerminateProcess(self.0.as_raw_handle() as HANDLE, 1) };
     }
 
-    /// Wait up to `millis` for it to exit; whether it did.
     pub fn wait(&self, millis: u32) -> bool {
         // SAFETY: a process handle we own, opened with PROCESS_SYNCHRONIZE.
         unsafe { WaitForSingleObject(self.0.as_raw_handle() as HANDLE, millis) != WAIT_TIMEOUT }
     }
 }
 
-/// When the process behind `handle` started, in FILETIME units: with its pid,
-/// what identifies it.
 pub fn start_time(handle: RawHandle) -> Option<u64> {
     let mut times = [FILETIME::default(); 4];
     let [created, exited, kernel, user] = &mut times;
@@ -68,17 +51,11 @@ pub fn start_time(handle: RawHandle) -> Option<u64> {
     ok.then(|| (u64::from(times[0].dwHighDateTime) << 32) | u64::from(times[0].dwLowDateTime))
 }
 
-/// This process's `start_time`.
 pub fn own_start_time() -> Option<u64> {
     // SAFETY: a pseudo-handle that needs no closing.
     start_time(unsafe { GetCurrentProcess() } as RawHandle)
 }
 
-/// Put this process in a new Job Object that ends every process in it once
-/// the last handle to it closes: the one returned, which nothing inherits, so
-/// that happens when this process ends, however it ends. Processes started
-/// from here on join the job unless they're allowed to break away, which it
-/// doesn't allow. Keep the handle for the life of the process.
 pub fn job_ending_with_this_process() -> io::Result<OwnedHandle> {
     // SAFETY: no security attributes and no name: a private job.
     let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
@@ -94,8 +71,6 @@ pub fn job_ending_with_this_process() -> io::Result<OwnedHandle> {
     if unsafe { SetInformationJobObject(job.as_raw_handle() as HANDLE, JobObjectExtendedLimitInformation, (&raw const limits).cast(), size) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    // Windows 8 and later nest jobs, so this works when this process is in a
-    // job already (one the app runs in, or a terminal's).
     // SAFETY: the job we own, and the pseudo-handle for this process.
     if unsafe { AssignProcessToJobObject(job.as_raw_handle() as HANDLE, GetCurrentProcess()) } == 0 {
         return Err(io::Error::last_os_error());
@@ -111,7 +86,6 @@ mod tests {
     const ROLE: &str = "ENDEAVOR_JOB_TEST_ROLE";
     const PIDS: &str = "ENDEAVOR_JOB_TEST_PIDS";
 
-    /// This test binary again, running only `test` as `role`.
     fn rerun(test: &str, role: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command.args(["--exact", test, "--nocapture", "--test-threads=1"]).env(ROLE, role).stdin(Stdio::null()).stdout(Stdio::null());
@@ -122,14 +96,11 @@ mod tests {
     fn ending_the_jobs_first_process_ends_everything_it_started() {
         const TEST: &str = "winproc::tests::ending_the_jobs_first_process_ends_everything_it_started";
         match std::env::var(ROLE).as_deref() {
-            // Stands for the core: in the job, with a child that has a child of its own.
             Ok("core") => {
                 let _job = job_ending_with_this_process().unwrap();
                 let _ = rerun(TEST, "worker").spawn().unwrap().wait();
                 return;
             }
-            // About a minute, unless the job ends it. Its pids go to a file:
-            // a test's own output may be captured whatever the flags say.
             Ok("worker") => {
                 let mut ping = Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap();
                 let path = std::env::var(PIDS).unwrap();

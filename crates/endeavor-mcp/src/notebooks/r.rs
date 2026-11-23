@@ -1,9 +1,3 @@
-//! R's adapter (`runtime/r/adapter.R`), which runs Ember in its own R
-//! process. It answers `POST /adapter` as Julia's does. httpuv can't stream a
-//! response, so its notifications come by long-polling `GET
-//! /notifications?after=<seq>`, which `notifications` turns back into the
-//! stream of `data:` lines the core follows.
-
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -13,10 +7,8 @@ use serde_json::{Value, json};
 use super::Upstream;
 use crate::http::{self, Head};
 
-/// How long the adapter holds a poll with nothing to say, and how much longer we wait for it.
 const POLL: Duration = Duration::from_secs(25 + 15);
 
-/// Why R ended, asked once R stops answering (`Upstream::why_ended`).
 pub type WhyEnded = Box<dyn Fn() -> Option<String> + Send + Sync>;
 
 pub struct R {
@@ -30,7 +22,6 @@ impl R {
         R { port, token, why_ended: None }
     }
 
-    /// One that can say why R ended.
     pub fn telling(self, why_ended: WhyEnded) -> R {
         R { why_ended: Some(why_ended), ..self }
     }
@@ -47,7 +38,6 @@ impl Upstream for R {
         String::from_utf8(body).map_err(|_| io::ErrorKind::InvalidData.into())
     }
 
-    /// From now on: the core reads every notebook again when a stream begins.
     fn notifications(&self) -> io::Result<Box<dyn BufRead + Send>> {
         let reply: Value = serde_json::from_str(&self.adapter(json!({ "method": "status", "params": {} }).to_string().as_bytes())?)?;
         let after = reply["result"]["seq"].as_u64().ok_or_else(|| io::Error::other(format!("R's status has no seq: {reply}")))?;
@@ -59,7 +49,6 @@ impl Upstream for R {
     }
 }
 
-/// The notifications as `data:` lines, one poll after another; the end when a poll fails.
 struct Polls {
     port: u16,
     token: String,
@@ -69,7 +58,6 @@ struct Polls {
 }
 
 impl Polls {
-    /// The notifications after `after`, once there are some or the adapter gives up waiting.
     fn poll(&self) -> io::Result<Vec<Value>> {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port))?;
         stream.set_read_timeout(Some(POLL))?;
@@ -110,8 +98,6 @@ mod tests {
 
     use std::sync::{Arc, Mutex};
 
-    /// A stand-in adapter: `status` says seq 4, then each poll gets the next of `polls`, then the
-    /// connection closes unanswered. The polls' targets.
     fn adapter(polls: Vec<&'static str>) -> (u16, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

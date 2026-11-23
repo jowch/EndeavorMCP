@@ -1,28 +1,12 @@
-//! Every folder Endeavor uses, defined here and nowhere else. The desktop app
-//! links this crate and takes its folders from here, so the app, the plugin
-//! and a server share one state folder.
-//!
-//! Two shell scripts must repeat a rule because they run before the binary
-//! exists: the bootstrap script (`PICK_STATE_DIR_SH`, for the state folder) and
-//! `scripts/endeavor-mcp.sh` (the binary store, `Env::plugin_bin`). Tests here
-//! and in `tests/launcher.rs` run the shell text and compare it with this module.
-//!
-//! On Unix a variable counts only if it holds an absolute path: a relative one
-//! would put Endeavor's files under whichever folder the process started in.
-
 use std::path::{Path, PathBuf};
 
-/// `name`'s value, if it is set to an absolute path, else `None`.
 fn absolute_var(read: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<PathBuf> {
     read(name).filter(|v| !v.is_empty()).map(PathBuf::from).filter(|p| p.is_absolute())
 }
 
-/// What the folders come from: the environment, read once.
 #[derive(Clone, Debug, Default)]
 pub struct Env {
-    /// The user's home folder, where Endeavor's folders are when no XDG variable says otherwise.
     pub(crate) home: PathBuf,
-    /// On Windows, where Endeavor keeps its folders: `%LOCALAPPDATA%\Endeavor`. Empty elsewhere.
     pub(crate) local: PathBuf,
     pub(crate) state_home: Option<PathBuf>,
     pub(crate) cache_home: Option<PathBuf>,
@@ -31,7 +15,6 @@ pub struct Env {
     pub(crate) appdata: Option<PathBuf>,
     pub(crate) scratch: Option<String>,
     pub(crate) cwd: PathBuf,
-    /// This computer's host name.
     pub(crate) node: String,
 }
 
@@ -40,7 +23,6 @@ impl Env {
         Env::from_vars(&|name| std::env::var(name).ok())
     }
 
-    /// The folders for the environment `read` gives.
     pub fn from_vars(read: &dyn Fn(&str) -> Option<String>) -> Env {
         let var = |name: &str| read(name).filter(|v| !v.is_empty());
         let local = if cfg!(windows) { var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default().join("Endeavor") } else { PathBuf::new() };
@@ -66,7 +48,6 @@ impl Env {
         self.cache_home.clone().unwrap_or_else(|| self.home.join(".cache"))
     }
 
-    /// The runtime's state on this machine, `serve`'s, `mcp`'s and an app's. Per machine, since a home folder is often shared by a cluster's nodes.
     pub fn state_dir(&self) -> PathBuf {
         if cfg!(windows) {
             return self.local.join("serve").join(&self.node);
@@ -74,15 +55,10 @@ impl Env {
         self.state_base().join("endeavor/serve").join(&self.node)
     }
 
-    /// Where the app kept a server's runtime state before it used `state_dir` (#110): `state` in the
-    /// bootstrap script's install folder, `server_root`. None on Windows, which the app doesn't use as a
-    /// server. `runtime::default_state_dir` keeps using it while a runtime there is alive.
     pub fn apps_old_state_dir(&self) -> Option<PathBuf> {
         (!cfg!(windows) && !self.home.as_os_str().is_empty()).then(|| self.server_root().join("state"))
     }
 
-    /// For `connect --launcher slurm`: one for the whole cluster, since a reconnect
-    /// through another login node must find the same job.
     pub fn cluster_state_dir(&self) -> PathBuf {
         if cfg!(windows) {
             return self.local.join("cluster");
@@ -90,8 +66,6 @@ impl Env {
         self.state_base().join("endeavor/cluster")
     }
 
-    /// The one file that lists the machines, which the app reads and writes as well.
-    /// By default `~/.config/endeavor/machines.json` (macOS too), and on Windows `%APPDATA%\Endeavor\machines.json`.
     pub fn machines_file(&self) -> PathBuf {
         if cfg!(windows) {
             return self.appdata.clone().unwrap_or_default().join("Endeavor").join("machines.json");
@@ -100,13 +74,10 @@ impl Env {
         config.unwrap_or_default().join("endeavor").join("machines.json")
     }
 
-    /// Where the plugins' launcher keeps binaries: `<data>/endeavor/bin` (`plugin_bin_from` for a release set by a variable).
     pub fn plugin_bin(&self) -> PathBuf {
         self.data_home.clone().unwrap_or_else(|| self.home.join(".local/share")).join("endeavor/bin")
     }
 
-    /// Claude Code's permission mode in each of its conversations, as the plugin's hook last saw it
-    /// (`standalone::claude_mode`).
     pub(crate) fn claude_modes_dir(&self) -> PathBuf {
         if cfg!(windows) {
             return self.local.join("claude-modes");
@@ -114,7 +85,6 @@ impl Env {
         self.state_base().join("endeavor/claude-modes")
     }
 
-    /// What projects remember (`projects`).
     pub(crate) fn projects_path(&self) -> PathBuf {
         if cfg!(windows) {
             return self.local.join("projects.json");
@@ -122,7 +92,6 @@ impl Env {
         self.state_base().join("endeavor/projects.json")
     }
 
-    /// Where `serve` unpacks the runtime.
     pub(crate) fn cache(&self) -> PathBuf {
         if cfg!(windows) {
             return self.local.join("serve-runtime");
@@ -130,7 +99,6 @@ impl Env {
         self.cache_base().join("endeavor/serve")
     }
 
-    /// Helpers fetched from the release for servers of other platforms (`release::fetch_helper`).
     pub(crate) fn helpers_dir(&self) -> PathBuf {
         if cfg!(windows) {
             return self.local.join("helpers");
@@ -138,9 +106,6 @@ impl Env {
         self.cache_base().join("endeavor/helpers")
     }
 
-    /// The depot the app's server installs use, so packages installed for one
-    /// serve the other. The trailing separator asks for the user's own depot
-    /// (~/.julia) behind it, which `with_user_depot` puts in when Julia starts.
     pub fn depot(&self) -> String {
         if cfg!(windows) {
             return format!("{};", self.local.join("serve-depot").display());
@@ -152,8 +117,6 @@ impl Env {
         }
     }
 
-    /// Where Ember is installed for R notebooks, one library per build, with the
-    /// packages it needs that R didn't have (`runtime/r/install.R`): beside the depot.
     pub fn ember_folder(&self) -> PathBuf {
         if cfg!(windows) {
             return self.local.join("r").join("ember");
@@ -164,9 +127,6 @@ impl Env {
         }
     }
 
-    /// What the app and the bootstrap script install into on a server or this
-    /// computer: `~/.cache/endeavor`. It ignores `XDG_CACHE_HOME`, since the app
-    /// installs to the same folder.
     pub fn server_root(&self) -> PathBuf {
         self.home.join(SERVER_ROOT)
     }
@@ -174,24 +134,14 @@ impl Env {
 
 const SERVER_ROOT: &str = ".cache/endeavor";
 
-/// Where the launcher keeps the binaries of a release set by `ENDEAVOR_RELEASE_URL`,
-/// `<data>/endeavor/bin-from/<checksum of the address>`: beside `plugin_bin`.
 pub(crate) fn plugin_bin_from(plugin_bin: &Path) -> PathBuf {
     plugin_bin.with_file_name("bin-from")
 }
 
-/// A cluster's depot on its scratch folder, where home quotas are small.
 pub(crate) fn scratch_depot(scratch: &str) -> String {
     format!("{scratch}/endeavor/depot:")
 }
 
-/// The `JULIA_DEPOT_PATH` Julia is started with for `depot`. A trailing empty entry
-/// (`<ours>:`) gives Julia only its bundled depots, not the user's own (`~/.julia`), so
-/// the user's registries (a LocalRegistry, say), packages and compiled code went
-/// unseen (EndeavorMCP #367). Where `depot` ends with one, the user's depot goes in
-/// before it: the first entry of their own `JULIA_DEPOT_PATH` that isn't already in
-/// `depot`, else `~/.julia`. Julia still installs only into the first entry, ours.
-/// A `depot` without a trailing empty entry is a full list someone chose, and is kept.
 pub fn with_user_depot(depot: &str) -> String {
     let home = std::env::home_dir().unwrap_or_default();
     with_user_depot_from(depot, std::env::var("JULIA_DEPOT_PATH").ok().as_deref(), &home, if cfg!(windows) { ';' } else { ':' })
@@ -211,15 +161,6 @@ fn with_user_depot_from(depot: &str, theirs: Option<&str>, home: &Path, sep: cha
     }
 }
 
-/// Shell for the bootstrap script, run when the helper must be installed: sets
-/// `pd` to `$sd` if the client named a state folder (`$st`), else to the folder a
-/// server keeps, as `Env::state_dir` and `Env::cluster_state_dir` give it, for the
-/// launcher in `$ln`. It runs before any binary is installed, so it can't ask one.
-/// Like `runtime::default_state_dir`, a plain server's is the app's older folder while a
-/// runtime of this node recorded there is alive (here: while `kill -0` reaches its pid and `ps`
-/// shows it was started with `--state-dir` that folder, or can't say what it is). A reused pid or a
-/// zombie shows other arguments, so it doesn't count, as it doesn't for the helper.
-/// `uname -n` is what `gethostname` returns.
 pub(crate) const PICK_STATE_DIR_SH: &str = r#"if [ -n "$st" ]; then pd="$sd"; else case "${XDG_STATE_HOME:-}" in /*) pd="$XDG_STATE_HOME";; *) pd="$HOME/.local/state";; esac; case "$ln" in slurm) pd="$pd/endeavor/cluster";; *) pd="$pd/endeavor/serve/$(uname -n)"; po="$HOME/.cache/endeavor/state"; pj=$(cat "$po/runtime.json" 2>/dev/null); case "$pj" in *node?:?"$(uname -n)"?[,}]*pid?:[0-9]*) pk=${pj#*pid?:}; pk=$(printf %s "$pk" | tr ",}" "  " | cut -d" " -f1); if [ -n "$pk" ] && [ -z "$(printf %s "$pk" | tr -d 0-9)" ] && kill -0 "$pk" 2>/dev/null; then pa=$(ps -ww -p "$pk" -o args= 2>/dev/null || ps -p "$pk" -o args= 2>/dev/null) || pa=; case "$pa" in "" | *"--state-dir $po"*) pd="$po";; esac; fi;; esac;; esac; fi"#;
 
 #[cfg(test)]
@@ -323,7 +264,6 @@ mod tests {
             }
         }
 
-        // A runtime alive in the app's older folder is the one a plain server keeps using (#110).
         let home = crate::client::scratch("pick-apps-old-folder");
         let old = home.join(".cache/endeavor/state");
         std::fs::create_dir_all(&old).unwrap();
@@ -347,7 +287,6 @@ mod tests {
         record(&crate::hostname(), i64::from(i32::MAX));
         assert_eq!(in_home("process"), env.state_dir(), "gone");
 
-        // A `ps` that cuts `args` short (to $COLUMNS) unless given -ww, and one that refuses -ww (#430).
         let real_ps = ["/usr/bin/ps", "/bin/ps"].into_iter().find(|p| Path::new(p).exists()).expect("ps");
         let mut core = Command::new("sh").args(["-c", "sleep 60; :", "core", "--state-dir"]).arg(&old).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
         record(&crate::hostname(), i64::from(core.id()));

@@ -1,11 +1,3 @@
-//! Tools that act on the machine the runtime runs on. Only sessions on a server
-//! get them (their MCP connection carries `X-Endeavor-Host`): there, Claude's
-//! own file and shell tools would see the user's computer instead of the server.
-//!
-//! Results and errors are what the Julia runtime gave before, to the byte:
-//! paths normalized as Julia's `normpath` does, invalid UTF-8 replaced one
-//! Julia `Char` at a time, and Julia's own wording for system errors.
-
 use std::fs::{File, Metadata};
 use std::io::{self, BufRead, BufReader, Read};
 #[cfg(unix)]
@@ -37,11 +29,9 @@ const READ_FILE_MAX_LINE: usize = 2000;
 const SHELL_KEEP_HALF: usize = 15_000;
 #[cfg(unix)]
 const SHELL_DRAIN_GRACE: Duration = Duration::from_secs(2);
-/// How long a finished command's result is kept for the same call made again.
 #[cfg(unix)]
 const SHELL_KEPT: Duration = Duration::from_secs(600);
 
-/// The tools' schemas, for `tools/list`.
 pub fn schemas() -> Vec<Value> {
     vec![
         json!({
@@ -84,25 +74,15 @@ pub fn schemas() -> Vec<Value> {
     ]
 }
 
-/// Where and how `run_shell` runs commands.
 #[cfg_attr(windows, allow(dead_code))]
 pub struct Shell<'a> {
-    /// The session's working folder: where commands run unless told otherwise.
     pub folder: Option<&'a str>,
-    /// Set in, or (None) removed from, the command's environment.
     pub env: &'a [(&'a str, Option<&'a str>)],
-    /// The session the call comes from: a command started by one session is never another's.
     pub owner: &'a str,
-    /// How long the call waits for the command: a command that runs longer goes on, and the
-    /// same call again waits for it.
     pub wait: Duration,
-    /// The command this call only waits for (from `started`), which the user approved when it
-    /// started. The call then never starts one.
     pub started: Option<&'a Started>,
 }
 
-/// Run a host tool. An error is the text Julia showed for its exception, which
-/// the caller turns into the agent's `{error, message}`.
 pub fn call(name: &str, args: &Value, shell: &Shell) -> Result<Value, String> {
     match name {
         "list_folder" => list_folder(args),
@@ -120,7 +100,6 @@ fn string_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
     args.get(name).and_then(Value::as_str).ok_or_else(|| argument_error(&format!("invalid_argument::{name} must be a string")))
 }
 
-/// A whole number, as Julia took it: a JSON integer, an integral float, or a boolean.
 fn int_arg(args: &Value, name: &str, default: i64) -> Result<i64, String> {
     let whole = || argument_error(&format!("invalid_argument::{name} must be a whole number"));
     match args.get(name) {
@@ -163,7 +142,6 @@ pub fn home() -> String {
     std::env::home_dir().map(|home| home.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// When the file last changed, in Unix seconds as Julia's `mtime` gives them.
 #[cfg(unix)]
 pub(crate) fn mtime(meta: &Metadata) -> f64 {
     meta.mtime() as f64 + meta.mtime_nsec() as f64 * 1e-9
@@ -178,8 +156,6 @@ pub(crate) fn mtime(meta: &Metadata) -> f64 {
     }
 }
 
-/// A path the agent gave: `~` is the home folder, a relative path is taken
-/// from it, nothing is the home folder itself.
 fn host_path(path: Option<&str>) -> Result<String, String> {
     let path = path.unwrap_or_default().trim();
     let home = home();
@@ -195,8 +171,6 @@ fn host_path(path: Option<&str>) -> Result<String, String> {
     Ok(normpath(&if path.starts_with('/') { path } else { format!("{home}/{path}") }))
 }
 
-/// Julia's `normpath`: `.` and `x/..` gone, repeated slashes collapsed, and a
-/// path naming a folder (ending in `/`, `/.` or `/..`) still ends in `/`.
 pub fn normpath(path: &str) -> String {
     let dir_path = |p: &str| p.is_empty() || p == "." || p == ".." || p.ends_with('/') || p.ends_with("/.") || p.ends_with("/..");
     let absolute = path.starts_with('/');
@@ -215,8 +189,6 @@ pub fn normpath(path: &str) -> String {
     out
 }
 
-/// Text with each invalid UTF-8 sequence replaced by one U+FFFD, grouping the
-/// bytes of a sequence the way Julia splits a `String` into `Char`s.
 fn valid_text(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len());
     let mut i = 0;
@@ -242,7 +214,6 @@ fn valid_text(bytes: &[u8]) -> String {
     out
 }
 
-/// A string as Julia's `repr` shows it, for its error messages.
 pub(crate) fn julia_repr(text: &str) -> String {
     let mut out = String::from('"');
     for c in text.chars() {
@@ -262,8 +233,6 @@ pub(crate) fn julia_repr(text: &str) -> String {
     out
 }
 
-/// Julia's `IOError` for a failed libuv call, e.g.
-/// `IOError: readdir("/x"): permission denied (EACCES)`.
 fn uv_error(what: &str, error: &io::Error) -> String {
     let (name, message) = match error.raw_os_error() {
         Some(libc::EACCES) => ("EACCES", "permission denied"),
@@ -281,7 +250,6 @@ fn uv_error(what: &str, error: &io::Error) -> String {
     format!("IOError: {what}: {message} ({name})")
 }
 
-/// Julia's `SystemError`, e.g. `SystemError: opening file "/x": Permission denied`.
 fn system_error(what: &str, error: &io::Error) -> String {
     let message = match error.raw_os_error() {
         // SAFETY: strerror returns a valid C string; we copy it out at once.
@@ -392,7 +360,6 @@ fn read_file(args: &Value) -> Result<Value, String> {
     }))
 }
 
-/// The first and last SHELL_KEEP_HALF bytes of a stream.
 #[cfg(any(unix, test))]
 #[derive(Default)]
 struct Captured {
@@ -423,7 +390,6 @@ impl Captured {
     }
 }
 
-/// The user's login shell running `command`, as Julia's runtime ran it.
 #[cfg(unix)]
 fn shell_command(command: &str) -> Command {
     let shell = std::env::var("SHELL").unwrap_or_default();
@@ -438,7 +404,6 @@ fn shell_command(command: &str) -> Command {
         return sh;
     }
     let mut sh = Command::new(&shell);
-    // csh and tcsh refuse -l alongside other flags; they read .cshrc without it.
     if !matches!(shell.rsplit('/').next(), Some("csh" | "tcsh")) {
         sh.arg("-l");
     }
@@ -446,14 +411,11 @@ fn shell_command(command: &str) -> Command {
     sh
 }
 
-/// Only sessions on a server get host tools, and a Windows server is out of scope.
 #[cfg(windows)]
 fn run_shell(_args: &Value, _shell: &Shell) -> Result<Value, String> {
     Err(argument_error("unsupported::run_shell runs only on Linux and macOS"))
 }
 
-/// A `run_shell` command and what it has printed so far, by `shell_key`, while it runs and, once
-/// it ends, until the same call collects its result or `SHELL_KEPT` passes.
 #[cfg(unix)]
 struct Running {
     began: Instant,
@@ -466,14 +428,12 @@ struct Running {
 #[derive(Default)]
 struct Progress {
     captured: [Captured; 2],
-    /// The result, and when it came.
     done: Option<(Value, Instant)>,
 }
 
 #[cfg(unix)]
 static RUNNING: LazyLock<Mutex<HashMap<String, Arc<Running>>>> = LazyLock::new(Mutex::default);
 
-/// The folder a `run_shell` call runs in, and the key that makes the same call again find its command.
 #[cfg(unix)]
 fn shell_key(args: &Value, shell: &Shell) -> Result<(String, String, Duration), String> {
     let command = string_arg(args, "command")?;
@@ -489,15 +449,11 @@ fn shell_key(args: &Value, shell: &Shell) -> Result<(String, String, Duration), 
     Ok((format!("{}\n{cwd}\n{}\n{command}", shell.owner, timeout.as_secs()), cwd, timeout))
 }
 
-/// A `run_shell` command this session already started.
 #[cfg(unix)]
 pub struct Started(Arc<Running>);
 #[cfg(windows)]
 pub struct Started;
 
-/// The command `run_shell` with these arguments started for this session, still running or with
-/// its result kept: the same call again only waits for it (`Shell::started`), so the user isn't
-/// asked again.
 #[cfg(unix)]
 pub fn started(name: &str, args: &Value, shell: &Shell) -> Option<Started> {
     if name != "run_shell" {
@@ -512,7 +468,6 @@ pub fn started(_name: &str, _args: &Value, _shell: &Shell) -> Option<Started> {
     None
 }
 
-/// The command started under `key`, forgetting results kept too long.
 #[cfg(unix)]
 fn running(key: &str) -> Option<Arc<Running>> {
     let mut all = RUNNING.lock().unwrap();
@@ -531,7 +486,6 @@ fn run_shell(args: &Value, shell: &Shell) -> Result<Value, String> {
     let running = if let Some(Started(running)) = shell.started {
         running.clone()
     } else {
-        // Held while it starts, so the same call made twice at once starts one command.
         let mut all = RUNNING.lock().unwrap();
         forget_old(&mut all);
         match all.get(&key) {
@@ -577,22 +531,14 @@ fn run_shell(args: &Value, shell: &Shell) -> Result<Value, String> {
     }
 }
 
-/// The signal mask the core was started with, which `run_shell`'s commands get (#165), and the
-/// downloads it starts (#181). The core
-/// blocks Ctrl-C, SIGTERM and SIGHUP for its own thread to take, and a blocked mask survives exec:
-/// a command would otherwise ignore SIGINT and SIGTERM, and so would everything it starts. Unset
-/// outside the core, whose signals aren't blocked.
 #[cfg(unix)]
 static COMMAND_MASK: std::sync::OnceLock<libc::sigset_t> = std::sync::OnceLock::new();
 
-/// Set, once, the mask `run_shell`'s commands start with (`COMMAND_MASK`).
 #[cfg(unix)]
 pub fn set_command_mask(mask: libc::sigset_t) {
     let _ = COMMAND_MASK.set(mask);
 }
 
-/// Start `command` with the mask the core was started with (`COMMAND_MASK`), not the core's
-/// own; outside the core, as it is.
 pub fn with_command_mask(command: &mut std::process::Command) {
     #[cfg(unix)]
     with_mask(command, COMMAND_MASK.get().copied());
@@ -613,7 +559,6 @@ fn with_mask(command: &mut std::process::Command, mask: Option<libc::sigset_t>) 
     }
 }
 
-/// Start `command` in `cwd`, and a thread that reads its output until it ends or `timeout` kills it.
 #[cfg(unix)]
 fn start_shell(command: &str, cwd: &str, timeout: Duration, shell: &Shell) -> Result<Arc<Running>, String> {
     let mut command = shell_command(command);
@@ -655,8 +600,6 @@ fn start_shell(command: &str, cwd: &str, timeout: Duration, shell: &Shell) -> Re
     Ok(running)
 }
 
-/// Read a command's output into `running` until it has exited and its pipes are done (or the
-/// grace after its exit is over), killing it at `timeout`: its exit code, and whether it timed out.
 #[cfg(unix)]
 fn watch_shell(child: &mut std::process::Child, timeout: Duration, running: &Running) -> Result<(Option<i32>, bool), String> {
     let pid = child.id() as i32;
@@ -667,7 +610,6 @@ fn watch_shell(child: &mut std::process::Child, timeout: Duration, running: &Run
         if status.is_none() {
             status = child.try_wait().map_err(|e| format!("IOError: {e}"))?;
             if status.is_some() {
-                // A background job the command started can hold the pipes open after it exits.
                 drained_by = Some(Instant::now() + SHELL_DRAIN_GRACE);
             } else if !timed_out && Instant::now() >= deadline {
                 timed_out = true;
@@ -679,8 +621,6 @@ fn watch_shell(child: &mut std::process::Child, timeout: Duration, running: &Run
         if status.is_some() && (!open || drained_by.is_some_and(|by| Instant::now() >= by)) {
             break;
         }
-        // Locked only to add what was read, never while it waits: the call waiting for the command
-        // needs the lock to answer in time.
         for (i, bytes) in read_ready(&mut pipes, Duration::from_millis(50)) {
             running.state.lock().unwrap().captured[i].add(&bytes);
         }
@@ -693,8 +633,6 @@ trait ReadFd: Read + AsRawFd {}
 #[cfg(unix)]
 impl<T: Read + AsRawFd> ReadFd for T {}
 
-/// Wait up to `wait` for output on the open pipes and take what has come;
-/// a pipe at its end is dropped.
 #[cfg(unix)]
 fn read_ready(pipes: &mut [Option<Box<dyn ReadFd>>; 2], wait: Duration) -> Vec<(usize, Vec<u8>)> {
     let mut fds: Vec<libc::pollfd> = pipes.iter().flatten().map(|p| libc::pollfd { fd: p.as_raw_fd(), events: libc::POLLIN, revents: 0 }).collect();
@@ -726,7 +664,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_command_given_a_mask_starts_with_it_not_the_threads() {
-        // The blocked signals of `cat`'s own process, from its status.
         let blocked = |command: &mut std::process::Command| {
             let out = String::from_utf8(command.output().unwrap().stdout).unwrap();
             out.lines().find_map(|l| l.strip_prefix("SigBlk:")).unwrap().trim().to_owned()
@@ -736,7 +673,6 @@ mod tests {
             cat.arg("/proc/self/status");
             cat
         };
-        // On its own thread, which blocks SIGHUP as the core does (#181).
         std::thread::spawn(move || {
             // SAFETY: plain sigset and mask calls on this thread.
             let none = unsafe {

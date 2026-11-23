@@ -1,43 +1,18 @@
-//! juliaup, Julia's own version manager, as a way to get Endeavor's pinned Julia
-//! (`julia::Source::Own`). Where a computer has juliaup, Endeavor adds the pinned
-//! version as a channel (`juliaup add 1.12.6`) rather than download a second Julia
-//! of its own, so the person keeps one Julia manager, and `juliaup update` can't
-//! move notebooks off the tested version. The person's default and other channels
-//! stay as they were, except on a juliaup with no channels yet (one Endeavor just
-//! installed, say), where juliaup makes the first channel added its default. On
-//! Windows, where juliaup is the only way Endeavor gets Julia, it installs juliaup
-//! for this account first when there is none (no admin).
-//!
-//! juliaup is asked through `juliaup` itself, never through its `julia` launcher:
-//! on a juliaup with no setup yet, the launcher first downloads the latest Julia
-//! and makes it the default. Notebooks run the channel's real `julia`, not the
-//! launcher, so ending the runtime ends what it started (EndeavorMCP #55).
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// juliaup's id in the Microsoft Store, as its README installs it.
 #[cfg(windows)]
 const STORE_ID: &str = "9NJNWW8PVKMN";
-/// juliaup's App Installer file, for a computer whose Store is blocked.
 #[cfg(windows)]
 const APP_INSTALLER: &str = "https://install.julialang.org/Julia.appinstaller";
 
-/// How long each install route may take before the next is tried. A Store
-/// install can sit queued behind other updates for good.
 #[cfg(windows)]
 const INSTALL_LIMIT: Duration = Duration::from_secs(10 * 60);
-/// How long `juliaup add` may take: about 300 MB on a slow connection.
 const ADD_LIMIT: Duration = Duration::from_secs(45 * 60);
-/// How long juliaup may take to list or remove a channel.
 const LIST_LIMIT: Duration = Duration::from_secs(60);
-/// The pause before `juliaup add` is tried once more.
 const RETRY_PAUSE: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 5 });
 
-/// The `juliaup` program, if this computer has one: where juliaup's installer
-/// puts it, else on the PATH (on Windows, also the Store app's alias, which the
-/// PATH the app started with may not have yet).
 pub fn find() -> Option<PathBuf> {
     let home = std::env::home_dir().map(|home| home.join(".juliaup").join("bin").join(EXE));
     home.into_iter().find(|juliaup| exists(juliaup)).or_else(on_path)
@@ -48,8 +23,6 @@ const EXE: &str = "juliaup";
 #[cfg(windows)]
 const EXE: &str = "juliaup.exe";
 
-/// The login shell's `juliaup` (Homebrew's, or juliaup's own installer's when
-/// HOME's isn't where it put it).
 #[cfg(unix)]
 fn on_path() -> Option<PathBuf> {
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
@@ -66,41 +39,27 @@ fn on_path() -> Option<PathBuf> {
     path.into_iter().chain(local).map(|dir| dir.join(EXE)).find(|exe| exists(exe))
 }
 
-/// A Store app's alias is a reparse point that some checks can't follow, so
-/// ask only whether something is there.
 fn exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
-/// One of juliaup's channels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Channel {
-    /// The real `julia` it runs.
     pub julia: PathBuf,
-    /// It is juliaup's default, which juliaup won't remove.
     pub default: bool,
 }
 
-/// juliaup's channels as `juliaup api getconfig1` lists them, or None when juliaup couldn't say.
 pub fn listing(juliaup: &Path) -> Option<String> {
     run(Command::new(juliaup).args(["api", "getconfig1"]), LIST_LIMIT, &mut |_| {}).ok()
 }
 
-/// juliaup's channel `version`, if it has it and its `julia` is there.
 pub fn channel_julia(juliaup: &Path, version: &str) -> Option<Channel> {
     channel(&listing(juliaup)?, version).filter(|channel| channel.julia.is_file())
 }
 
-/// Add the channel `version` to juliaup, which downloads that Julia. `progress` hears how long it
-/// has taken so far. juliaup counts adding a channel it already has as done. A failure that wasn't
-/// the time limit is tried once more: on Windows a first install failed once with "Access is
-/// denied", and a retry after clearing juliaup's folder worked (EndeavorMCP #132). A retry in the
-/// same folder is likely to work too, since juliaup leaves no partial download, but hasn't been seen.
-/// The folder is the person's, so it is never cleared here.
 pub fn add(juliaup: &Path, version: &str, progress: &mut dyn FnMut(String)) -> Result<Channel, String> {
     let what = format!("Downloading Julia {version} with juliaup");
     progress(format!("{what}…"));
-    // The second try's ticks say it's the second ("… trying once more, 15 s so far").
     let add = |again: &str, progress: &mut dyn FnMut(String)| run(Command::new(juliaup).args(["add", version]), ADD_LIMIT, &mut |waited| progress(format!("{what}…{again} {} so far", minutes(waited))));
     let mut added = add("", progress);
     if let Err(Failed::Error(first)) = &added
@@ -117,13 +76,10 @@ pub fn add(juliaup: &Path, version: &str, progress: &mut dyn FnMut(String)) -> R
     })
 }
 
-/// Remove juliaup's channel `version`, and the Julia it installed.
 pub fn remove(juliaup: &Path, version: &str) -> Result<(), String> {
     run(Command::new(juliaup).args(["remove", version]), LIST_LIMIT, &mut |_| {}).map(|_| ()).map_err(|e| format!("juliaup couldn't remove Julia {version} ({e})."))
 }
 
-/// Install juliaup for this account: from the Microsoft Store with winget, else
-/// from its App Installer file. Neither needs admin. The `juliaup.exe` installed.
 #[cfg(windows)]
 pub fn install(progress: &mut dyn FnMut(String)) -> Result<PathBuf, String> {
     progress("Installing juliaup, which installs Julia…".into());
@@ -140,15 +96,11 @@ pub fn install(progress: &mut dyn FnMut(String)) -> Result<PathBuf, String> {
         }
         Err(store) => {
             eprintln!("Installing juliaup from the Microsoft Store failed ({store}); trying its App Installer file.");
-            // Add-AppxPackage's own error is several lines that end with its error
-            // id, so print the message alone, on one line.
             let script = format!(
                 "try {{ Add-AppxPackage -AppInstallerFile '{APP_INSTALLER}' -ErrorAction Stop }} \
                  catch {{ [Console]::Error.WriteLine(($_.Exception.Message -replace '\\s+', ' ').Trim()); exit 1 }}"
             );
             let install = || run(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]), INSTALL_LIMIT, &mut |_| {});
-            // One more try after a failure that wasn't the time limit: in the app's CI it
-            // failed once in sixteen runs on Windows Server 2022, cause unknown.
             let file = install().or_else(|first| {
                 if let Failed::TimedOut(_) = first {
                     return Err(first);
@@ -175,11 +127,8 @@ pub fn install(progress: &mut dyn FnMut(String)) -> Result<PathBuf, String> {
     })
 }
 
-/// Why a command `run` started didn't succeed.
 enum Failed {
-    /// It ran past its time limit and was stopped.
     TimedOut(Duration),
-    /// It couldn't start, or it failed: its last words.
     Error(String),
 }
 
@@ -192,17 +141,12 @@ impl std::fmt::Display for Failed {
     }
 }
 
-/// Run `command` without a window or input, for at most `limit`, telling
-/// `tick` every 15 s how long it has run; its output, or why it failed.
 fn run(command: &mut Command, limit: Duration, tick: &mut dyn FnMut(Duration)) -> Result<String, Failed> {
     use std::io::Read;
     crate::client::no_window(command);
-    // `juliaup add` downloads Julia: with the core's mask it would go on after a Ctrl-C (#181).
     crate::host_tools::with_command_mask(command);
-    // juliaup's errors end in a backtrace when these ask for one, and the last line is what's shown.
     command.env_remove("RUST_BACKTRACE").env_remove("RUST_LIB_BACKTRACE");
     let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| Failed::Error(e.to_string()))?;
-    // Read both pipes while it runs, so a full pipe can't stall it.
     let reader = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
             let mut text = Vec::new();
@@ -236,11 +180,8 @@ fn run(command: &mut Command, limit: Duration, tick: &mut dyn FnMut(Duration)) -
     if status.success() {
         return Ok(stdout);
     }
-    // All of what it said goes to the log; the error is its last words, from stderr if it wrote any
-    // (winget writes to stdout).
     let program = Path::new(command.get_program()).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let said: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    // The last 40 lines: juliaup's error chain comes at the end.
     for line in &said[said.len().saturating_sub(40)..] {
         eprintln!("{program}: {line}");
     }
@@ -248,9 +189,6 @@ fn run(command: &mut Command, limit: Duration, tick: &mut dyn FnMut(Duration)) -
     Err(Failed::Error(last_words(&stderr).or_else(|| last(stdout.as_str())).unwrap_or_else(|| status.to_string())))
 }
 
-/// What a failed command said last. juliaup's errors end in a chain ("Error: …", "Caused by:", then
-/// "0: <the step that failed>", …, "N: <the operating system's error>"): its last line alone ("1: Access
-/// is denied. (os error 5)") doesn't say which step failed, so the step that failed goes first.
 fn last_words(stderr: &str) -> Option<String> {
     let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let chain = lines.iter().position(|l| *l == "Caused by:").map(|at| &lines[at + 1..]).unwrap_or_default();
@@ -263,7 +201,6 @@ fn last_words(stderr: &str) -> Option<String> {
     }
 }
 
-/// "4 min", or "30 s" under a minute.
 fn minutes(time: Duration) -> String {
     match time.as_secs() {
         s if s < 60 => format!("{s} s"),
@@ -271,8 +208,6 @@ fn minutes(time: Duration) -> String {
     }
 }
 
-/// The channel named `version` in `juliaup api getconfig1`'s JSON (`DefaultChannel` and
-/// `OtherChannels`): its `File`, that channel's real julia, and whether it is the default.
 pub fn channel(listed: &str, version: &str) -> Option<Channel> {
     let config: serde_json::Value = serde_json::from_str(listed.trim()).ok()?;
     let default = std::iter::once((&config["DefaultChannel"], true));
@@ -281,9 +216,6 @@ pub fn channel(listed: &str, version: &str) -> Option<Channel> {
     Some(Channel { julia: PathBuf::from(found["File"].as_str()?), default })
 }
 
-/// The real julia of juliaup's default channel in `juliaup api getconfig1`'s JSON: `Some(None)` when
-/// juliaup has no default yet (no channel was ever added), None when the JSON says neither (it isn't
-/// the listing, or the default has no `File`, as a linked channel may not).
 pub fn default_julia(listed: &str) -> Option<Option<PathBuf>> {
     let config: serde_json::Value = serde_json::from_str(listed.trim()).ok()?;
     match config.get("DefaultChannel")? {
@@ -300,7 +232,6 @@ mod tests {
     fn the_default_julia_is_the_default_channel_s_file_or_none_before_any_channel() {
         let listed = serde_json::json!({ "DefaultChannel": { "Name": "release", "File": "/j/julia-1.13.4/bin/julia" }, "OtherChannels": [] }).to_string();
         assert_eq!(default_julia(&listed), Some(Some(PathBuf::from("/j/julia-1.13.4/bin/julia"))));
-        // What juliaup 1.24 answers before its launcher first runs (EndeavorMCP #512).
         assert_eq!(default_julia(r#"{"DefaultChannel":null,"OtherChannels":[]}"#), Some(None));
         assert_eq!(default_julia(r#"{"DefaultChannel":{"Name":"mine"}}"#), None);
         assert_eq!(default_julia("Error: Failed to load configuration file"), None);
@@ -327,7 +258,6 @@ mod tests {
     fn a_juliaup_error_says_which_step_failed() {
         let error = "    Checking for new Julia versions\n  Installing Julia 1.12.6+0.x64.w64.mingw32\nError: Failed to extract downloaded file from url `https://example.org/julia.tar.gz`.\n\nCaused by:\n    0: Failed to move extracted archive to 'C:\\d\\juliaup\\julia-temp-3KkKKt'. Previous installation has been restored.\n    1: Access is denied. (os error 5)\n";
         assert_eq!(last_words(error).unwrap(), r"Failed to move extracted archive to 'C:\d\juliaup\julia-temp-3KkKKt'. Previous installation has been restored: Access is denied. (os error 5)");
-        // anyhow numbers the causes only when there are two or more.
         assert_eq!(last_words("Error: no such channel\n\nCaused by:\n    The channel 9.9 isn't known\n").unwrap(), "The channel 9.9 isn't known");
         let three = "Error: Failed to install\n\nCaused by:\n    0: Failed to extract\n    1: Failed to move\n    2: Access is denied. (os error 5)\n";
         assert_eq!(last_words(three).unwrap(), "Failed to move: Access is denied. (os error 5)", "the innermost step, not the first");
@@ -335,7 +265,6 @@ mod tests {
         assert_eq!(last_words("\n"), None);
     }
 
-    /// A stand-in juliaup whose `add` fails as many times as `fails` says, with Windows' error.
     #[cfg(unix)]
     fn failing_juliaup(name: &str, fails: u32) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("endeavor-juliaup-{name}-{}", std::process::id()));

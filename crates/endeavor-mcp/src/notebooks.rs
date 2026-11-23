@@ -1,14 +1,3 @@
-//! What the core keeps about each open notebook (docs/runtime-core.md): the
-//! notebook tools' rules (see `tools`), staging and read receipts, who last
-//! changed each cell and the code the agent's edits replaced, idle stop, each
-//! agent session's one notebook, and the `/events` stream the app follows.
-//!
-//! The engine's adapter (Julia's, for Pluto) answers calls on its
-//! `POST /adapter` (`snapshot`, `graph`, `apply`, `run` and the rest) and says
-//! when a notebook changed on its `GET /notifications` stream; the core reads a
-//! fresh snapshot each time it tells the app anything. A notebook's state goes
-//! when it shuts down, except its entry in `idle_stopped`.
-
 pub(crate) mod engines;
 
 mod r;
@@ -38,39 +27,26 @@ pub use tools::{Reply, WAIT_FLOOR_SECONDS, WAIT_SECONDS};
 pub(crate) use tools::{screenshot_result, snapshot_may_help};
 
 const IDLE_CHECK: Duration = Duration::from_secs(300);
-/// How long the result of an open that outlasted its call is kept for the same call made again.
 const OPENING_KEPT: Duration = Duration::from_secs(600);
 
-/// Hours without activity after which a notebook stops, unless the caller sets another.
 pub const IDLE_HOURS: f64 = 48.0;
 
-/// How often to look for idle notebooks. ENDEAVOR_IDLE_CHECK_SECS: tests look
-/// more often than every five minutes.
 pub fn idle_check() -> Duration {
     std::env::var("ENDEAVOR_IDLE_CHECK_SECS").ok().and_then(|s| s.parse().ok()).map_or(IDLE_CHECK, Duration::from_secs_f64)
 }
 
-/// The engine's adapter, once it answers.
 pub trait Upstream: Send + Sync {
-    /// The reply to one `POST /adapter` call.
     fn adapter(&self, raw: &[u8]) -> io::Result<String>;
-    /// The engine's notification stream, from its start.
     fn notifications(&self) -> io::Result<Box<dyn BufRead + Send>>;
-    /// Why the engine ended, once it stopped answering: its process's exit and last error, if known.
     fn why_ended(&self) -> Option<String> {
         None
     }
 }
 
-/// Starts an engine's adapter: what answers for it once it's up, or why it couldn't start. The
-/// call came at the `Instant` and waits up to the `Duration` from then, however long it queued
-/// behind other starts (#175); Julia's start waits no longer than that.
 pub type Starter = Box<dyn Fn(Backend, Instant, Duration) -> Result<Arc<dyn Upstream>, String> + Send + Sync>;
 
-/// Julia's bridge, once it answers.
 pub struct Julia {
     pub port: OnceLock<u16>,
-    /// The engines' key the core gave Julia, not the MCP bearer token.
     pub(crate) token: String,
 }
 
@@ -95,7 +71,6 @@ impl Upstream for Julia {
     fn notifications(&self) -> io::Result<Box<dyn BufRead + Send>> {
         let port = *self.port.get().ok_or(io::ErrorKind::NotConnected)?;
         let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-        // HTTP/1.0: the stream runs to the end of the connection, unchunked.
         write!(stream, "GET /notifications HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {}\r\n\r\n", self.token)?;
         let mut reader = BufReader::new(stream);
         let head = Head::read(&mut reader)?.ok_or(io::ErrorKind::UnexpectedEof)?;
@@ -106,79 +81,44 @@ impl Upstream for Julia {
     }
 }
 
-/// A change to a cell through the tools.
 struct Change {
     owner: String,
     seq: u64,
-    /// When, by the core's clock.
     at: f64,
 }
 
 #[derive(Default)]
 struct NotebookState {
     path: String,
-    /// Each cell's code (hashed) as last seen, and who made it so: "agent",
-    /// "user", or "" if it hasn't changed since the core first saw it.
     authors: HashMap<String, (u64, &'static str)>,
-    /// Each unrun cell's code before the agent's first edit since it last ran.
     befores: HashMap<String, String>,
-    /// The engine's `seq` after the agent's last edit of each cell: a snapshot
-    /// or notification numbered below it may still show the code from before.
     edited_at: HashMap<String, u64>,
     last_active: Option<f64>,
     kept_alive: bool,
-    /// Cells edited through the tools and not run since, with when. A cell
-    /// stops being pending once it runs, however it runs (the tools, Pluto's
-    /// own run button, a reactive re-run).
     pending: HashMap<String, f64>,
-    /// When the tools last changed each cell, kept until the tools run it. A
-    /// cell here that has run since ran the agent's code some other way (the
-    /// user's run reached it), so an approved run of it needn't run it again.
     tool_edits: HashMap<String, f64>,
-    /// Cells the user's run reached after the page asked first (Run anyway),
-    /// with their `last_run` before it and when the app said so: an approved
-    /// run of them that comes right after needn't run them again, edited by
-    /// the tools or not.
     user_runs: HashMap<String, (f64, f64)>,
-    /// What each agent session last read of each cell: (owner, cell) => (code,
-    /// seq, the session's call count (`State::calls`) when it was last sent that
-    /// code). Per owner, so one session's reads and edits aren't another's.
     reads: HashMap<(String, String), (String, u64, u64)>,
-    /// Which session last changed each cell through the tools, and when.
     changes: HashMap<String, Change>,
-    /// The runs sessions started that haven't ended (`run_finished`), each with its cells that
-    /// hadn't finished when the tool answered: what that session's Stop interrupts.
     started: Vec<Started>,
-    /// Runs whose `run_finished` came before the tool that started them recorded them (a quick
-    /// run), so they aren't recorded after; the latest `ENDED_KEPT`.
     ended: VecDeque<String>,
-    /// The state's `seq` when a tool last wrote here through `with_state`: the app's summary
-    /// keeps a state written after its snapshots were taken (#376).
     touched: u64,
 }
 
-/// A run a session started (`NotebookState::started`). `run` is the engine's id for it; an
-/// engine that gives none says only which cells finished, and its cells count until then.
 struct Started {
     owner: String,
     run: Option<String>,
     cells: HashSet<String>,
-    /// The dependents it will rerun (`execution.will_run`), with when each last ran: the
-    /// engine queues one only once its parent's result is in, so until then it looks idle.
     follows: HashMap<String, f64>,
 }
 
 const ENDED_KEPT: usize = 64;
 
 impl NotebookState {
-    /// Whether a session read or changed one of its cells, or a tool wrote here, after the state's `seq` was `since`.
     fn touched_after(&self, since: u64) -> bool {
         self.touched > since || self.reads.values().map(|(_, seq, _)| *seq).chain(self.changes.values().map(|c| c.seq)).any(|seq| seq > since)
     }
 
-    /// Code that changed without the agent's tools writing it was changed by
-    /// the user. Code the engine read (at `seq`) before the agent's last edit
-    /// of the cell says nothing new.
     fn author(&mut self, cell: &str, code: &str, seq: Option<u64>) -> Option<&'static str> {
         if let (Some(seq), Some(&edited)) = (seq, self.edited_at.get(cell))
             && seq < edited
@@ -195,7 +135,6 @@ impl NotebookState {
         Some(author).filter(|a| !a.is_empty())
     }
 
-    /// The before-text while the cell is unrun and differs; forgotten once it runs.
     fn before(&mut self, cell: &str, code: &str, unrun: bool) -> Option<String> {
         if !unrun {
             self.befores.remove(cell);
@@ -204,8 +143,6 @@ impl NotebookState {
         self.befores.get(cell).filter(|before| *before != code).cloned()
     }
 
-    /// The agent's tools just wrote this cell's code; `before` is what it
-    /// replaced, `seq` the engine's after the change.
     fn agent_edited(&mut self, cell: &str, before: &str, code: &str, seq: Option<u64>) {
         self.authors.insert(cell.to_owned(), (hash(code), "agent"));
         if let Some(seq) = seq {
@@ -214,9 +151,6 @@ impl NotebookState {
         self.befores.entry(cell.to_owned()).or_insert_with(|| before.to_owned());
     }
 
-    /// The pending cells, in notebook order, then any no longer in it (a cell
-    /// Pluto's page or a reload removed stays pending until a run prunes it).
-    /// Cells that ran since their edit stop being pending.
     fn pending_run(&mut self, nb: &Snapshot) -> Vec<String> {
         self.pending.retain(|id, edited| !nb.cells.get(id).is_some_and(|c| c.ran_since(*edited)));
         let mut ids: Vec<String> = nb.order.iter().filter(|id| self.pending.contains_key(*id)).cloned().collect();
@@ -226,7 +160,6 @@ impl NotebookState {
         ids
     }
 
-    /// Forget pending cells no longer in the notebook.
     fn prune(&mut self, nb: &Snapshot) {
         self.pending.retain(|id, _| nb.cells.contains_key(id));
     }
@@ -234,53 +167,28 @@ impl NotebookState {
 
 struct State {
     notebooks: HashMap<String, NotebookState>,
-    /// Orders reads against changes; two can share a clock reading.
     seq: u64,
     idle_limit_hours: f64,
-    /// Notebooks the idle check stopped, by canonical path, until they open
-    /// again: the app reads these to say why a notebook stopped.
     idle_stopped: Vec<(String, Value)>,
-    /// One notebook per agent session: owner => the canonical path it works on.
-    /// The app binds a session started from an existing notebook; otherwise
-    /// the first notebook the session opens or creates binds it.
     bindings: HashMap<String, String>,
-    /// The sessions that may work on several notebooks (`allow_several`), and the notebooks each
-    /// opened or created: their ids, so that one closed and opened again elsewhere isn't one of them.
     several: HashMap<String, HashSet<String>>,
-    /// The sessions that closed their own notebook with `close_notebook`: each stays bound to it
-    /// though it is no longer open, so closing it isn't a way round `one_notebook` (#520). Cleared
-    /// when the session opens it again or the app binds the session anew.
     closed_own: HashSet<String>,
-    /// When each agent session last made a tool call, for `recent_sessions` and
-    /// to forget sessions that went quiet. Made when a session is bound or
-    /// makes a call; dropped with its binding, or `SESSION_KEPT` after its
-    /// last call or its binding (and then its binding goes too).
     seen: HashMap<String, Seen>,
-    /// How many notebook tool calls each session has made: a read is recent for `RECENT_CALLS` of them.
     calls: HashMap<String, u64>,
 }
 
 struct Seen {
-    /// The time of its last `tools/call`; nothing else counts.
     last_call: Option<f64>,
-    /// When the record was made.
     since: f64,
-    /// Whether its last call came from the app (`mcp::Caller::app`), or from the plugin.
     app: bool,
-    /// The front process it last called through, where the front said (`mcp::Front`).
     front: Option<crate::mcp::Front>,
 }
 
-/// How long a session's record outlasts its last call.
 const SESSION_KEPT: f64 = 7.0 * 24.0 * 3600.0;
 
-/// How recently a plugin session whose front didn't say which process it is must have called to count
-/// as still in the runtime (`Notebooks::shared`): a front from before `mcp::Front`, or a client
-/// connected straight to `serve`.
 const SHARED_WITHOUT_FRONT: f64 = 30.0 * 60.0;
 
 impl State {
-    /// A session's record, made now if it has none. Old records go when a new one is made.
     fn record(&mut self, owner: &str, now: f64) -> &mut Seen {
         if !self.seen.contains_key(owner) {
             self.forget_old(now);
@@ -288,12 +196,10 @@ impl State {
         self.seen.entry(owner.to_owned()).or_insert(Seen { last_call: None, since: now, app: false, front: None })
     }
 
-    /// A session is bound or opens a notebook: its record is kept from now on, whether it was old or not.
     fn record_bound(&mut self, owner: &str, now: f64) {
         self.record(owner, now).since = now;
     }
 
-    /// Drop the records of sessions that haven't called in a week, and their bindings.
     fn forget_old(&mut self, now: f64) {
         let bindings = &mut self.bindings;
         let several = &mut self.several;
@@ -310,8 +216,6 @@ impl State {
     }
 }
 
-/// A notebook's open or creation in its engine, which goes on after the call that asked for it
-/// stopped waiting: what it was asked with, and its result and when it came, once it has.
 struct Opening {
     params: Value,
     done: Mutex<Option<(Result<Value, String>, Instant)>>,
@@ -326,45 +230,25 @@ struct Events {
 
 pub struct Notebooks {
     engines: Arc<Engines>,
-    /// Where each engine's notifications go, once `start` has run.
     notify: OnceLock<Sender<Value>>,
-    /// Starts an engine other than Pluto's, the first time one of its notebooks is opened or made (the core sets it).
     pub starter: OnceLock<Starter>,
-    /// Held while an engine starts, so it starts once.
     starting: Mutex<()>,
-    /// What an engine's start has to tell the agent: warnings for the next notebook opened or made.
     notices: Mutex<Vec<String>>,
     clock: Box<dyn Fn() -> f64 + Send + Sync>,
     state: Mutex<State>,
-    /// Held while reading the engine's state and telling the app, so events go out in order.
     publishing: Mutex<()>,
     events: Mutex<Events>,
-    /// The app build this runtime came from, which the app compares with its own.
     pub build: OnceLock<String>,
-    /// Whether the runtime ends itself once no notebook has been open for the idle limit (`core::exit_when_idle`).
-    /// It can be switched on later, when the app quits and leaves the runtime to the plugin (`core::leave_to_plugin`).
     pub exits_when_idle: std::sync::atomic::AtomicBool,
-    /// Set once the runtime is ending: its engine may be gone mid-call, which is no news for anyone.
     pub stopping: std::sync::atomic::AtomicBool,
-    /// Runs waiting for the user's answer.
     pub asks: Asks,
-    /// Each agent session's notebook kind, when its client said it (`endeavor/set_session_folder`'s
-    /// `kind`): the engine of a `new_notebook` without a path. Pluto's for a session with none.
     kinds: Mutex<HashMap<String, Backend>>,
-    /// The sessions in the app's Auto mode, whose runs install a Julia notebook's new packages
-    /// without asking the user (#397). Every other caller's ask first.
     auto: Mutex<HashSet<String>>,
-    /// Opens and creations under way or not yet collected, by what they open (`open_waited`).
     openings: Mutex<HashMap<String, Arc<Opening>>>,
-    /// Opens and creations a session's call stopped waiting for and no call has collected: the
-    /// notebook each makes is that session's though no call collects it (`settle`, #333).
     left: Mutex<Vec<(String, Arc<Opening>)>>,
-    /// Agents' calls on a notebook under way (`running`): owner, JSON-RPC id, notebook, and
-    /// whether the call runs code. The agent's cancellation of one is its Stop (`cancelled`).
     runs: Mutex<Vec<(String, Value, String, bool)>>,
 }
 
-/// An agent's call on a notebook, noted until it drops (`Notebooks::running`).
 pub struct Running<'a> {
     notebooks: &'a Notebooks,
     owner: String,
@@ -380,7 +264,6 @@ impl Drop for Running<'_> {
     }
 }
 
-/// One call to the engines' adapter (`message`): its result, or the error it raised.
 fn adapter_call(engines: &Engines, message: &Value) -> Result<Value, String> {
     let reply = engines.adapter(message.to_string().as_bytes()).map_err(|e| e.to_string())?;
     let mut reply: Value = serde_json::from_str(&reply).map_err(|e| e.to_string())?;
@@ -390,9 +273,7 @@ fn adapter_call(engines: &Engines, message: &Value) -> Result<Value, String> {
     }
 }
 
-/// One notebook as the engine's `snapshot` reports it.
 struct Snapshot {
-    /// The engine's `seq` when it read the notebook.
     seq: Option<u64>,
     id: String,
     path: String,
@@ -400,16 +281,9 @@ struct Snapshot {
     execution_allowed: bool,
     safe_preview: bool,
     process_status: Value,
-    /// Its own Julia process ended by itself (not stopped by Pluto or the
-    /// app) and hasn't been restarted: the cells that were running then.
     exited: Option<Vec<String>>,
-    /// Pluto's package step while one is under way (`package_step` in the
-    /// runtime): the cells wait, queued, until it ends.
     packages: Option<Value>,
-    /// Ember's lazy mode: a run marks the cells that depend on it stale
-    /// instead of rerunning them (#196). Pluto has no such mode.
     lazy: bool,
-    /// An R notebook's snapshot date, which its packages' versions come from (#201). Pluto has none.
     package_date: Option<String>,
     cells: HashMap<String, Cell>,
 }
@@ -420,42 +294,21 @@ struct Cell {
     running: bool,
     queued: bool,
     errored: bool,
-    /// When its last run ended (Unix seconds, 0 if it never ran) and how long
-    /// it took (nanoseconds).
     last_run: f64,
     runtime: f64,
-    /// Its output as the tools show it, and the structured error if it errored.
     output: String,
     error: Option<Value>,
-    /// Boilerplate the tools don't show (Pluto's package cells and the like).
     hidden: bool,
     markdown: bool,
-    /// What the engine itself knows: a result made before an ancestor last ran
-    /// (Ember's), and a cell that hasn't run since the notebook started (Ember's
-    /// restart leaves every cell so). Pluto's are always false.
     stale: bool,
     not_run: bool,
-    /// A cell the engine won't run until something changes: Ember's disabled
-    /// cells and their dependents (`graph$off`). Pluto's are `hidden` (#232).
     off: bool,
-    /// The notes the engine shows under the cell, from its last run or its code, each
-    /// "kind::text" like a tool warning: Ember's `changed_in_place`,
-    /// `settings_found`, `load_note` (#207), `untracked_read` (Ember #357) and `untracked_file` (#264);
-    /// Pluto's `logged_error`, `logged_warning`, `logged_info` and `printed`, what the cell's
-    /// `@error`/`@warn`/`@info` and `println` gave (#257).
     notes: Vec<String>,
-    /// The inputs (emberui) the cell's last run made, one line each, as `read_cell` shows them:
-    /// "n: slider 1 to 10, value 3". Pluto's have none.
     inputs: Vec<String>,
-    /// The prompt a running cell waits on, `{text, choices}`: Ember's
-    /// `readline()`, `menu()` and the like (Ember #186). Pluto has none.
     prompt: Option<Value>,
 }
 
 impl Cell {
-    /// A run that started after `edited` and has finished. The engine stamps a
-    /// run when it ends, so a run already under way at the edit (of the old
-    /// code) ends after it; its duration gives its start.
     fn ran_since(&self, edited: f64) -> bool {
         !(self.running || self.queued) && self.last_run > 0.0 && self.last_run - self.runtime / 1e9 >= edited
     }
@@ -503,42 +356,26 @@ impl Snapshot {
         })
     }
 
-    /// Pluto marks every cell `queued` when it loads a notebook, ahead of the
-    /// planned run; in safe preview that run never happens, so the flag
-    /// lingers. A queued cell only counts while the notebook is running
-    /// something or installing the packages its run needs.
     fn is_running(&self, cell: &Cell) -> bool {
         cell.running || (cell.queued && (self.packages.is_some() || self.cells.values().any(|c| c.running)))
     }
 
-    /// The cell waiting on a prompt, if one is: nothing else runs until it is
-    /// answered or the run is interrupted.
     fn prompted(&self) -> Option<&String> {
         self.order.iter().find(|id| self.cells.get(*id).is_some_and(|c| c.running && c.prompt.is_some()))
     }
 
-    /// Whether its cells wait on a package step: one is under way and a cell is queued.
     fn installing(&self) -> bool {
         self.packages.is_some() && self.cells.values().any(|c| c.queued)
     }
 
-    /// Whether its package step stopped before a large download and waits for the user's OK
-    /// (Ember #37): nothing installs until `approve_install`, and the cells that need the held
-    /// packages wait with it. Cells that don't need them still run (`held`).
     fn asking(&self) -> bool {
         self.packages.as_ref().is_some_and(|p| p["step"] == "asking")
     }
 
-    /// Whether it is asking and nothing is running: what is left waits for the OK, so nothing
-    /// changes until `approve_install` and nothing is waited for. While a cell that doesn't need
-    /// the held packages runs, it isn't held yet.
     fn held(&self) -> bool {
         self.asking() && !self.cells.values().any(|c| c.running)
     }
 
-    /// What `list_notebooks` says of it; `this_session`: it's the caller's
-    /// own notebook. `exited` only while its own Julia has ended by itself. Cells held for the
-    /// user's OK to a package aren't running: they wait, queued, as read_cell says (#506).
     fn summary(&self, pending_run: &[String], this_session: bool) -> Value {
         let held = self.held();
         let running: Vec<&String> = self.order.iter().filter(|id| self.cells.get(*id).is_some_and(|c| self.is_running(c) && !held)).collect();
@@ -563,12 +400,9 @@ impl Snapshot {
     }
 }
 
-/// A notebook's dependency graph as the engine last analysed it.
 #[derive(Default)]
 struct Graph {
-    /// In the engine's order.
     cells: Vec<Node>,
-    /// The cells that can run, in the order they run.
     order: Vec<String>,
 }
 
@@ -577,16 +411,11 @@ struct Node {
     definitions: Vec<String>,
     functions: Vec<String>,
     references: Vec<String>,
-    /// The cells this one depends on directly, and those depending on it.
     upstream: Vec<String>,
     downstream: Vec<String>,
-    /// The packages it loads, sorted.
     packages: Vec<String>,
 }
 
-/// What to ask of `graph`: a fresh analysis of the notebook as it is now,
-/// Pluto's page's dependency cache brought up to date first, each cell's
-/// edges, each cell's packages.
 #[derive(Clone, Copy, Default)]
 struct GraphQuery {
     fresh: bool,
@@ -598,7 +427,6 @@ struct GraphQuery {
 impl Graph {
     fn parse(value: &Value) -> Graph {
         let names = |v: &Value| v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
-        // Pluto's analysis names each anonymous function `__ExprExpl_anon__<random>`.
         let defined = |v: &Value| names(v).into_iter().filter(|n| !n.starts_with("__ExprExpl_anon__")).collect::<Vec<_>>();
         let cells = value["cells"].as_array().into_iter().flatten().filter_map(|c| {
             Some(Node {
@@ -618,7 +446,6 @@ impl Graph {
         self.cells.iter().find(|n| n.id == id)
     }
 
-    /// What a cell defines, as it's named to the user: up to three names.
     fn name(&self, id: &str) -> Option<String> {
         let node = self.node(id)?;
         let mut defs: Vec<&str> = node.definitions.iter().chain(&node.functions).map(String::as_str).collect();
@@ -627,12 +454,10 @@ impl Graph {
         (!defs.is_empty()).then(|| defs[..defs.len().min(3)].join(", "))
     }
 
-    /// Every cell the given ones depend on, directly or not.
     fn upstream_of(&self, from: &[String]) -> HashSet<String> {
         self.closure(from, |n| &n.upstream)
     }
 
-    /// Every cell depending on the given ones, directly or not.
     fn downstream_of(&self, from: &[String]) -> HashSet<String> {
         self.closure(from, |n| &n.downstream)
     }
@@ -652,7 +477,6 @@ impl Graph {
 }
 
 impl Notebooks {
-    /// With Pluto's engine (`pluto`) if Julia runs already; else it joins when Julia starts.
     pub fn new(pluto: Option<Arc<dyn Upstream>>, clock: Box<dyn Fn() -> f64 + Send + Sync>) -> Notebooks {
         Notebooks {
             asks: Asks::new(clock()),
@@ -676,7 +500,6 @@ impl Notebooks {
         }
     }
 
-    /// Follow the engine's notifications and check for idle notebooks, once it answers.
     pub fn start(self: &Arc<Self>) {
         let (tx, rx) = mpsc::channel();
         for (backend, upstream) in self.engines.parts() {
@@ -695,8 +518,6 @@ impl Notebooks {
         });
     }
 
-    /// An engine, once it runs: calls for its notebooks go to it, and its notifications are followed.
-    /// Nothing if it's there already.
     pub fn add_engine(&self, backend: Backend, upstream: Arc<dyn Upstream>) {
         if self.engines.add(backend, upstream.clone())
             && let Some(tx) = self.notify.get()
@@ -705,23 +526,18 @@ impl Notebooks {
         }
     }
 
-    /// Say `warning` with the next notebook opened or made.
     pub fn warn_next(&self, warning: String) {
         self.notices.lock().unwrap().push(warning);
     }
 
-    /// What to say with this notebook opened or made, said once.
     fn take_notices(&self) -> Vec<String> {
         std::mem::take(&mut *self.notices.lock().unwrap())
     }
 
-    /// The engine notebook `id` is open in.
     pub fn backend_of(&self, id: &str) -> Backend {
         self.engines.backend_of(id)
     }
 
-    /// Start `backend`'s engine unless it runs. Julia keeps its own start in order (core.rs), and can
-    /// take minutes; the other engines' starts are taken one at a time here.
     pub(crate) fn start_engine(&self, backend: Backend, wait: Duration) -> Result<(), String> {
         if self.engines.has(backend) {
             return Ok(());
@@ -737,16 +553,13 @@ impl Notebooks {
         Ok(())
     }
 
-    /// Pass one engine's notifications on to `tx`, from each (re)connection of its stream on.
     fn follow(&self, backend: Backend, upstream: Arc<dyn Upstream>, tx: Sender<Value>) {
         let engines = self.engines.clone();
         std::thread::spawn(move || {
-            // Until another engine than Pluto's is dropped or replaced: a new one has its own follower.
             while engines.is_current(backend, &upstream) {
                 let stream = match upstream.notifications() {
                     Ok(stream) => stream,
                     Err(_) if backend != Backend::Pluto && let Err(e) = upstream.adapter(br#"{"method":"status","params":{}}"#) => {
-                        // Not answering at all: its notebooks went with it.
                         eprintln!("{} notebooks' engine stopped answering ({e})", engines::language(backend));
                         engines.drop_engine(backend, &upstream);
                         let _ = tx.send(json!({ "method": "resync" }));
@@ -758,7 +571,6 @@ impl Notebooks {
                     }
                 };
                 {
-                    // What changed while no stream was open.
                     let _ = tx.send(json!({ "method": "resync" }));
                     for line in stream.lines().map_while(Result::ok) {
                         if let Some(message) = line.strip_prefix("data: ").and_then(|m| serde_json::from_str::<Value>(m).ok()) {
@@ -777,7 +589,6 @@ impl Notebooks {
         });
     }
 
-    /// Act on notifications as they come, telling the app once per burst.
     fn handle_notifications(self: Arc<Self>, rx: Receiver<Value>) {
         while let Ok(first) = rx.recv() {
             let mut publish = self.notified(&first);
@@ -790,7 +601,6 @@ impl Notebooks {
         }
     }
 
-    /// Act on one notification from the engine; whether the app should hear now.
     fn notified(self: &Arc<Self>, message: &Value) -> bool {
         let params = &message["params"];
         let id = params["notebook_id"].as_str().unwrap_or_default().to_owned();
@@ -807,7 +617,6 @@ impl Notebooks {
             }
             "notebook_shut_down" => {
                 state.notebooks.remove(&id);
-                // Pluto is still tidying up when it says so.
                 let notebooks = self.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(200));
@@ -827,11 +636,6 @@ impl Notebooks {
                 }
                 true
             }
-            // A run the tools didn't wait for ended: none of its cells is a session's run that
-            // its Stop interrupts, even one that a later run (a restart's) queued again before it
-            // ended. Its cells stay as staged as they are: a staged cell stops being staged once
-            // it has run since its edit (`pending_run`), so an edit made after a cell finished
-            // but before this came stays staged (#231).
             "run_finished" => {
                 if let Some(notebook) = state.notebooks.get_mut(&id) {
                     let finished: Vec<&str> = params["cells"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -856,15 +660,12 @@ impl Notebooks {
                 }
                 true
             }
-            // Its process ended: no run started before goes on.
             "process_exited" => {
                 if let Some(notebook) = state.notebooks.get_mut(&id) {
                     notebook.started.clear();
                 }
                 true
             }
-            // Seen as each state comes, so an edit made and undone between two
-            // events still counts as the user's.
             "cell_state" => {
                 if let Some(notebook) = state.notebooks.get_mut(&id) {
                     for cell in params["cells"].as_array().into_iter().flatten() {
@@ -880,13 +681,10 @@ impl Notebooks {
         }
     }
 
-    /// Whether Pluto has notebook `id` open: the notebook view connects only to one it has.
     pub fn open_in(&self, id: &str) -> Option<wire::backend::Backend> {
         self.snapshots().ok()?.iter().find(|nb| nb.id == id).map(|nb| engines::of_path(&nb.path))
     }
 
-    /// Ember's page for the notebook view, from R's adapter (`page_bundle`), for notebook `id`,
-    /// which is open in R.
     pub fn ember_page(&self, id: &str) -> Result<String, String> {
         let reply = self.call("page_bundle", json!({ "notebook_id": id })).map_err(|e| match e.trim_start_matches("ArgumentError: ").split_once("::") {
             Some(("update_ember", said)) => format!("update_ember: {said}"),
@@ -895,24 +693,14 @@ impl Notebooks {
         reply["html"].as_str().map(str::to_owned).ok_or_else(|| "R couldn't make Ember's page: no page".to_owned())
     }
 
-    /// One call to the engine's adapter: its result, or the error it raised.
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         adapter_call(&self.engines, &json!({ "method": method, "params": params }))
     }
 
-    /// Whether an open or creation for `key` is under way or kept (`open_waited`).
     fn opening(&self, key: &str) -> bool {
         self.openings.lock().unwrap().get(key).is_some_and(|opening| opening.done.lock().unwrap().as_ref().is_none_or(|(_, at)| at.elapsed() < OPENING_KEPT))
     }
 
-    /// The engine's `open` or `new` (`method`), starting the engine first, waited for up to `wait`,
-    /// with the params it was made with. The first notebook in a new Julia process compiles for a
-    /// while, so with Julia's start the call could outlast what an agent's call waits. Then the open
-    /// goes on, and the call answers `notebook_opening` (`doing` says what); the same call again, with
-    /// the same `key`, waits for that open and gets its result and its params (an earlier call's,
-    /// which may differ from this one's), kept for `OPENING_KEPT`. If no call comes again, the open
-    /// still ends in the engine, but no session is recorded as having opened it; a later
-    /// `open_notebook` joins it as already open.
     fn open_waited(&self, owner: &str, method: &str, params: Value, key: String, wait: Duration, doing: &str) -> Result<(Value, Value), String> {
         let began = Instant::now();
         let backend = engines::of_params(&params);
@@ -921,12 +709,6 @@ impl Notebooks {
         self.waited(owner, method, params, key, (began + wait).saturating_duration_since(Instant::now()), &format!("{doing} is taking longer than one call waits: {why}"))
     }
 
-    /// The engine's `method` on a background thread, waited for up to `wait`, with the params it
-    /// was made with (`open_waited`). When the wait runs out, the call answers `notebook_opening`
-    /// with `taking` and goes on; the same call again, with the same `key`, waits for it and gets
-    /// its result and its params (an earlier call's, which may differ from this one's), kept for
-    /// `OPENING_KEPT`. An open or creation that session `owner` stopped waiting for makes its
-    /// notebook, even if no call collects it.
     fn waited(&self, owner: &str, method: &str, params: Value, key: String, wait: Duration, taking: &str) -> Result<(Value, Value), String> {
         let began = Instant::now();
         let opening = {
@@ -955,14 +737,11 @@ impl Notebooks {
                     openings.remove(&key);
                 }
                 drop(openings);
-                // Collected: this caller takes it from here. Another session that stopped waiting
-                // for the same open (its key is the path) still gets it.
                 self.left.lock().unwrap().retain(|(o, left)| !(o == owner && Arc::ptr_eq(left, &opening)));
                 return result.map(|result| (result, opening.params.clone()));
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                // Not held with `left`, which `settle` takes first.
                 drop(done);
                 if !owner.is_empty() && (method == "open" || method == "new") {
                     let mut left = self.left.lock().unwrap();
@@ -976,7 +755,6 @@ impl Notebooks {
         }
     }
 
-    /// Every open notebook, in the engine's order.
     fn snapshots(&self) -> Result<Vec<Snapshot>, String> {
         let all = self.call("snapshot", json!({}))?;
         let parse = |nb: &Value| Snapshot::parse(nb).map(|nb| Snapshot { seq: nb.seq.or(all["seq"].as_u64()), ..nb }).ok_or_else(|| format!("bad snapshot {nb}"));
@@ -992,9 +770,6 @@ impl Notebooks {
         Ok(Graph::parse(&self.call("graph", params)?))
     }
 
-    /// A notebook's state, made if the core hasn't seen it yet. Each use counts as touching it
-    /// (`touched_after`): a notebook opened while the app's summary is put together isn't in that
-    /// summary's snapshots, and what a tool recorded of it meanwhile (the open's run) stays (#376).
     fn with_state<T>(&self, id: &str, f: impl FnOnce(&mut NotebookState) -> T) -> T {
         let mut state = self.state.lock().unwrap();
         state.seq += 1;
@@ -1004,30 +779,9 @@ impl Notebooks {
         f(notebook)
     }
 
-    /// Every notebook's state as the app hears it, with what the core keeps
-    /// brought up to date:
-    ///   {"notebooks": [the list_notebooks summary],
-    ///    "cells": {notebook_id: [{cell_id, running, errored, unrun, author, before, version, name}, ...]},
-    ///    "idle_stopped": [{path, hours, safe_preview}, ...],
-    ///    "engine_ended": [{path, language, why, ended_at}, ...]: notebooks that closed because
-    ///      their engine (R's) ended, until each is opened again; `ended_at` (ms since 1970) tells
-    ///      one ending of a path from the next,
-    ///    "asks": [{id, owner, call_id, tool, arguments, since}, ...],
-    ///    "build": the app build this runtime came from, if it was told}
-    /// with cells in notebook order. `unrun`: edited by the agent and not run
-    /// since. `author`: who last changed the cell's code ("agent", "user", or
-    /// null if unchanged since the core first saw it). `before`: an unrun
-    /// cell's code before the agent's first edit since it last ran ("" for a
-    /// cell the agent added), for the in-editor diff; null otherwise.
-    /// `version`: a hash of the code, so the app sees each edit. `name`: what
-    /// the cell defines, as of its last run (null if nothing).
     fn compose(&self) -> Result<String, String> {
-        // The snapshots are taken before the state is locked, so a notebook made meanwhile is missing from them,
-        // though a tool may already have recorded reads of it (new_notebook does). Its state stays.
         let since = self.state.lock().unwrap().seq;
         let mut snapshots = self.snapshots()?;
-        // A notebook closed after the snapshots (an idle stop, a shutdown) has no graph: it's left out, as if
-        // the snapshots came after it closed. Before, the whole event failed and `/events` answered 502.
         let mut graphs = HashMap::new();
         for nb in &snapshots {
             match self.graph(&nb.id, GraphQuery::default()) {
@@ -1075,7 +829,6 @@ impl Notebooks {
         Ok(to_json(&event))
     }
 
-    /// Tell the app the notebooks' state if it changed since the last time.
     pub fn publish(&self) {
         let _publishing = self.publishing.lock().unwrap();
         let json = match self.compose() {
@@ -1090,12 +843,10 @@ impl Notebooks {
         }
     }
 
-    /// Whether the app follows the notebooks' state, so it can ask the user.
     pub fn followed(&self) -> bool {
         !self.events.lock().unwrap().subscribers.is_empty()
     }
 
-    /// A new `/events` subscriber: the state now, then each change.
     fn subscribe(&self) -> Result<(String, Receiver<String>), String> {
         let _publishing = self.publishing.lock().unwrap();
         let first = self.compose()?;
@@ -1104,8 +855,6 @@ impl Notebooks {
         Ok((first, rx))
     }
 
-    /// Serve `GET /events`: the notebooks' state now and after every change,
-    /// until the client goes.
     pub fn stream_events(&self, request: &Head, mut client: wire::Shared) -> io::Result<()> {
         let (first, rx) = match self.subscribe() {
             Ok(subscription) => subscription,
@@ -1132,12 +881,10 @@ impl Notebooks {
         Ok(())
     }
 
-    /// The time by the core's clock (Unix seconds).
     pub fn now(&self) -> f64 {
         (self.clock)()
     }
 
-    /// A tool call names the notebook it works on: that counts as activity.
     pub fn note_activity(&self, arguments: &Value) {
         let Some(id) = arguments.get("notebook_id").map(julia_string).and_then(|id| parse_uuid(&id)) else { return };
         let now = (self.clock)();
@@ -1146,7 +893,6 @@ impl Notebooks {
         }
     }
 
-    /// `keep_notebook_alive`: exempt a notebook from idle stop, or stop exempting it.
     pub fn keep_alive(&self, arguments: &Value) -> Result<Value, String> {
         let id = self.notebook_arg(arguments.get("notebook_id").unwrap_or(&Value::String(String::new())))?;
         let keep = arguments.get("keep").and_then(Value::as_bool).ok_or("ArgumentError: invalid_keep::keep must be true or false")?;
@@ -1158,8 +904,6 @@ impl Notebooks {
         Ok(json!({ "notebook_id": id, "kept_alive": keep }))
     }
 
-    /// An open notebook's id from a tool argument, refused as Julia's UUID
-    /// parsing and lookup refused it.
     fn notebook_arg(&self, value: &Value) -> Result<String, String> {
         let shown = julia_string(value);
         let id = uuid_value(value).ok_or_else(|| format!("ArgumentError: invalid_notebook_id::Invalid notebook ID: '{shown}'"))?;
@@ -1170,12 +914,10 @@ impl Notebooks {
         Err(tools::notebook_not_found(&shown, self.open_now().as_deref()))
     }
 
-    /// The open notebooks by id and path, for an id that isn't one of them (`tools::notebook_not_found`).
     fn open_now(&self) -> Option<Vec<(String, String)>> {
         self.snapshots().ok().map(|open| open.into_iter().map(|nb| (nb.id, nb.path)).collect())
     }
 
-    /// The app binds a session to its notebook; an empty path clears it.
     pub fn bind(&self, owner: &str, path: &str) {
         let now = self.now();
         let mut state = self.state.lock().unwrap();
@@ -1188,8 +930,6 @@ impl Notebooks {
         }
     }
 
-    /// Session `owner`'s notebook kind: the engine its new notebooks without a path are made in.
-    /// None forgets it, and they are Pluto's again.
     pub fn set_kind(&self, owner: &str, kind: Option<Backend>) {
         let mut kinds = self.kinds.lock().unwrap();
         match kind {
@@ -1198,29 +938,19 @@ impl Notebooks {
         };
     }
 
-    /// Whether session `owner` is in Auto mode: the app's (`endeavor/set_policy`), or its client's own,
-    /// as a front says with each call (`mcp::Caller::auto_mode`).
     pub fn set_auto(&self, owner: &str, auto: bool) {
         let mut sessions = self.auto.lock().unwrap();
         if auto { sessions.insert(owner.to_owned()) } else { sessions.remove(owner) };
     }
 
-    /// Whether a run of session `owner`'s asks the user before a Julia notebook adds a package it
-    /// doesn't have yet (#397): everywhere but Auto mode, the app's or Claude Code's own. Another
-    /// plugin client's auto mode isn't known here, so it asks.
     pub fn asks_new_packages(&self, owner: &str) -> bool {
         !self.auto.lock().unwrap().contains(owner)
     }
 
-    /// Session `owner`'s notebook kind, if its client said it.
     pub fn kind(&self, owner: &str) -> Option<Backend> {
         self.kinds.lock().unwrap().get(owner).copied()
     }
 
-    /// A session makes a tool call.
-    /// Notebook `id`'s code as it is now, cells in order, as a number that
-    /// changes when any cell's code or the order does. None for an id that
-    /// names no open notebook.
     pub fn code_print(&self, id: &str) -> Option<u64> {
         use std::hash::{Hash, Hasher};
         let nb = self.snapshot(id).ok()?;
@@ -1231,7 +961,6 @@ impl Notebooks {
         Some(hasher.finish())
     }
 
-    /// A session's tool call: from the app (`app`) or the plugin, through the front `front` where it said.
     pub fn note_call(&self, owner: &str, app: bool, front: Option<&crate::mcp::Front>) {
         if owner.is_empty() {
             return;
@@ -1246,9 +975,6 @@ impl Notebooks {
         }
     }
 
-    /// Whether the plugin is in this runtime: a session of its works in a notebook that is open, and
-    /// its front still runs (`mcp::Front::alive`), or, for a front that didn't say which process it
-    /// is, it called within `SHARED_WITHOUT_FRONT` seconds (app #232). `alive` checks a front.
     pub fn shared(&self, alive: &dyn Fn(&crate::mcp::Front) -> bool) -> bool {
         let Ok(snapshots) = self.snapshots() else { return false };
         let open: Vec<String> = snapshots.into_iter().map(|nb| canonical_path(&nb.path).unwrap_or(nb.path)).collect();
@@ -1263,8 +989,6 @@ impl Notebooks {
         })
     }
 
-    /// The sessions other than `owner` that work in a notebook that is open and made a
-    /// tool call in the last `within` seconds: how many, and how long ago the latest did.
     pub fn recent_sessions(&self, owner: &str, within: f64) -> Result<Value, String> {
         let open: Vec<String> = self.snapshots()?.into_iter().map(|nb| canonical_path(&nb.path).unwrap_or(nb.path)).collect();
         let now = self.now();
@@ -1284,7 +1008,6 @@ impl Notebooks {
         self.state.lock().unwrap().bindings.get(owner).cloned()
     }
 
-    /// After a successful open or new of notebook `id`: bind the session if it isn't bound yet.
     fn opened_by(&self, owner: &str, path: &str, id: &str) {
         if !owner.is_empty() {
             let path = canonical_path(path).unwrap_or_else(|_| path.to_owned());
@@ -1300,9 +1023,6 @@ impl Notebooks {
         }
     }
 
-    /// An open or creation a session stopped waiting for, once it has come, is that session's
-    /// notebook, as if its call had collected it (#333): an agent may take the id from
-    /// `list_notebooks` rather than make the same call again.
     fn settle(&self) {
         let came: Vec<(String, Value)> = {
             let mut left = self.left.lock().unwrap();
@@ -1324,8 +1044,6 @@ impl Notebooks {
         }
     }
 
-    /// Drop the session's binding to `path`, a notebook that is no longer open: unless the
-    /// session closed it itself (`closed_own`). Whether it was dropped.
     fn unbind(&self, owner: &str, path: &str) -> bool {
         let mut state = self.state.lock().unwrap();
         if !state.closed_own.contains(owner) && state.bindings.get(owner).is_some_and(|bound| bound == path) {
@@ -1335,14 +1053,10 @@ impl Notebooks {
         false
     }
 
-    /// The notebook session `owner` closed is open again (the user opened it): from now on it
-    /// closes as any notebook does, and a close by the user frees the session.
     fn seen_open(&self, owner: &str) {
         self.state.lock().unwrap().closed_own.remove(owner);
     }
 
-    /// Session `owner` closed `path` with `close_notebook`. Bound to it, it stays bound (#520);
-    /// one that may work on several notebooks, or isn't bound to it, is left as it is.
     fn closed_by(&self, owner: &str, path: &str) {
         let mut state = self.state.lock().unwrap();
         if !owner.is_empty() && !state.several.contains_key(owner) && state.bindings.get(owner).is_some_and(|bound| bound == path) {
@@ -1350,24 +1064,16 @@ impl Notebooks {
         }
     }
 
-    /// Session `owner` may work on several notebooks: its client serves several conversations on one
-    /// connection, so this server can't tell them apart (Claude's desktop app). Each notebook it opens
-    /// or creates is one it works on, whether or not its first one is still open; it still can't change
-    /// one it didn't open, and `list_notebooks` marks none `this_session`, since it can't say which is
-    /// the conversation's.
     pub fn allow_several(&self, owner: &str) {
         if !owner.is_empty() {
             self.state.lock().unwrap().several.entry(owner.to_owned()).or_default();
         }
     }
 
-    /// Whether session `owner` may work on several notebooks (`allow_several`).
     fn several(&self, owner: &str) -> bool {
         self.state.lock().unwrap().several.contains_key(owner)
     }
 
-    /// Why a session that may work on several notebooks may not make this call: it changes or runs a
-    /// notebook the session didn't open or create.
     fn several_refusal(&self, owner: &str, tool: &str, arguments: &Value, folder: &Folder) -> Option<String> {
         if tool == "open_notebook" || tool == "new_notebook" {
             let requested = arguments.get("path").and_then(Value::as_str)?;
@@ -1388,8 +1094,6 @@ impl Notebooks {
         ))
     }
 
-    /// Why a session may not make this call: it works on another notebook.
-    /// Other notebooks stay readable. A notebook that is no longer open is not one it works on.
     pub fn refusal(&self, owner: &str, tool: &str, arguments: &Value, folder: &Folder) -> Option<String> {
         if owner.is_empty() {
             return None;
@@ -1400,7 +1104,6 @@ impl Notebooks {
         }
         let bound = self.bound(owner)?;
         let refuse = |what: &str| {
-            // An engine that can't say leaves the binding, and the mark (#520).
             let open = self.snapshots().ok().map(|open| open.iter().any(|nb| canonical_path(&nb.path).is_ok_and(|p| p == bound)));
             if open == Some(false) && self.unbind(owner, &bound) {
                 return None;
@@ -1441,7 +1144,6 @@ impl Notebooks {
         let path = known.or_else(|| self.snapshot(&id).ok().map(|nb| nb.path))?;
         match canonical_path(&path) {
             Ok(canonical) if canonical == bound => {
-                // Its own notebook, open again (the user opened it): it closes as any notebook does.
                 if self.state.lock().unwrap().closed_own.contains(owner) && self.snapshot(&id).is_ok() {
                     self.seen_open(owner);
                 }
@@ -1452,7 +1154,6 @@ impl Notebooks {
         }
     }
 
-    /// `endeavor/set_idle_limit`: stop notebooks idle this long; 0 never stops them.
     pub fn set_idle_limit(&self, hours: f64) {
         self.state.lock().unwrap().idle_limit_hours = hours;
     }
@@ -1461,21 +1162,15 @@ impl Notebooks {
         self.state.lock().unwrap().idle_limit_hours
     }
 
-    /// Whether the notebook at `path` is open and allowed to run: what lets a browser open marimo's page
-    /// for it, which builds its environment.
     pub fn open_and_allowed(&self, path: &str) -> bool {
         let Ok(target) = canonical_path(path) else { return false };
         self.snapshots().is_ok_and(|snapshots| snapshots.iter().any(|nb| nb.execution_allowed && !nb.safe_preview && canonical_path(&nb.path).is_ok_and(|p| p == target)))
     }
 
-    /// How many notebooks the engine has open, if it answers.
     pub fn open_count(&self) -> Option<usize> {
         self.snapshots().ok().map(|snapshots| snapshots.len())
     }
 
-    /// Stop every notebook idle longer than the limit (no tool call on it, no
-    /// save or run through the engine, no cells running), except kept-alive
-    /// ones. The stopped paths.
     pub fn stop_idle(&self) -> Vec<String> {
         let hours = self.state.lock().unwrap().idle_limit_hours;
         if hours <= 0.0 {
@@ -1502,7 +1197,6 @@ impl Notebooks {
         };
         let whole_hours = hours.round_ties_even() as i64;
         for nb in &idle {
-            // Recorded first, so the event after the stop carries it.
             let key = canonical_path(&nb.path).unwrap_or_else(|_| nb.path.clone());
             let entry = json!({ "path": nb.path, "hours": whole_hours, "safe_preview": nb.safe_preview });
             {
@@ -1524,15 +1218,10 @@ impl Notebooks {
         Ok(result["safe_preview"].as_bool().unwrap_or(false))
     }
 
-    /// `endeavor/stop_notebook`: shut down the open notebook at `path` (the
-    /// app's "Stop notebook"). `safe_preview` says whether it was still in safe
-    /// preview, so the app can reopen it the same way. A notebook at `path` that
-    /// closed when its engine ended leaves `engine_ended`.
     pub fn stop_notebook(&self, path: &str) -> Result<Value, String> {
         let target = canonical_path(path)?;
         let snapshots = self.snapshots()?;
         let Some(nb) = snapshots.iter().find(|nb| canonical_path(&nb.path).is_ok_and(|p| p == target)) else {
-            // One that closed when its engine ended: the user lets it go.
             if self.engines.reopened(|closed| engines::same_path(closed, &target)) {
                 self.publish();
                 return Ok(json!({ "stopped": true, "safe_preview": false }));
@@ -1544,24 +1233,16 @@ impl Notebooks {
         Ok(json!({ "stopped": true, "safe_preview": safe_preview }))
     }
 
-    /// Note `owner`'s call `request` on `notebook_id` until the result drops, so that cancelling
-    /// it can interrupt the notebook (`cancelled`). `runs_code`: the call runs code itself.
     pub fn running(&self, owner: &str, request: &Value, notebook_id: &str, runs_code: bool) -> Running<'_> {
         self.runs.lock().unwrap().push((owner.to_owned(), request.clone(), notebook_id.to_owned(), runs_code));
         Running { notebooks: self, owner: owner.to_owned(), request: request.clone() }
     }
 
-    /// The notebook of `owner`'s call `request`, if it is under way (`running`), and whether the
-    /// call runs code: the agent cancelled it, which is the user's Stop.
     pub fn cancelled(&self, owner: &str, request: &Value) -> Option<(String, bool)> {
         let runs = self.runs.lock().unwrap();
         runs.iter().find(|(o, r, _, _)| o == owner && r == request).map(|(_, _, notebook, runs_code)| (notebook.clone(), *runs_code))
     }
 
-    /// The user's Stop, for `owner`'s cancelled call on `notebook_id`: interrupt the notebook's
-    /// run, as Pluto's own Stop does, if the call was running code, or if a run this session
-    /// started there is still going (an agent often starts a run without waiting, then waits by
-    /// reading the cell). A run only the user or another session started is left alone.
     pub fn stop_for(&self, owner: &str, notebook_id: &str, runs_code: bool) {
         if !runs_code {
             if !self.with_state(notebook_id, |state| state.started.iter().any(|started| started.owner == owner)) {
@@ -1575,11 +1256,6 @@ impl Notebooks {
         self.interrupt(notebook_id, owner);
     }
 
-    /// Whether a run `owner` started in `nb` is still going, as `nb` shows it. A run the engine
-    /// named goes on, with the cells that depend on its cells, until its `run_finished`, and
-    /// while it does some cell is running or queued: a notebook with none has seen it end. A
-    /// run the engine didn't name goes on while one of its own cells hasn't finished. A run
-    /// seen to have ended is forgotten.
     fn own_run_going(&self, owner: &str, nb: &Snapshot) -> bool {
         let busy = nb.cells.values().any(|c| c.running || c.queued);
         self.with_state(&nb.id, |state| {
@@ -1593,16 +1269,11 @@ impl Notebooks {
         })
     }
 
-    /// Whether `cell` is a dependent a run `owner` started will rerun and hasn't yet: one the
-    /// engine hasn't queued yet looks idle, though it will run (#192). Asked once
-    /// `own_run_going` has said the run is still going.
     fn own_run_will_run(&self, owner: &str, nb: &Snapshot, cell: &str) -> bool {
         let Some(c) = nb.cells.get(cell) else { return false };
         self.with_state(&nb.id, |state| state.started.iter().any(|started| started.owner == owner && started.follows.get(cell).is_some_and(|last| c.last_run == *last)))
     }
 
-    /// The notebooks where runs `owner` started may still be going (`stop_for` checks): what the
-    /// app's Stop for that session looks at (`endeavor/stop_session`).
     pub fn session_runs(&self, owner: &str) -> Vec<String> {
         if owner.is_empty() {
             return Vec::new();
@@ -1613,9 +1284,6 @@ impl Notebooks {
         ids
     }
 
-    /// Interrupt `notebook_id`'s run, as Pluto's own Stop does, for `owner`'s cancelled call: the
-    /// cells end interrupted. A cell that doesn't stop (one long `sleep`) ends the notebook's
-    /// process, as with Pluto's Stop, and the notebook waits for a restart.
     pub fn interrupt(&self, notebook_id: &str, owner: &str) {
         match self.call("interrupt", json!({ "notebook_id": notebook_id })) {
             Ok(reply) if reply["interrupted"] == false => eprintln!("[ Info: Session {owner} stopped: nothing was running in notebook {notebook_id}"),
@@ -1624,9 +1292,6 @@ impl Notebooks {
         }
     }
 
-    /// The user's run reached `cells` (each with its `last_run` from before
-    /// that run) while a call asking to run them waited, and the user then
-    /// allowed it (`endeavor/answer_run`'s `user_ran`).
     pub fn run_anyway(&self, notebook_id: &str, cells: &Value) -> Result<Value, String> {
         let cells: Vec<(String, f64)> = cells
             .as_array()
@@ -1643,34 +1308,18 @@ impl Notebooks {
         Ok(json!({}))
     }
 
-    /// `endeavor/restart_notebook`: Pluto's own Restart, a new process and then
-    /// every cell runs; refused in safe preview. The notebook stays open with
-    /// the same cells, so the core keeps all it knows of it; its pending cells
-    /// stop being pending as they run.
     pub fn restart(&self, notebook_id: &str, ask_new: bool) -> Result<Value, String> {
-        // The runs sessions started end with the old process; the restart's run is no session's.
         self.with_state(notebook_id, |state| state.started.clear());
         let result = self.call("restart", json!({ "notebook_id": notebook_id, "timeout": tools::TIMEOUT_SECONDS, "ask_new": ask_new }))?;
         self.publish();
         Ok(result)
     }
 
-    /// `endeavor/restore_cells`: the app's Restore on a turn's changed cells,
-    /// the user putting back what an agent's turn changed. `cells` is a list
-    /// of {cell_id, expected, code}: `expected` the code the turn left the
-    /// cell with, `code` the code to put back, or null to delete a cell the
-    /// turn added. All or nothing: if any cell's code isn't `expected` (or
-    /// the cell is gone), nothing changes and `changed` names those cells.
-    /// Nothing runs, except Pluto's cleanup of what a deleted cell defined.
-    /// The restored code is the user's, and a restored cell whose code isn't
-    /// what last ran is pending, so it shows unrun; an agent reads it before
-    /// running it (`run_conflict`). `warnings` says if the cleanup failed.
     pub fn restore_cells(&self, notebook_id: &str, cells: &Value) -> Result<Value, String> {
         let bad = || tools::argument_error("invalid_argument::cells must be a list of {cell_id, expected, code}");
         let mut restores: Vec<(String, String, Option<String>)> = Vec::new();
         for entry in cells.as_array().filter(|cells| !cells.is_empty()).ok_or_else(bad)? {
             let (Some(cell), Some(expected)) = (entry["cell_id"].as_str(), entry["expected"].as_str()) else { return Err(bad()) };
-            // Only an explicit null deletes: a cell left without `code` can't be brought back.
             let code = match entry.get("code") {
                 Some(Value::Null) => None,
                 Some(Value::String(code)) => Some(code.clone()),
@@ -1682,7 +1331,6 @@ impl Notebooks {
             restores.push((cell.to_owned(), expected.to_owned(), code));
         }
         let nb = self.snapshot(notebook_id)?;
-        // Ember keeps code as it stores it (`normalise_code`), and compares `expected` that way too.
         let backend = self.backend_of(&nb.id);
         let stored = |code: &str| match backend {
             Backend::Pluto | Backend::Marimo => code.to_owned(),
@@ -1700,18 +1348,14 @@ impl Notebooks {
         if !changed.is_empty() {
             return Ok(json!({ "restored": [], "changed": changed }));
         }
-        // Edits first: the engine checks every `expected` before it applies any op. A cell to delete was
-        // checked against the snapshot just above, not by the engine.
         let mut ops: Vec<Value> = restores.iter().filter_map(|(cell, expected, code)| Some(json!({ "op": "set_code", "cell_id": cell, "code": code.as_ref()?, "expected": expected }))).collect();
         ops.extend(restores.iter().filter(|(.., code)| code.is_none()).map(|(cell, ..)| json!({ "op": "delete", "cell_id": cell })));
-        // A cell a run is taking (the turn's `run_after` that wasn't waited for) has its agent code run.
         let pending: Vec<String> = self.with_state(&nb.id, |state| {
             let pending = state.pending_run(&nb);
             let in_run = |cell: &String| nb.cells.get(cell).is_some_and(|c| c.running || c.queued) || state.started.iter().any(|run| run.cells.contains(cell));
             pending.into_iter().filter(|cell| !in_run(cell)).collect()
         });
         if let Err(error) = self.call("apply", json!({ "notebook_id": nb.id, "ops": ops })) {
-            // A cell changed between the snapshot and the edit.
             if error.contains("stale_read::") {
                 let now = self.snapshot(&nb.id)?;
                 let changed: Vec<&String> = restores.iter().filter(|(cell, expected, _)| now.cells.get(cell).is_none_or(|c| c.code != *expected)).map(|(cell, ..)| cell).collect();
@@ -1736,10 +1380,7 @@ impl Notebooks {
                     }
                     Some(code) => {
                         notebook.authors.insert(cell.clone(), (hash(code), "user"));
-                        // The user's change: an agent reads the cell before a run of it or what needs it.
                         notebook.changes.insert(cell.clone(), Change { owner: tools::USER.to_owned(), seq, at: self.now() });
-                        // Unrun agent code put back to what last ran is in step again; anything else is
-                        // unrun, its before-text the code that last ran (the turn's, if the turn ran it).
                         if !pending.contains(cell) {
                             notebook.befores.insert(cell.clone(), expected.clone());
                             notebook.pending.insert(cell.clone(), now);
@@ -1755,23 +1396,15 @@ impl Notebooks {
         }
         self.publish();
         let mut result = json!({ "restored": restores.iter().map(|(cell, ..)| cell).collect::<Vec<_>>(), "changed": [] });
-        if restores.iter().any(|(.., code)| code.is_none()) {
-            // Pluto's reactive cleanup of what the deleted cells defined, as delete_cell does. The restore
-            // is made either way.
-            if let Err(error) = self.call("run", json!({ "notebook_id": nb.id, "cells": [], "wait": false, "timeout": tools::TIMEOUT_SECONDS })) {
-                result["warnings"] = json!([format!("cleanup_failed::{error}")]);
-            }
+        if restores.iter().any(|(.., code)| code.is_none()) && let Err(error) = self.call("run", json!({ "notebook_id": nb.id, "cells": [], "wait": false, "timeout": tools::TIMEOUT_SECONDS })) {
+            result["warnings"] = json!([format!("cleanup_failed::{error}")]);
         }
         Ok(result)
     }
 
-    /// `endeavor/move_notebook`: rename or move an open notebook's file (the
-    /// app's Rename… and Move to…), never over another file. Sessions bound to
-    /// it, and an `idle_stopped` entry for it, follow it to its new path.
     pub fn move_notebook(&self, notebook_id: &str, path: &str) -> Result<Value, String> {
         let nb = self.snapshot(notebook_id)?;
         let target = absolute_path(path)?;
-        // A notebook keeps its engine: a Julia notebook's name ends in .jl, an R notebook's in .R.
         let (fits, extension) = match self.backend_of(&nb.id) {
             Backend::Pluto => (target.ends_with(".jl"), ".jl"),
             Backend::Ember => (engines::of_path(&target) == Backend::Ember, ".R"),
@@ -1808,8 +1441,6 @@ impl Notebooks {
         Ok(result)
     }
 
-    /// `endeavor/new_notebook`: the app's "New notebook" for session `owner`,
-    /// a new notebook in its folder that becomes its notebook.
     pub fn new_for(&self, owner: &str, folder: &Folder) -> Result<Value, String> {
         self.bind(owner, "");
         let Reply::Json(result) = self.tool(owner, "new_notebook", &json!({}), folder, Instant::now())? else {
@@ -1825,8 +1456,6 @@ impl Notebooks {
     }
 }
 
-/// `endeavor/file_info`: whether a file is at `path` on this machine, and when
-/// it last changed (Unix seconds, as Julia's `mtime` gives them).
 pub fn file_info(path: &str) -> Result<Value, String> {
     match std::fs::metadata(absolute_path(path)?) {
         Ok(meta) if meta.is_file() => Ok(json!({ "exists": true, "modified": crate::host_tools::mtime(&meta) })),
@@ -1834,13 +1463,10 @@ pub fn file_info(path: &str) -> Result<Value, String> {
     }
 }
 
-/// FNV-1a: the app only compares versions with each other.
-/// Of the code as the engine keeps it: Ember drops trailing blank lines and turns CRLF into LF.
 fn hash(code: &str) -> u64 {
     code.trim_end().bytes().filter(|&b| b != b'\r').fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
 }
 
-/// A UUID in its only form Julia parses (36 characters, hex and hyphens), lowercased.
 fn parse_uuid(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let hyphen = |i: usize| matches!(i, 8 | 13 | 18 | 23);
@@ -1848,13 +1474,8 @@ fn parse_uuid(text: &str) -> Option<String> {
     valid.then(|| text.to_ascii_lowercase())
 }
 
-/// The packages an `approve_install` covers once the user's yes names `seen` (#418): those of
-/// `asked` (the call's own `packages`, if it has any) that the user saw too, so a yes never widens
-/// what the call asked for. Names compare as PyPI's do (case, `-`, `_`, `.`), and the names that
-/// go on are the ones the user saw.
 pub(crate) fn seen_packages(asked: Option<&Value>, seen: &Value) -> Value {
     let names = |v: &Value| v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
-    // Case and `-`, `_`, `.` aside, as PyPI compares; what goes on is the name the user saw.
     let key = |name: &str| name.to_lowercase().replace(['_', '.'], "-");
     let seen = names(seen);
     match asked.filter(|a| a.is_array()) {
@@ -1866,8 +1487,6 @@ pub(crate) fn seen_packages(asked: Option<&Value>, seen: &Value) -> Value {
     }
 }
 
-/// A JSON value as Julia's `UUID(value)` takes it: a UUID string, or a
-/// whole number (a Bool is 0 or 1).
 pub(crate) fn uuid_value(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => parse_uuid(s),
@@ -1881,16 +1500,12 @@ pub(crate) fn uuid_value(value: &Value) -> Option<String> {
     }
 }
 
-/// A short cell id as Ember keeps it from a hand-written file (`# %% id=B`):
-/// 1 to 64 of `[A-Za-z0-9._-]` (Ember #82). Pluto's cell ids are always UUIDs.
 pub(crate) fn short_cell_id(value: &Value) -> Option<String> {
     let text = value.as_str()?;
     let valid = (1..=64).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
     valid.then(|| text.to_owned())
 }
 
-/// The cell `value` names in `nb`: one of its cells by that exact id (an R
-/// notebook's short id), else a UUID as Julia's `UUID(value)` takes it.
 fn cell_id_in(nb: &Snapshot, value: &Value) -> Option<String> {
     short_cell_id(value).filter(|id| nb.cells.contains_key(id)).or_else(|| uuid_value(value))
 }
@@ -1900,8 +1515,6 @@ fn uuid_of(value: u128) -> String {
     format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
 }
 
-/// A notebook path as Julia's runtime compared them: absolute, `~` expanded,
-/// and resolved through symlinks as far as it exists.
 #[cfg(unix)]
 pub fn canonical_path(path: &str) -> Result<String, String> {
     let absolute = absolute_path(path)?;
@@ -1931,19 +1544,14 @@ pub fn canonical_path(path: &str) -> Result<String, String> {
     }
 }
 
-/// Where a session's relative paths start.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Folder {
-    /// The session's working folder.
     In(String),
-    /// None was given (the app's session): the runtime process's own working folder.
     Process,
-    /// The session was not told its project folder, so a relative path means nothing.
     Unknown,
 }
 
 impl Folder {
-    /// The folder, when there is one.
     pub fn dir(&self) -> Option<&str> {
         match self {
             Folder::In(dir) => Some(dir),
@@ -1952,13 +1560,10 @@ impl Folder {
     }
 }
 
-/// What a session without a folder is told when it gives a path that needs one.
 fn folder_unknown() -> String {
     tools::argument_error("invalid_path::Give an absolute path: this server was not told the project folder.")
 }
 
-/// A path an agent gave, as the tools resolve it: `~` expanded, and a relative
-/// path taken from the session's `folder`. The one place a relative path is resolved.
 fn requested_path(path: &str, folder: &Folder) -> Result<String, String> {
     let expanded = expand_user(path)?;
     match folder {
@@ -1970,9 +1575,6 @@ fn requested_path(path: &str, folder: &Folder) -> Result<String, String> {
     }
 }
 
-/// Why a session with no folder may not make this call: it gives a relative path, or none to
-/// `new_notebook`, which would put the notebook in a folder it does not know. Nothing else is refused.
-/// With the error, whether it already says what to do (so it needs no pointer to the guide).
 pub(crate) fn path_refusal(tool: &str, arguments: &Value, folder: &Folder) -> Option<(String, bool)> {
     if *folder != Folder::Unknown {
         return None;
@@ -1988,7 +1590,6 @@ pub(crate) fn path_refusal(tool: &str, arguments: &Value, folder: &Folder) -> Op
     }
 }
 
-/// Julia's `expanduser`, which leaves paths alone on Windows.
 fn expand_user(path: &str) -> Result<String, String> {
     if cfg!(windows) {
         return Ok(path.to_owned());
@@ -2001,7 +1602,6 @@ fn expand_user(path: &str) -> Result<String, String> {
     }
 }
 
-/// Julia's `abspath(expanduser(path))`.
 #[cfg(unix)]
 fn absolute_path(path: &str) -> Result<String, String> {
     let expanded = expand_user(path)?;
@@ -2017,7 +1617,6 @@ fn absolute_path(path: &str) -> Result<String, String> {
     std::path::absolute(expand_user(path)?).map(|p| p.display().to_string()).map_err(|e| e.to_string())
 }
 
-/// Julia's `isabspath`: on Windows, `\x`, `C:\x` and `C:/x`.
 fn is_absolute(path: &str) -> bool {
     if cfg!(windows) {
         let drive = path.find(':').filter(|&colon| colon > 0 && path[..colon].bytes().all(|b| b.is_ascii_alphabetic())).map_or(0, |colon| colon + 1);
@@ -2026,8 +1625,6 @@ fn is_absolute(path: &str) -> bool {
     path.starts_with('/')
 }
 
-/// An absolute path that names its own root: on Windows, with a drive or as `\\server\share`; `\x` and
-/// `/x` are rooted on the working folder's drive, which a session with no folder does not know.
 fn is_fully_absolute(path: &str) -> bool {
     if cfg!(windows) {
         let drive = path.len() > 2 && path.as_bytes()[0].is_ascii_alphabetic() && path.as_bytes()[1] == b':';
@@ -2036,7 +1633,6 @@ fn is_fully_absolute(path: &str) -> bool {
     path.starts_with('/')
 }
 
-/// The folder an absolute, normalized path is in.
 fn parent_dir(path: &str) -> String {
     #[cfg(windows)]
     if let Some(dir) = std::path::Path::new(path).parent().filter(|dir| !dir.as_os_str().is_empty()) {
@@ -2048,7 +1644,6 @@ fn parent_dir(path: &str) -> String {
     }
 }
 
-/// An idle limit in words for the runtime's log: "48 hours", "1 hour", or minutes under an hour (#460).
 pub(crate) fn idle_span(hours: f64) -> String {
     if hours < 1.0 {
         let minutes = ((hours * 60.0).round() as i64).max(1);

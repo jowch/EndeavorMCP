@@ -4,8 +4,6 @@ use std::cell::Cell;
 
 const DAY: Duration = Duration::from_secs(24 * 3600);
 
-/// Held by a test that starts a process and by one that lets go of a lease: a process started while
-/// the lease is held has its file, and with it the lock, until it runs its program.
 static SPAWNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn scratch(name: &str) -> PathBuf {
@@ -15,7 +13,6 @@ fn scratch(name: &str) -> PathBuf {
     dir.canonicalize().unwrap()
 }
 
-/// A server build `name` in `base`, as the bootstrap script installs it; with a lease marker if `marked`.
 fn server_build(base: &Path, name: &str, marked: bool) -> PathBuf {
     let folder = base.join(name);
     std::fs::create_dir_all(folder.join("runtime")).unwrap();
@@ -51,7 +48,6 @@ fn a_server_build_nothing_used_for_a_week_goes_and_everything_else_stays() {
     server_build(&base, "0.1.0-own", true);
     server_build(&base, "0.1.0-old", true);
     server_build(&base, "0.1.0-unmarked", false);
-    // Folders that aren't builds share the root: the depot, `serve`'s state, the helpers' cache.
     for other in ["depot/packages", "serve", "helpers/abc/linux-x86_64"] {
         std::fs::create_dir_all(base.join(other)).unwrap();
     }
@@ -167,9 +163,7 @@ fn a_running_process_that_names_a_file_in_a_folder_is_seen() {
     let base = scratch("process");
     let folder = server_build(&base, "0.1.0-run", true);
     let _spawns = SPAWNS.lock().unwrap_or_else(|e| e.into_inner());
-    // Naming a file in the folder, as Julia names the runtime's boot.jl.
     let mut child = std::process::Command::new("sh").args(["-c", "sleep 30; :", "sh"]).arg(folder.join("runtime/boot.jl")).spawn().unwrap();
-    // The process may not show its own command line at once.
     let started = std::time::Instant::now();
     let mut seen = false;
     while !seen && started.elapsed() < Duration::from_secs(5) {
@@ -181,10 +175,8 @@ fn a_running_process_that_names_a_file_in_a_folder_is_seen() {
     assert!(seen, "{folder:?} isn't among the processes");
 }
 
-/// A `runtime.json` in `folder` for a runtime on `node` with `pid`, from `build` if one is given.
 fn record(folder: &Path, node: &str, pid: u32, build: Option<&str>) {
     std::fs::create_dir_all(folder).unwrap();
-    // With this process's start time, which Windows needs to count a pid as alive; for another pid it doesn't match, as for a process that ended.
     let mut state = serde_json::json!({ "launcher": "process", "node": node, "pid": pid, "token": "t", "started": crate::own_start_time() });
     if let Some(build) = build {
         state["build"] = build.into();
@@ -201,7 +193,6 @@ fn a_build_a_runtime_record_names_stays_wherever_the_runtime_runs() {
         server_build(&base, name, false);
     }
     let serve = dir.join("state/endeavor/serve");
-    // A runtime on another login node, which this one can't see; one alive here; one here that ended without removing its record.
     record(&serve.join("login2"), "login2", 4242, Some("0.1.0-other-node"));
     record(&base.join("cluster-1"), "login1", std::process::id(), Some("0.1.0-here"));
     record(&serve.join("login1"), "login1", 0, Some("0.1.0-gone"));
@@ -211,7 +202,6 @@ fn a_build_a_runtime_record_names_stays_wherever_the_runtime_runs() {
     removed.sort();
     assert_eq!(removed, ["0.1.0-gone"]);
 
-    // A record from before builds were recorded may be any of them.
     record(&serve.join("login3"), "login3", 4242, None);
     assert_eq!(recorded(&[serve.join("login3")], &base, "login1"), None);
 }

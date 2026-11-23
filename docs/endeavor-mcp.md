@@ -180,7 +180,7 @@ a cluster), not from a copy made when the session was pointed at it.
 
 The helper, `serve` and the front find or start the runtime with one function
 (`runtime::find_or_start`), look at what is running with one (`runtime::look`)
-and stop it with one (`runtime::end`). A start, once begun, finishes without the
+and stop it with one (`runtime::end`). [start-and-stop.md](start-and-stop.md) has the details. A start, once begun, finishes without the
 process that asked for it. The core is its own session. As the first thing it
 does it holds `starting.lock` in the state folder, writes its pid, start time,
 boot id and host name into that file (one JSON object), and lets go only after
@@ -694,6 +694,35 @@ that fails leaves the file as it was, and the agent calls `add_machine` again
 with the same arguments. An updated machine keeps its old record until the new
 settings have connected. Changing a machine between the two is refused while
 its connection has a runtime, a start or a job.
+
+## The host tools (`host_tools.rs`)
+
+`list_folder`, `read_file` and `run_shell` act on the machine the runtime
+runs on. Only sessions on a server get them (their MCP connection carries
+`X-Endeavor-Host`), since there Claude's own file and shell tools would see
+the user's computer instead. A Windows server is out of scope.
+
+- Results and errors are what the Julia runtime gave before, to the byte:
+  paths normalized as Julia's `normpath` does, invalid UTF-8 replaced one
+  Julia `Char` at a time, whole numbers as Julia took them, and Julia's own
+  wording for system errors (`IOError`, `SystemError`). A path the agent gives
+  starts from the home folder.
+- `run_shell` runs the user's login shell, as the Julia runtime did. csh and
+  tcsh refuse `-l` beside other flags, and read .cshrc without it.
+- A command that runs longer than the call waits goes on, and the same call
+  again (same session, folder and arguments) waits for it rather than start
+  another, so the user isn't asked again. A finished command's result is kept
+  10 minutes for that call. A command started by one session is never
+  another's, and the same call made twice at once starts one command.
+- Commands start with the signal mask the core was started with, not the
+  core's, which blocks Ctrl-C, SIGTERM and SIGHUP for its own thread. A
+  blocked mask survives exec, so a command would otherwise ignore SIGINT and
+  SIGTERM, and so would everything it starts (#165). The downloads the core
+  starts get the same mask (#181).
+- A command's output is read until it has exited and its pipes are done, or
+  2 s after its exit, since a background job it started can hold the pipes
+  open. A timeout kills everything it started. Only the first and last part of
+  a long stream is kept.
 
 ## Approval
 

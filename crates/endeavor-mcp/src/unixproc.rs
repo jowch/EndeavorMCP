@@ -1,22 +1,11 @@
-//! When a process started, on Unix: with its pid, what tells a process from a later one given the same
-//! pid (after a reboot, or when pids come round). `runtime.json` and `starting.lock` record it, and a
-//! recorded pid counts only while the process now has that start time. `winproc` does this on Windows.
-
-/// What asking for a process's start time came to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Start {
-    /// There is no such process.
     Gone,
-    /// The platform gives no start time, or it could not be read now (out of descriptors or memory, no
-    /// permission): nothing is known about the process.
     Unknown,
-    /// In a unit that is the platform's own and means nothing across platforms or reboots. On Linux it
-    /// is clock ticks after boot, so `boot_id` goes with it.
     At(u64),
 }
 
 impl Start {
-    /// The time, when there is one.
     pub fn at(self) -> Option<u64> {
         match self {
             Start::At(time) => Some(time),
@@ -25,32 +14,24 @@ impl Start {
     }
 }
 
-/// When the process `pid` started.
 #[cfg(target_os = "linux")]
 pub fn start_time(pid: i32) -> Start {
     if pid <= 0 {
         return Start::Gone;
     }
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        // A zombie has ended and only waits to be reaped, which a container whose PID 1 doesn't reap
-        // never does, so it is gone even though `kill(pid, 0)` still finds it.
         Ok(stat) if zombie(&stat) => Start::Gone,
         Ok(stat) => parse_stat(&stat).map_or(Start::Unknown, Start::At),
-        // The file goes with the process; ESRCH is what a process that is exiting gives.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ESRCH) => Start::Gone,
         Err(_) => Start::Unknown,
     }
 }
 
-/// Whether field 3 of `/proc/PID/stat`, the state, is Z (zombie) or X (dead).
 #[cfg(any(target_os = "linux", test))]
 fn zombie(stat: &str) -> bool {
     stat.rfind(')').and_then(|end| stat[end + 1..].split_whitespace().next()).is_some_and(|state| state == "Z" || state == "X")
 }
 
-/// Whether a process of the group `pgid` is still running. Zombies don't count, as in `start_time`:
-/// a container whose PID 1 reaps slowly or not at all may keep the ended processes of a group for a
-/// while, or for good.
 #[cfg(target_os = "linux")]
 pub fn group_running(pgid: i32) -> bool {
     // SAFETY: signal 0 only checks; a group of another user's processes (EPERM) is not counted.
@@ -63,26 +44,20 @@ pub fn group_running(pgid: i32) -> bool {
     })
 }
 
-/// Whether a process of the group `pgid` is still running. A zombie here doesn't last: the core's parent
-/// waits on it, and launchd reaps orphans.
 #[cfg(not(target_os = "linux"))]
 pub fn group_running(pgid: i32) -> bool {
     // SAFETY: signal 0 only checks; a group of another user's processes (EPERM) is not counted.
     pgid > 0 && unsafe { libc::kill(-pgid, 0) } == 0
 }
 
-/// Field 5 of `/proc/PID/stat`, the process group.
 #[cfg(any(target_os = "linux", test))]
 fn group_of(stat: &str) -> Option<i32> {
     stat[stat.rfind(')')? + 1..].split_whitespace().nth(2)?.parse().ok()
 }
 
-/// Field 22 of `/proc/PID/stat`, the start in clock ticks after boot. The name in field 2 is in
-/// parentheses and may hold spaces and parentheses, so the fields are counted from the last `)`.
 #[cfg(any(target_os = "linux", test))]
 fn parse_stat(stat: &str) -> Option<u64> {
     let after_name = &stat[stat.rfind(')')? + 1..];
-    // The first field after the name is field 3.
     after_name.split_whitespace().nth(22 - 3)?.parse().ok()
 }
 
@@ -106,20 +81,17 @@ pub fn start_time(pid: i32) -> Start {
     }
 }
 
-/// No start time is recorded on other Unix systems, and a record without one is trusted as before.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn start_time(_pid: i32) -> Start {
     Start::Unknown
 }
 
-/// The parent of process `pid`, if it is running and that can be read here (Linux and macOS).
 #[cfg(target_os = "linux")]
 pub fn parent(pid: i32) -> Option<i32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     parent_of(&stat).filter(|&ppid| ppid > 0)
 }
 
-/// Field 4 of `/proc/PID/stat`, the parent.
 #[cfg(any(target_os = "linux", test))]
 fn parent_of(stat: &str) -> Option<i32> {
     stat[stat.rfind(')')? + 1..].split_whitespace().nth(1)?.parse().ok()
@@ -144,8 +116,6 @@ pub fn parent(_pid: i32) -> Option<i32> {
     None
 }
 
-/// Which boot of this computer this is, where start times count from boot (Linux). macOS gives an absolute
-/// time, so none.
 #[cfg(target_os = "linux")]
 pub fn boot_id() -> Option<String> {
     let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
@@ -157,8 +127,6 @@ pub fn boot_id() -> Option<String> {
     None
 }
 
-/// Whether a start time recorded on boot `recorded` is comparable with one read now: when either side
-/// has no boot id, as before.
 pub fn same_boot(recorded: Option<&str>) -> bool {
     match (recorded, boot_id()) {
         (Some(recorded), Some(now)) => recorded == now,
@@ -166,14 +134,10 @@ pub fn same_boot(recorded: Option<&str>) -> bool {
     }
 }
 
-/// Whether a process recorded as started at `started` (`start_time`) on boot `boot` (`boot_id`) is from
-/// this boot of the computer, so that a process group named after it may still be its. Linux tells by the
-/// boot id, macOS by the time it booted; where neither is known, it is taken to be.
 pub fn this_boot(started: Option<u64>, boot: Option<&str>) -> bool {
     same_boot(boot) && started.zip(boot_time()).is_none_or(|(started, booted)| started >= booted)
 }
 
-/// When this computer booted, in `start_time`'s unit, where that unit is an absolute time (macOS).
 #[cfg(target_os = "macos")]
 fn boot_time() -> Option<u64> {
     let mut booted: libc::timeval = libc::timeval { tv_sec: 0, tv_usec: 0 };
@@ -260,7 +224,6 @@ mod tests {
         assert_eq!(start_time(child.id() as i32), Start::Gone, "reaped");
         assert_eq!(start_time(0), Start::Gone);
         assert_eq!(start_time(-1), Start::Gone);
-        // A pid that is in no process: the largest a pid can be is far below this.
         assert_eq!(start_time(i32::MAX), Start::Gone);
     }
 

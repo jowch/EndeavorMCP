@@ -1,37 +1,15 @@
-//! Which R runs R notebooks: an Rscript the user gave, the one a shell line of
-//! theirs sets up (`module load R`), or else Endeavor's own R when it's installed,
-//! else the one on their login shell's PATH.
-//!
-//! Endeavor installs its own R only on a Mac, only when no R is found, and only
-//! after the user agrees (`install_own`): CRAN's installer, unpacked into
-//! Endeavor's folder rather than run, so it needs no admin rights, puts nothing
-//! on the PATH and edits no shell startup file. On Linux and on servers, people
-//! install R themselves (rig, the system's packages, or a cluster's module).
-//! `own_offered`, `own_installed`, `install_own` and `remove_own` are for the
-//! app's Settings too, as `julia`'s are.
-//!
-//! Unlike Julia, R isn't looked for when the runtime starts: the core starts it
-//! the first time an R notebook opens, and a runtime that never opens one never
-//! needs R. Nor is it found once and then run by its path: the shell line and
-//! the login shell run each time R starts, so what they set up besides the PATH
-//! (a module's libraries, the compiler Ember's install builds with) is there too.
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Source {
-    /// `--r PATH`: an Rscript, or the R beside one.
     Path(String),
-    /// `--r auto`: Endeavor's own when it's installed, else the login shell's (on Windows the PATH's).
     #[default]
     Auto,
-    /// `--r-shell LINE`: what `LINE` puts on the login shell's PATH.
     Shell(String),
 }
 
 impl Source {
-    /// `--r VALUE` or `--r-shell VALUE`, as `flag` says.
     pub fn from_flag(flag: &str, value: String) -> Source {
         match (flag, value.as_str()) {
             ("--r-shell", _) => Source::Shell(value),
@@ -40,7 +18,6 @@ impl Source {
         }
     }
 
-    /// The flag and value that give this to another `endeavor` command.
     pub fn args(&self) -> [String; 2] {
         match self {
             Source::Path(path) => ["--r".into(), path.clone()],
@@ -49,7 +26,6 @@ impl Source {
         }
     }
 
-    /// How the user would recognize it in an error.
     pub fn describe(&self) -> String {
         match self {
             Source::Path(path) => path.clone(),
@@ -61,8 +37,6 @@ impl Source {
         }
     }
 
-    /// The Rscript this runs, as a path where it's known (the chosen one, Endeavor's own, the one the
-    /// login shell found), else as `describe` says it: for the app to show (`endeavor/r_status`).
     pub fn rscript(&self) -> String {
         match self {
             Source::Path(path) => path.clone(),
@@ -74,25 +48,16 @@ impl Source {
         }
     }
 
-    /// `Rscript ARGS`. Through the user's shell, the arguments are passed in the
-    /// environment, which every shell reads the same way (sh, bash, zsh, fish,
-    /// csh and tcsh), and not as the script's own arguments, which they don't. A
-    /// shell that ran but found no Rscript ends with 127 (`not_found`); one that
-    /// ended with 0 never started it (`ended_early`).
     pub fn command(&self, args: &[&Path]) -> Command {
         self.command_in(&std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into()), args)
     }
 
-    /// `command` with `shell` as the user's shell.
     fn command_in(&self, shell: &str, args: &[&Path]) -> Command {
         let shell = |line: Option<&str>| {
             let quoted: String = (0..args.len()).map(|i| format!(" \"$ENDEAVOR_R_ARG{i}\"")).collect();
             let line = line.map(|line| line.replace('\n', "; "));
             let mut command = Command::new(shell);
             if is_csh(shell) {
-                // csh and tcsh take `-l` only as their one flag, so they run as a plain `-c`, which still reads
-                // ~/.cshrc or ~/.tcshrc, where module setup goes. Their `exit` doesn't end a `-c` early, and their
-                // `exec` of a missing program ends with 1, so after the line, sh starts R.
                 let line = line.map_or(String::new(), |line| format!("{line}; "));
                 command.args(["-c", &format!("{line}exec /bin/sh -c 'command -v Rscript >/dev/null || exit 127; exec Rscript{quoted}'")]);
             } else {
@@ -110,8 +75,6 @@ impl Source {
                 command.args(args);
                 command
             }
-            // Its packages go in its own library, never in the user's R library, and the user's R
-            // settings (~/.Renviron, ~/.Rprofile, R_LIBS) don't point it at another R's.
             Source::Auto if let Some(rscript) = own_in_use() => {
                 let own = own_dir(&crate::paths::Env::here());
                 let mut command = Command::new(&rscript);
@@ -128,49 +91,38 @@ impl Source {
         }
     }
 
-    /// Whether `status` is a shell's that found no Rscript.
     pub fn not_found(&self, status: std::process::ExitStatus) -> bool {
         !matches!(self, Source::Path(_)) && status.code() == Some(127)
     }
 
-    /// The folder of Endeavor's own R, when this is `--r auto` and it's installed: the R that runs.
     pub fn own(&self) -> Option<PathBuf> {
         (matches!(self, Source::Auto) && own_in_use().is_some()).then(|| own_dir(&crate::paths::Env::here()))
     }
 
-    /// Endeavor's own R, which may be installed here, when this is `--r auto`, it isn't installed yet,
-    /// and this is a Mac with an installer for its kind of processor: what installing it means.
     pub fn own_item(&self) -> Option<wire::Item> {
         (matches!(self, Source::Auto) && own_rscript().is_none()).then(own_offered).flatten()
     }
 
-    /// Whether `status` is a shell's that ended well without starting R: a shell line
-    /// that ends in a comment (`module load R  # 4.4`) comments out the rest of the script.
     pub fn ended_early(&self, status: std::process::ExitStatus) -> bool {
         matches!(self, Source::Shell(_)) && status.success()
     }
 }
 
-/// csh and tcsh, which read `-c` scripts their own way.
 pub(crate) fn is_csh(shell: &str) -> bool {
     matches!(shell.rsplit('/').next(), Some("csh" | "tcsh" | "bsd-csh"))
 }
 
-/// `path` with `~/` expanded, and the Rscript beside it when it names R itself.
 fn rscript_at(path: &str) -> String {
     let path = match (path.strip_prefix("~/"), std::env::home_dir()) {
         (Some(rest), Some(home)) => format!("{}/{rest}", home.display()),
         _ => path.to_owned(),
     };
-    // As text, so the path keeps the separators it was given.
     match path.rsplit(['/', '\\']).next() {
         Some(name @ ("R" | "R.exe")) => format!("{}{}", &path[..path.len() - name.len()], name.replacen('R', "Rscript", 1)),
         _ => path,
     }
 }
 
-/// Endeavor's own R, pinned like its Julia: CRAN's installer for each kind of Mac, with the oldest
-/// macOS it runs on, its SHA-256 and size.
 pub const OWN_VERSION: &str = "4.6.1";
 const INSTALLERS: [(&str, u32, &str, &str, u64); 2] = [
     (
@@ -189,50 +141,36 @@ const INSTALLERS: [(&str, u32, &str, &str, u64); 2] = [
     ),
 ];
 
-/// About how much room the installed R takes, in MB.
 const INSTALLED_MB: u64 = 165;
 
-/// Its packages' library, inside it: `R_LIBS_USER` when it runs.
 const USER_LIBRARY: &str = "user-library";
 
-/// Where the installer's R puts itself, which its scripts name.
 const FRAMEWORK: &str = "/Library/Frameworks/R.framework";
 
-/// The folder Endeavor's own R is in, installed or not: `~/.cache/endeavor/R-4.6.1`.
 pub fn own_dir(env: &crate::paths::Env) -> PathBuf {
     env.server_root().join(format!("R-{OWN_VERSION}"))
 }
 
-/// Endeavor's own R as it is installed on this computer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OwnR {
-    /// Its `Rscript`.
     pub rscript: PathBuf,
-    /// Its version: always `OWN_VERSION`, whose folder it is in.
     pub version: &'static str,
 }
 
-/// Endeavor's own R if it's installed; nothing is downloaded.
 pub fn own_installed() -> Option<OwnR> {
     own_rscript().map(|rscript| OwnR { rscript, version: OWN_VERSION })
 }
 
-/// What installing Endeavor's own R here would mean ("R 4.6.1 (about 165 MB, into …)"), or nothing
-/// where it isn't offered: anywhere but a Mac it has an installer for.
 pub fn own_offered() -> Option<wire::Item> {
     own_item_for(macos_version(), &crate::julia::uname("-m"), &crate::paths::Env::here())
 }
 
-/// Endeavor's own R when `--r auto` runs it: installed here, and the login shell finds no Rscript
-/// of the user's. Someone who installs R after Endeavor's gets theirs (from the runtime's next
-/// start: it's looked for once).
 fn own_in_use() -> Option<PathBuf> {
     static USERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let own = own_rscript()?;
     (!*USERS.get_or_init(|| users_rscript().is_some_and(|theirs| Path::new(&theirs) != own))).then_some(own)
 }
 
-/// The login shell's Rscript, on Unix (on Windows `auto` is the PATH's, and there is no own R).
 fn users_rscript() -> Option<String> {
     if cfg!(windows) {
         return None;
@@ -244,7 +182,6 @@ fn users_rscript() -> Option<String> {
     output.status.success().then(|| stdout.lines().rev().map(str::trim).find(|l| l.starts_with('/')).map(str::to_owned)).flatten()
 }
 
-/// Endeavor's own Rscript, if it's installed.
 fn own_rscript() -> Option<PathBuf> {
     let env = crate::paths::Env::here();
     if env.home.as_os_str().is_empty() {
@@ -253,8 +190,6 @@ fn own_rscript() -> Option<PathBuf> {
     Some(own_dir(&env).join("bin").join("Rscript")).filter(|rscript| rscript.is_file())
 }
 
-/// What installing Endeavor's own R means on macOS `macos` (its major version; `None` when this
-/// isn't a Mac) with the processor `arch` (`uname -m`).
 fn own_item_for(macos: Option<u32>, arch: &str, env: &crate::paths::Env) -> Option<wire::Item> {
     if env.home.as_os_str().is_empty() || !INSTALLERS.iter().any(|i| i.0 == arch && macos.is_some_and(|v| v >= i.1)) {
         return None;
@@ -262,9 +197,6 @@ fn own_item_for(macos: Option<u32>, arch: &str, env: &crate::paths::Env) -> Opti
     Some(wire::Item { kind: wire::KIND_RUNTIME.into(), name: format!("R {OWN_VERSION}"), size_mb: Some(INSTALLED_MB), place: Some(own_dir(env).display().to_string()) })
 }
 
-/// Install Endeavor's own R on this Mac: download CRAN's installer, check it, and unpack it
-/// into `own_dir` without running it (as rig's user mode does), then make it run from there.
-/// Only after the user agreed. `progress` hears each step.
 pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<OwnR, String> {
     let env = crate::paths::Env::here();
     let arch = crate::julia::uname("-m");
@@ -280,10 +212,8 @@ pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<OwnR, String> {
     let part = root.join(format!("R-{OWN_VERSION}-{arch}.pkg.part"));
     crate::julia::download(&part, url, sha256, size, &name, progress)?;
     progress(format!("Unpacking {name}…"));
-    // pkgutil takes only a file named .pkg.
     let pkg = part.with_extension("");
     std::fs::rename(&part, &pkg).map_err(|e| e.to_string())?;
-    // Unpacked beside the target, then renamed, so a half-unpacked R is never used.
     let staging = root.join(format!("R-{OWN_VERSION}.unpacking"));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
@@ -295,14 +225,11 @@ pub fn install_own(progress: &mut dyn FnMut(String)) -> Result<OwnR, String> {
     let _ = std::fs::remove_dir_all(&staging);
     let _ = std::fs::remove_file(&pkg);
     unpacked.map_err(|why| format!("Couldn't unpack {name}: {why}"))?;
-    // Fonts for plots, as R's installer does; R still runs if it fails.
     progress(format!("Setting up fonts for {name}…"));
     let _ = Command::new(dir.join("bin").join("fc-cache")).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     own_installed().ok_or(format!("{name} was unpacked, but its Rscript isn't in {}", dir.display()))
 }
 
-/// Remove Endeavor's own R, with the R packages and the Ember installed in it, and what an install
-/// that didn't finish left beside it. Stop the runtimes that use it first.
 pub fn remove_own() -> Result<(), String> {
     let env = crate::paths::Env::here();
     if env.home.as_os_str().is_empty() {
@@ -321,7 +248,6 @@ pub fn remove_own() -> Result<(), String> {
     Ok(())
 }
 
-/// macOS's major version (`sw_vers`), on a Mac.
 fn macos_version() -> Option<u32> {
     if !cfg!(target_os = "macos") {
         return None;
@@ -330,7 +256,6 @@ fn macos_version() -> Option<u32> {
     String::from_utf8_lossy(&output.stdout).trim().split('.').next()?.parse().ok()
 }
 
-/// Expand the installer into `staging` and unpack its R framework: R's own folder (`Resources`).
 fn unpack(pkg: &Path, staging: &Path) -> Result<PathBuf, String> {
     let expanded = staging.join("pkg");
     let mut pkgutil = Command::new("pkgutil");
@@ -352,8 +277,6 @@ fn unpack(pkg: &Path, staging: &Path) -> Result<PathBuf, String> {
     Ok(resources)
 }
 
-/// Make the R in `resources` run from `home` (where it is moved next), not from `/Library/Frameworks`
-/// where its installer would put it: what rig's user mode does.
 fn patch(resources: &Path, home: &Path) -> Result<(), String> {
     let home = home.display().to_string();
     let quoted = sh_quoted(&home);
@@ -362,12 +285,10 @@ fn patch(resources: &Path, home: &Path) -> Result<(), String> {
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         std::fs::write(&path, change(text)).map_err(|e| format!("{}: {e}", path.display()))
     };
-    // R's own script: its home, and the libraries beside it (they name /Library/Frameworks).
     edit("bin/R", &|text| {
         let home_line = format!("R_HOME_DIR={quoted}\nexport DYLD_LIBRARY_PATH=\"${{R_HOME_DIR}}/lib\"");
         replace_lines(&text, |line| line.starts_with("R_HOME_DIR=").then(|| home_line.clone())).replace(&format!("{FRAMEWORK}/Resources"), "${R_HOME}")
     })?;
-    // Packages built from source link to its library here.
     edit("etc/Makeconf", &|text| replace_lines(&text, |line| line.strip_prefix("LIBR").is_some_and(|rest| rest.trim_start().starts_with('=')).then(|| "LIBR = -L\"$(R_HOME)/lib\" -lR".into())))?;
     let qpdf = sh_quoted(&format!("{home}/bin/qpdf"));
     edit("etc/Renviron", &|text| replace_lines(&text, |line| line.starts_with("R_QPDF=").then(|| format!("R_QPDF=${{R_QPDF-{qpdf}}}"))))?;
@@ -381,7 +302,6 @@ fn patch(resources: &Path, home: &Path) -> Result<(), String> {
             replace_versioned(&text, &home)
         })?;
     }
-    // Rscript is a program that finds R through RHOME when it's set, so each becomes a script that sets it.
     for (rscript, beside) in [("bin/Rscript", "bin"), ("Rscript", "")] {
         let path = resources.join(rscript);
         let original = path.with_file_name("Rscript.orig");
@@ -396,14 +316,12 @@ fn patch(resources: &Path, home: &Path) -> Result<(), String> {
         let fonts = sh_quoted(&Path::new(&home).join("fontconfig/fonts/fonts.conf").display().to_string());
         write_script(&fc_cache, &format!("#!/bin/sh\nFONTCONFIG_FILE={fonts}\nexport FONTCONFIG_FILE\nexec {original} \"$@\"\n"))?;
     }
-    // Older Rs carry these, which shadow the system's and crash once the libraries come from DYLD_LIBRARY_PATH.
     for shadow in ["libc++.1.dylib", "libc++abi.1.dylib", "libunwind.1.dylib"] {
         let _ = std::fs::remove_file(resources.join("lib").join(shadow));
     }
     Ok(())
 }
 
-/// `text` with each line `change` gives a new one for replaced.
 fn replace_lines(text: &str, change: impl Fn(&str) -> Option<String>) -> String {
     text.split_inclusive('\n')
         .map(|line| {
@@ -413,7 +331,6 @@ fn replace_lines(text: &str, change: impl Fn(&str) -> Option<String>) -> String 
         .collect()
 }
 
-/// `text` with each `/Library/Frameworks/R.framework/Versions/<version>/Resources` as `home`.
 fn replace_versioned(text: &str, home: &str) -> String {
     let prefix = format!("{FRAMEWORK}/Versions/");
     let mut out = String::new();
@@ -436,7 +353,6 @@ fn replace_versioned(text: &str, home: &str) -> String {
     out
 }
 
-/// `text` in single quotes, for sh.
 fn sh_quoted(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
@@ -475,15 +391,12 @@ mod tests {
         assert_eq!(rscript_at(r"C:\Program Files\R\R-4.4.1\bin\R.exe"), r"C:\Program Files\R\R-4.4.1\bin\Rscript.exe");
     }
 
-    /// In each shell this machine has: the line runs first and what it sets reaches R, the arguments
-    /// arrive whole, a line that leaves no Rscript is `not_found`, and one that ends in a comment is `ended_early`.
     #[cfg(unix)]
     #[test]
     fn a_shell_line_runs_before_rscript_with_the_arguments_whole() {
         let dir = std::env::temp_dir().join(format!("endeavor-r-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("Rscript");
-        // Prints what the shell line set, then its arguments one per line.
         crate::test_exec::write_executable(&fake, "#!/bin/sh\necho \"loaded=$LOADED\"\nfor a in \"$@\"; do echo \"$a\"; done\n");
         let args = [Path::new("--vanilla"), Path::new("/a path/with 'quotes', \"double\", $dollars, `ticks` and !bang.R")];
         let expected = format!("loaded=yes\n--vanilla\n{}\n", args[1].display());
@@ -541,8 +454,6 @@ mod tests {
         assert_eq!(sh_quoted("/Users/a b/it's"), r"'/Users/a b/it'\''s'");
     }
 
-    /// The installer's R, made to run from a home folder with a space and a quote in its path: its
-    /// scripts name that folder, and each Rscript runs the original with RHOME set to it.
     #[cfg(unix)]
     #[test]
     fn the_installers_r_is_made_to_run_from_its_new_home() {

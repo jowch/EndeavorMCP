@@ -1,16 +1,3 @@
-//! Finding the runtime in a state folder, or starting one, and stopping it: the one place that does
-//! each, for the helper (`endeavor connect`), `serve` and `mcp`. The callers differ in what they say
-//! while it goes on and how they end it (`Hooks`), and in the words for what comes of it.
-//!
-//! A start, once begun, finishes without the process that asked for it. The core is its own session. As
-//! the first thing it does it holds `starting.lock` in the state folder, and it lets go only after it has
-//! written `runtime.json`; the OS lets go if it dies. So a held `starting.lock` with no usable record
-//! means a start is under way, and one that is free with no record means there is none. The core writes
-//! its pid and start time into the file once it holds the lock and blanks them before it lets go, so
-//! whoever holds the lock is named while it is held. The process that spawned the core holds `start.lock`
-//! until the core holds its own lock, and waits for the runtime without it. A client that waits for a
-//! start never ends it; a forced stop (`end`) does, by the pid the file names.
-
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -19,24 +6,16 @@ use std::time::{Duration, Instant};
 
 use crate::{Args, Event, Runtime, State, julia, standalone, stopped};
 
-/// What a state folder holds, found without starting or stopping anything.
 pub(crate) enum Looked {
-    /// No record.
     NotRunning,
-    /// A record whose process is gone.
     Dead(State),
-    /// Alive, and answering on its port when asked to (`look`'s `ping`).
     Running(State, u16),
-    /// Recorded by another machine of the same home folder, and this isn't asked to take it.
     OtherNode(State),
-    /// Alive, from a build before one port per runtime.
     Older(State),
-    /// Alive, with a port, and not answering.
     Silent(State),
 }
 
 impl Looked {
-    /// The state of a runtime whose process is alive, whether or not it answers.
     pub(crate) fn alive(self) -> Option<State> {
         match self {
             Looked::Running(state, _) | Looked::Older(state) | Looked::Silent(state) => Some(state),
@@ -45,9 +24,6 @@ impl Looked {
     }
 }
 
-/// The runtime in `dir`. With `any_node` the record of another node is taken as this machine's:
-/// the state folder belongs to this one machine, which was renamed. Without `ping` a process that is
-/// alive is `Running`, and the port is not asked.
 pub(crate) fn look(dir: &Path, any_node: bool, ping: bool) -> Looked {
     let Some(state) = crate::read_state(dir) else { return Looked::NotRunning };
     if !crate::is_this_node(&state.node) && !any_node {
@@ -58,24 +34,15 @@ pub(crate) fn look(dir: &Path, any_node: bool, ping: bool) -> Looked {
     }
     match state.port {
         None => Looked::Older(state),
-        // Twice: a busy runtime can be slow to answer once.
         Some(port) if !ping || answers(port, &state.token) || answers(port, &state.token) => Looked::Running(state, port),
         Some(_) => Looked::Silent(state),
     }
 }
 
-/// The state folder of a runtime on this machine when none is named (`serve`, `mcp`, `stop`, `status`,
-/// `open`, `update` and a server's `connect`): `Env::state_dir`, the plugin's and now the app's, or while
-/// a runtime alive on this machine is recorded in the app's older folder (`Env::apps_old_state_dir`),
-/// that one, so the app's open notebooks aren't opened again by a second runtime. Once it stops, the
-/// next start is in `state_dir` (#110).
 pub(crate) fn default_state_dir(env: &crate::paths::Env) -> std::path::PathBuf {
     or_older(&env.state_dir(), env.apps_old_state_dir().as_deref())
 }
 
-/// `dir`, or while a runtime alive on this machine is recorded in `older`, that one (`default_state_dir`).
-/// Asked again before each start a long-lived process makes, not only when it begins: once the runtime in
-/// the older folder stops, a restart over the same connection goes to `dir` (#434).
 pub(crate) fn or_older(dir: &Path, older: Option<&Path>) -> std::path::PathBuf {
     match older {
         Some(old) if look(old, false, false).alive().is_some() => old.to_path_buf(),
@@ -83,24 +50,17 @@ pub(crate) fn or_older(dir: &Path, older: Option<&Path>) -> std::path::PathBuf {
     }
 }
 
-/// Whether the runtime on `port` answers its calls.
 fn answers(port: u16, token: &str) -> bool {
     crate::bridge_call(port, crate::CALL, token, "ping").is_ok_and(|status| status == 200)
 }
 
-/// How long a runtime that is alive and doesn't answer is asked again before it counts as stuck: long
-/// enough for a computer that just woke from sleep or a moment of heavy load, and well within the 45 s an
-/// agent's call waits.
 const SILENT_WAIT: Duration = Duration::from_secs(30);
 
-/// `SILENT_WAIT`, or in a debug build `ENDEAVOR_TEST_SILENT_WAIT_SECS`.
 pub(crate) fn silent_wait() -> Duration {
     let test = cfg!(debug_assertions).then(|| std::env::var("ENDEAVOR_TEST_SILENT_WAIT_SECS").ok()?.parse().ok()).flatten();
     test.map_or(SILENT_WAIT, Duration::from_secs)
 }
 
-/// Look again, after each `pause`, at the runtime in `dir`, which was alive and didn't answer at `since`,
-/// until it answers or goes, or `limit` has passed since then. None when `pause` says to stop.
 pub(crate) fn ask_again(dir: &Path, any_node: bool, since: Instant, limit: Duration, pause: &mut dyn FnMut() -> bool) -> Option<Looked> {
     loop {
         if !pause() {
@@ -113,7 +73,6 @@ pub(crate) fn ask_again(dir: &Path, any_node: bool, since: Instant, limit: Durat
     }
 }
 
-/// Why no runtime is started beside one that is alive and doesn't answer.
 pub(crate) fn silent_text(pid: i32) -> String {
     format!(
         "Endeavor here (pid {pid}) is running but hasn't answered for {} seconds, so no second one was started beside it. It may be busy, for example out of memory, or stuck. Stopping it (`endeavor stop`, or Stop in the Endeavor app) lets a new one start, and ends what it holds in memory.",
@@ -121,85 +80,56 @@ pub(crate) fn silent_text(pid: i32) -> String {
     )
 }
 
-/// Why the runtime recorded in a state folder is not used.
 pub(crate) fn other_node_text(node: &str) -> String {
     let here = crate::hostname();
     format!("Endeavor for this folder is running on {node}, and this is {here}. Connect to {node} to use it, or stop it there.")
 }
 
-/// What the callers of `find_or_start` give it.
 pub(crate) struct Want<'a> {
     pub args: &'a Args,
-    /// The notebook system to start; only Pluto is built.
     pub engine: &'a str,
-    /// Whether Julia may be downloaded when none is found.
     pub install: bool,
-    /// The folder `runtime/` was unpacked to, asked for only when a runtime is started.
     pub runtime: &'a dyn Fn() -> Result<PathBuf, String>,
-    /// Where a runtime reports its exit.
     pub events: &'a Sender<Event>,
-    /// Never start a runtime: find the one that runs, or wait for a start under way, and say nothing
-    /// runs (`Outcome::NothingRunning`) when there is none or the start ended without one.
     pub attach_only: bool,
-    /// Stop a runtime that an older version started, which offers an older interface than this build's
-    /// (or none), or one whose Julia was removed, when no notebook is open in it, and start this build's
-    /// in its place (`replaces`).
     pub replace_older: bool,
 }
 
-/// What a caller says and decides while a start goes on.
 pub(crate) trait Hooks {
-    /// A line about how the start is going: Julia's download, the runtime's log.
     fn progress(&mut self, line: String);
-    /// Julia was found, or installed.
     fn found(&mut self, version: &str, path: &str);
-    /// Wait up to `wait`, and hear what the caller has to say meanwhile. False ends the wait. It stops
-    /// a runtime only if this process started it.
     fn wait(&mut self, wait: Duration, waiting: Waiting) -> bool;
 }
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Waiting {
-    /// For the start lock, which is held for a look and a spawn, and for Julia to be found.
     Lock,
-    /// For a runtime another process is starting.
     Other,
-    /// For a runtime this process started.
     Ready,
-    /// For a runtime that is alive and silent to answer again.
     Silent,
 }
 
-/// A runtime that can be used.
 pub(crate) struct Up {
     pub state: State,
     pub port: u16,
     pub runtime: Runtime,
-    /// This call started it.
     pub started: bool,
 }
 
 pub(crate) enum Outcome {
     Ready(Up),
-    /// `OtherNode` or `Older`: the record can't be used, and no runtime was started.
     Unusable(Looked),
-    /// Julia is not there and `install` was false.
     NeedsInstall(Vec<wire::Item>),
     Failed(String),
-    /// It exited while starting.
     Died { status: String, log_tail: Vec<String> },
-    /// `Hooks::wait` said to stop.
     Cancelled,
-    /// `Want::attach_only`, and no runtime runs and none is starting.
     NothingRunning,
 }
 
 const POLL: Duration = Duration::from_millis(200);
 
-/// How long a core has to take its `starting.lock`, which is the first thing it does.
 const CORE_LOCK_WAIT: Duration = Duration::from_secs(10);
 
-/// Take the start lock, which is held for a look and a spawn.
 pub(crate) fn take_start_lock(dir: &Path, hooks: &mut dyn Hooks) -> Result<File, Outcome> {
     let waited = standalone::wait_for_start_lock(dir, standalone::start_lock_limit(), || if hooks.wait(POLL, Waiting::Lock) { Ok(()) } else { Err(()) });
     waited.map_err(|wait| match wait {
@@ -209,14 +139,11 @@ pub(crate) fn take_start_lock(dir: &Path, hooks: &mut dyn Hooks) -> Result<File,
     })
 }
 
-/// Find the runtime in `want.args.state_dir`, or start one, and wait until it answers. Callers asked at
-/// once start one runtime and the rest wait for it.
 pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
     let dir = &want.args.state_dir;
     if let Err(e) = crate::make_state_dir(dir) {
         return Outcome::Failed(e);
     }
-    // At most once: a runtime that comes back as an older one after that is used as it is.
     let mut replaced = false;
     loop {
         let lock = match take_start_lock(dir, hooks) {
@@ -224,9 +151,7 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
             Err(outcome) => return outcome,
         };
         let looked_at = Instant::now();
-        // Before the look: a core that records itself and lets go in between is then found by the look.
         let starting = lock_state(dir).is_held();
-        // A runtime this call replaces once its own start is ready to go, and why.
         let mut older = None;
         match look(dir, want.args.any_node, true) {
             Looked::Running(state, port) => match (!starting && !replaced).then(|| replaces(want, &state, port)).flatten() {
@@ -234,18 +159,15 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
                 None => return Outcome::Ready(up(want, state, port, None)),
             },
             unusable @ (Looked::OtherNode(_) | Looked::Older(_)) => return Outcome::Unusable(unusable),
-            // Never a second runtime beside one that is alive: both would open the same notebooks.
             Looked::Silent(state) if !starting && !want.attach_only => {
                 drop(lock);
                 hooks.progress(format!("Endeavor here (pid {}) isn't answering; asking it again for up to {} seconds.", state.pid, silent_wait().as_secs()));
                 match ask_again(dir, want.args.any_node, looked_at, silent_wait(), &mut || hooks.wait(POLL, Waiting::Silent)) {
                     None => return Outcome::Cancelled,
                     Some(Looked::Silent(state)) => return Outcome::Failed(silent_text(state.pid)),
-                    // It answered or went: looked at again with the lock.
                     Some(_) => continue,
                 }
             }
-            // Its core was killed: what it started may still run, and open the same notebooks as the new one.
             Looked::Dead(state) if !starting && !want.attach_only && crate::stop_workers(state.pid, state.started, state.boot.as_deref()) => {
                 hooks.progress(format!("Stopped what the last Endeavor here left running when it ended (pid {}).", state.pid));
             }
@@ -255,7 +177,6 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
             drop(lock);
             match await_runtime(dir, want.args.any_node, None, hooks) {
                 Ok((state, port)) => return Outcome::Ready(up(want, state, port, None)),
-                // It died; the lock is taken again to look, and to start one if none is, unless none is to be started.
                 Err(Waited::Gone) if want.attach_only => return Outcome::NothingRunning,
                 Err(Waited::Gone) => continue,
                 Err(Waited::Out(outcome)) => return outcome,
@@ -269,7 +190,6 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
         }
         let (runtime_dir, julia, token) = match prepare(want, hooks) {
             Ok(prepared) => prepared,
-            // The runtime it would replace is kept rather than leave none.
             Err(outcome) if older.is_some() && !matches!(outcome, Outcome::Cancelled) => {
                 return match look(dir, want.args.any_node, true) {
                     Looked::Running(state, port) => {
@@ -290,7 +210,6 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
             Err(outcome) => return outcome,
         };
         if older.is_some() {
-            // Looked at again: finding or installing Julia can take minutes, and a notebook may have been opened meanwhile.
             match look(dir, want.args.any_node, true) {
                 Looked::Running(state, port) if let Some(why) = replaces(want, &state, port) => {
                     hooks.progress(match why {
@@ -298,15 +217,11 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
                         Replacing::JuliaRemoved => format!("Endeavor here (pid {}) runs on a Julia that was removed since it started (juliaup removes a version when it updates past it), and no notebook is open in it; stopping it so that it starts again on the Julia here now.", state.pid),
                     });
                     match end(dir, want.args.any_node, stopped::How::Connection, false, want.events) {
-                        // On to the start below, with the lock still held, and the note for the clients still attached to it kept.
                         Ended::Stopped(_) | Ended::NotRunning => {}
-                        // Looked at again, and used as it is.
                         _ => continue,
                     }
                 }
-                // It went by itself meanwhile.
                 Looked::NotRunning | Looked::Dead(_) => {}
-                // Kept, or something else is there now: looked at again, and used as it is.
                 _ => continue,
             }
         }
@@ -327,12 +242,9 @@ pub(crate) fn find_or_start(want: &Want, hooks: &mut dyn Hooks) -> Outcome {
     }
 }
 
-/// What a start needs before it spawns the core: the runtime folder, Julia's flags and the token.
-// `Outcome` is large, as `find_julia`'s error is; this runs once per start.
 #[allow(clippy::result_large_err)]
 fn prepare(want: &Want, hooks: &mut dyn Hooks) -> Result<(PathBuf, Vec<String>, String), Outcome> {
     let runtime_dir = (want.runtime)().map_err(Outcome::Failed)?;
-    // Found here unless the core finds it when it's first needed.
     let found = match want.args.julia_when_needed {
         true if want.engine != wire::ENGINE_PLUTO => return Err(Outcome::Failed(unknown_engine(want.engine))),
         true => None,
@@ -343,24 +255,12 @@ fn prepare(want: &Want, hooks: &mut dyn Hooks) -> Result<(PathBuf, Vec<String>, 
     Ok((runtime_dir, julia, token))
 }
 
-/// Why a runtime is stopped for a new one (`replaces`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Replacing {
-    /// An older version started it.
     Older,
-    /// The Julia it runs on was removed since it started (`crate::julia_removed`).
     JuliaRemoved,
 }
 
-/// Whether `want` replaces the runtime `state` records, which answers on `port`, and why: it asks for
-/// that, no notebook is open in it, and either it offers an older interface than this build's or says
-/// none (so it is an older version's, which may lack what this one has, R notebooks among them), or it
-/// is one this build uses as it is whose Julia was removed, so that no notebook could start in it (#347).
-/// One that offers a newer interface is left alone even then, so two versions that share a state folder
-/// never take turns stopping each other's; so is one whose notebooks can't be counted. "No notebook open" is a count taken
-/// just before the stop, not a guarantee: the start lock doesn't hold back the calls of clients already
-/// attached to it, so a notebook another session opens between the count and the stop is cut off (its
-/// file is on disk).
 fn replaces(want: &Want, state: &State, port: u16) -> Option<Replacing> {
     if !want.replace_older {
         return None;
@@ -373,14 +273,12 @@ fn replaces(want: &Want, state: &State, port: u16) -> Option<Replacing> {
     why.filter(|_| crate::open_notebooks(port, &state.token) == Some(0))
 }
 
-/// A runtime to use, the one `started` if it was started here.
 fn up(want: &Want, state: State, port: u16, started: Option<Runtime>) -> Up {
     let was_started = started.is_some();
     let runtime = started.unwrap_or_else(|| Runtime::recorded(&state, &want.args.state_dir, want.events));
     Up { state, port, runtime, started: was_started }
 }
 
-/// Find Julia for the notebook system `engine`, or with `install` get it. The path of the julia that runs it.
 pub(crate) fn find_julia(source: &julia::Source, engine: &str, install: bool, hooks: &mut dyn Hooks) -> Result<String, Outcome> {
     if engine != wire::ENGINE_PLUTO {
         return Err(Outcome::Failed(unknown_engine(engine)));
@@ -399,31 +297,24 @@ fn unknown_engine(engine: &str) -> String {
     format!("Endeavor doesn't know a notebook system called \"{engine}\".")
 }
 
-/// `DIR/starting.lock`, opened (it is made if there is none) and not yet held.
 fn open_starting(dir: &Path) -> std::io::Result<File> {
     crate::owner_only(std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)).open(dir.join("starting.lock"))
 }
 
-/// The process that holds `starting.lock`, as the file names it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Core {
     pub pid: i32,
-    /// As in `State`.
     pub started: Option<u64>,
     pub boot: Option<String>,
-    /// The computer it runs on: a pid means nothing on another.
     pub node: String,
 }
 
 impl Core {
-    /// The core is this process.
     fn this() -> Core {
         Core { pid: std::process::id() as i32, started: crate::own_start_time(), boot: crate::own_boot(), node: crate::hostname() }
     }
 }
 
-/// Where on Windows the core's lock is: a byte past what the file holds (`write_core`), so that
-/// reading the file does not need the lock. The shared lock `starting` asks for covers the whole file.
 #[cfg(windows)]
 const LOCKED_BYTE: u32 = 4096;
 
@@ -432,8 +323,6 @@ fn lock_starting(file: &File) -> std::io::Result<()> {
     file.lock()
 }
 
-/// On Windows a byte-range lock is mandatory: the lock `File::lock` takes covers every byte, and another
-/// process could not read the pid the file holds.
 #[cfg(windows)]
 fn lock_starting(file: &File) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
@@ -447,9 +336,6 @@ fn lock_starting(file: &File) -> std::io::Result<()> {
     if locked == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
 }
 
-/// Write who holds the lock (or, with none, that no one does) as the whole of what the file holds. The
-/// lock is held when this is called, so no shared lock over the file (`lock_state`) is held meanwhile on
-/// Windows.
 fn write_core(mut file: &File, core: Option<&Core>) -> std::io::Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
@@ -459,7 +345,6 @@ fn write_core(mut file: &File, core: Option<&Core>) -> std::io::Result<()> {
     }
 }
 
-/// What the file says, read as it is: whether the process is there is for `lock_state`.
 fn read_core(mut file: &File) -> Option<Core> {
     let mut text = String::new();
     file.seek(SeekFrom::Start(0)).ok()?;
@@ -473,9 +358,6 @@ fn read_core(mut file: &File) -> Option<Core> {
     })
 }
 
-/// The core takes `starting.lock` before it does anything else, writes its own pid and start time in it,
-/// and holds it until it has recorded itself (`release_starting`). It is not inherited by Julia (files are
-/// opened close-on-exec): if it were, Julia would hold it for as long as it runs.
 pub(crate) fn hold_starting(dir: &Path) -> std::io::Result<File> {
     let file = open_starting(dir)?;
     lock_starting(&file)?;
@@ -483,20 +365,13 @@ pub(crate) fn hold_starting(dir: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
-/// Let go of `starting.lock` once `runtime.json` is written. The pid goes first: a file that still named
-/// this process once a later core holds the lock would have a forced stop end a runtime that is up.
 pub(crate) fn release_starting(file: File) {
     let _ = write_core(&file, None);
 }
 
-/// What `starting.lock` says.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Lock {
-    /// No core holds it: no start is under way.
     Free,
-    /// A core holds it: a start is under way. The core the file names, when it names a process on this
-    /// computer that is the one named (`pid_alive`) and has no record, so it has not finished; none for a
-    /// core of an older build, one that has just taken the lock, or one that is another computer's.
     Held(Option<Core>),
 }
 
@@ -505,7 +380,6 @@ impl Lock {
         matches!(self, Lock::Held(_))
     }
 
-    /// The core the file names.
     pub(crate) fn core(&self) -> Option<&Core> {
         match self {
             Lock::Held(core) => core.as_ref(),
@@ -514,10 +388,6 @@ impl Lock {
     }
 }
 
-/// The one reading of `starting.lock`: whether a core holds it, and who. Asked with a shared lock, so that
-/// two who ask never make each other see it held. On a home folder shared by several machines the lock may
-/// not reach them all. It makes no file: a core makes `starting.lock` before it holds it, so none means no
-/// start. Read before the record is, since a core writes the record before it lets go.
 pub(crate) fn lock_state(dir: &Path) -> Lock {
     let Ok(file) = File::open(dir.join("starting.lock")) else { return Lock::Free };
     if file.try_lock_shared().is_ok() {
@@ -531,8 +401,6 @@ pub(crate) fn lock_state(dir: &Path) -> Lock {
     Lock::Held(core)
 }
 
-/// The core `runtime` was just spawned: wait until it holds `starting.lock`, so that nothing that takes
-/// the start lock after this finds a spawned core it can't see.
 fn await_core_lock(dir: &Path, runtime: &Runtime) -> Result<(), Outcome> {
     let until = Instant::now() + CORE_LOCK_WAIT;
     loop {
@@ -540,7 +408,6 @@ fn await_core_lock(dir: &Path, runtime: &Runtime) -> Result<(), Outcome> {
             let (status, log_tail) = runtime.died(status);
             return Err(Outcome::Died { status, log_tail });
         }
-        // Named in the file, so that whoever takes the start lock after this finds it ready to be stopped.
         if lock_state(dir).core().is_some_and(|core| core.pid == runtime.pid) || crate::read_state(dir).is_some_and(|state| state.pid == runtime.pid) {
             return Ok(());
         }
@@ -552,21 +419,14 @@ fn await_core_lock(dir: &Path, runtime: &Runtime) -> Result<(), Outcome> {
     }
 }
 
-/// Why a wait for a runtime ended without one.
 enum Waited {
-    /// The start of another process ended with no runtime.
     Gone,
     Out(Outcome),
 }
 
-/// Wait for the runtime in `dir` to record itself and answer. `own` is the runtime this process
-/// started: it is the only one `Hooks::wait` ending the wait stops, and the only one whose exit is
-/// watched; for another process's start, the lock tells when it is over. The runtime's log goes to
-/// `hooks` before the answer.
 fn await_runtime(dir: &Path, any_node: bool, own: Option<&Runtime>, hooks: &mut dyn Hooks) -> Result<(State, u16), Waited> {
     let mut log = Log::new(dir.join("runtime.log"));
     let waiting = if own.is_some() { Waiting::Ready } else { Waiting::Other };
-    // The core of a start another process owns, to tell whether it ended because it was stopped.
     let mut core = None;
     let result = loop {
         log.drain(&mut |line| hooks.progress(line));
@@ -576,7 +436,6 @@ fn await_runtime(dir: &Path, any_node: bool, own: Option<&Runtime>, hooks: &mut 
             let (status, log_tail) = runtime.died(status);
             break Err(Waited::Out(Outcome::Died { status, log_tail }));
         }
-        // Before the record is read: a core writes the record before it lets go of the lock.
         let lock = lock_state(dir);
         let held = own.is_some() || lock.is_held();
         if own.is_none() {
@@ -588,7 +447,6 @@ fn await_runtime(dir: &Path, any_node: bool, own: Option<&Runtime>, hooks: &mut 
             break Ok((state, port));
         }
         if !held {
-            // A start that was stopped is not started again for whoever waited for it.
             break Err(match core.and_then(|pid| stopped::why(dir, stopped::Of::Runtime(pid))) {
                 Some(how) => Waited::Out(Outcome::Failed(format!("Endeavor was stopped while it was starting. {}", crate::stopped_text(how)))),
                 None => Waited::Gone,
@@ -605,40 +463,23 @@ fn await_runtime(dir: &Path, any_node: bool, own: Option<&Runtime>, hooks: &mut 
     result
 }
 
-/// What ending the runtime recorded in a state folder came to.
 pub(crate) enum Ended {
-    /// None was recorded, or its process is gone.
     NotRunning,
-    /// It runs on another machine (its name).
     Elsewhere(String),
-    /// Stopped (its pid).
     Stopped(i32),
-    /// Still running after the stop (its pid).
     Alive(i32),
-    /// A core is starting and has no record yet, and `force` was not given: nothing was stopped.
     Starting,
-    /// `force` was given, and the file does not name the core that holds `starting.lock`, or what holds
-    /// it changed meanwhile: nothing was stopped.
     Unidentified,
-    /// A start that was under way was cancelled (its core's pid).
     Cancelled(i32),
 }
 
-/// What a helper's stop says when a runtime is starting and its `Stop` was not forced.
 pub(crate) const STILL_STARTING: &str = "Endeavor was not stopped: it is still starting. Try again once it is up, or force the stop to cancel the start.";
 
-/// What a stop here says when a runtime is starting and `force` was not given.
 pub(crate) const STILL_STARTING_FORCE: &str = "Endeavor was not stopped: it is still starting. A stop with `force` cancels the start.";
 
-/// What a forced stop says when the process that is starting Julia can't be told.
 pub(crate) const START_UNIDENTIFIED: &str = "Endeavor is starting, but it can't tell which process is starting it, so nothing was stopped. Try again in a moment. If this goes on, find the process with `ps` and end it.";
 
-/// End the runtime in `dir`, leaving a note of `how` for the clients still attached, and the record of one
-/// whose process is gone removed. A runtime that is alive and not answering is stopped as well. The
-/// caller holds the start lock, so no start is begun meanwhile; one that is under way is not touched,
-/// unless `force` is given: then its core is ended, with Julia and its children, and nothing of it is left.
 pub(crate) fn end(dir: &Path, any_node: bool, how: stopped::How, force: bool, events: &Sender<Event>) -> Ended {
-    // Before the look: a core that records itself and lets go in between is then found by the look.
     let lock = lock_state(dir);
     match look(dir, any_node, false) {
         Looked::OtherNode(state) => Ended::Elsewhere(state.node),
@@ -652,22 +493,12 @@ pub(crate) fn end(dir: &Path, any_node: bool, how: stopped::How, force: bool, ev
     }
 }
 
-/// Stop the runtime `state` records, which is alive.
 fn stop_up(dir: &Path, state: State, how: stopped::How, events: &Sender<Event>) -> Ended {
     if crate::stop_marked(dir, Some(&state), &Runtime::recorded(&state, dir, events), how) { Ended::Stopped(state.pid) } else { Ended::Alive(state.pid) }
 }
 
-/// How long the lock of a core that was ended is waited for. The OS lets it go when the core's last
-/// handle closes, and a process the core was starting may hold the file a moment longer.
 const LOCK_FREED_WITHIN: Duration = Duration::from_secs(5);
 
-/// No runtime is recorded as alive, and `lock` was read before the look. With a start under way and
-/// `force`, end the core the lock file names: the same stop as a runtime that is up (`stop_marked`), with
-/// its note for the clients that wait. The lock is read again immediately before the stop, and the first
-/// signal goes only to a process with the start time and boot the file gives (`Runtime::kill` checks
-/// them before each signal). A core is ended only if the file gives a start time, and the computer it
-/// runs on is this one; otherwise nothing is signalled, after a last look for the record of a start that
-/// has finished meanwhile, which is then stopped as any runtime is.
 fn without_runtime(dir: &Path, any_node: bool, lock: Lock, how: stopped::How, force: bool, events: &Sender<Event>) -> Ended {
     if !lock.is_held() {
         return Ended::NotRunning;
@@ -682,7 +513,6 @@ fn without_runtime(dir: &Path, any_node: bool, lock: Lock, how: stopped::How, fo
         if !crate::stop_marked(dir, None, &runtime, how) {
             return Ended::Alive(core.pid);
         }
-        // What the core would have removed.
         for name in ["runtime.json.tmp", "julia.json"] {
             let _ = std::fs::remove_file(dir.join(name));
         }
@@ -699,11 +529,9 @@ fn without_runtime(dir: &Path, any_node: bool, lock: Lock, how: stopped::How, fo
     }
 }
 
-/// A log read line by line as it grows.
 pub(crate) struct Log {
     path: PathBuf,
     lines: Option<BufReader<File>>,
-    /// A line written in part, which waits for the rest.
     line: String,
 }
 
@@ -712,7 +540,6 @@ impl Log {
         Log { path, lines: None, line: String::new() }
     }
 
-    /// Give `say` each whole line written since the last call, Pluto's secret masked.
     pub(crate) fn drain(&mut self, say: &mut dyn FnMut(String)) {
         if self.lines.is_none() {
             self.lines = File::open(&self.path).ok().map(BufReader::new);
@@ -728,7 +555,6 @@ impl Log {
     }
 }
 
-
 #[cfg(all(test, unix))]
 mod tests {
     use std::io::{Read, Write};
@@ -743,7 +569,6 @@ mod tests {
         lock_state(dir).is_held()
     }
 
-    /// A process of ours that does nothing for a minute, in its own group.
     struct Sleeper(Child);
 
     impl Sleeper {
@@ -760,7 +585,6 @@ mod tests {
             crate::unixproc::start_time(self.pid()).at().expect("a start time on this platform")
         }
 
-        /// The core file would name this process, on this computer, as it is.
         fn core(&self) -> Core {
             Core { pid: self.pid(), started: Some(self.started()), boot: crate::own_boot(), node: crate::hostname() }
         }
@@ -785,12 +609,10 @@ mod tests {
         std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
     }
 
-    /// A port that answers every call with 200.
     fn answering() -> u16 {
         counting().0
     }
 
-    /// A port that answers every call with 200, and how many connections it took.
     fn counting() -> (u16, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -799,7 +621,6 @@ mod tests {
         std::thread::spawn(move || {
             for mut socket in listener.incoming().flatten() {
                 counted.fetch_add(1, Ordering::SeqCst);
-                // The whole request first: answering and closing with part of it unread resets the connection.
                 let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
                 while socket.read(&mut [0; 1024]).is_ok_and(|n| n > 0) {}
                 let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
@@ -872,7 +693,6 @@ mod tests {
         assert!(matches!(end(false), Ended::Starting));
         assert!(!dir.join("runtime.json").exists(), "the record of a process that is gone is removed");
         drop(core);
-        // The lock belongs to the open file description, which another test's forked child may still hold until it execs.
         wait_free(&dir);
         assert!(matches!(end(false), Ended::NotRunning));
 
@@ -881,7 +701,6 @@ mod tests {
         assert!(dir.join("runtime.json").exists(), "a record of another node's is left");
     }
 
-    /// Until nothing holds `starting.lock`: a process another test forks holds its descriptor until it execs.
     fn wait_free(dir: &Path) {
         let until = Instant::now() + Duration::from_secs(10);
         while starting(dir) && Instant::now() < until {
@@ -913,13 +732,11 @@ mod tests {
         assert!(matches!(look(&dir, false, true), Looked::Running(..)), "a record from a build that wrote no start time is trusted as before");
         assert_eq!(pings.load(Ordering::SeqCst), 2);
 
-        // A reboot: the pid is alive, and is another program's.
         record_started(&dir, other.pid(), Some(right + 1), port);
         assert!(matches!(look(&dir, false, true), Looked::Dead(state) if state.pid == other.pid()));
         assert!(look(&dir, false, true).alive().is_none());
         assert_eq!(pings.load(Ordering::SeqCst), 2, "its port was not asked, so the token was not sent");
 
-        // The same start time on another boot (Linux counts it from boot) is not the same process.
         if crate::unixproc::boot_id().is_some() {
             record_booted(&dir, other.pid(), Some(right), Some("another-boot".into()), port);
             assert!(matches!(look(&dir, false, true), Looked::Dead(_)));
@@ -935,14 +752,12 @@ mod tests {
         assert!(!dir.join("runtime.json").exists(), "the stale record is removed");
         assert!(!dir.join("stopped").exists() && other.alive(), "nothing was signalled, though a forced stop was asked for");
 
-        // The same through the process that ends a runtime: a pid that is not the one recorded is left alone.
         record_started(&dir, other.pid(), Some(right + 1), port);
         let runtime = Runtime::of(other.pid(), Some(right + 1), crate::own_boot(), &dir, &events);
         runtime.kill();
         assert!(other.alive(), "not signalled");
         assert!(!dir.join("runtime.json").exists(), "and the record of a process that isn't it is removed");
         record_started(&dir, other.pid(), Some(right), port);
-        // Our child is not gone until it is reaped, which `alive` does.
         let runtime = Runtime::of(other.pid(), Some(right), crate::own_boot(), &dir, &events);
         let until = Instant::now() + Duration::from_secs(20);
         std::thread::scope(|scope| {
@@ -1011,7 +826,6 @@ mod tests {
         assert_eq!(lock_state(&dir), Lock::Free);
         assert_eq!(read_core(&File::open(dir.join("starting.lock")).unwrap()), None, "the pid is blanked");
 
-        // A core that dies without letting go leaves its pid in the file and no lock.
         let core = hold_starting(&dir).unwrap();
         drop(core);
         wait_free(&dir);
@@ -1053,20 +867,15 @@ mod tests {
         let lock = open_starting(&dir).unwrap();
         lock.lock().unwrap();
         let force = || end(&dir, false, stopped::How::Stop, true, &events);
-        // A core of an older build writes no pid.
         assert!(matches!(force(), Ended::Unidentified));
         assert!(matches!(end(&dir, false, stopped::How::Stop, false, &events), Ended::Starting));
-        // A pid that is another process now.
         write_core(&lock, Some(&Core { started: Some(other.started() + 1), ..other.core() })).unwrap();
         assert!(matches!(force(), Ended::Unidentified));
-        // The process is there, but the file gives no start time: it is never signalled on the pid alone.
         write_core(&lock, Some(&Core { started: None, ..other.core() })).unwrap();
         assert!(matches!(force(), Ended::Unidentified));
-        // A pid of another computer.
         write_core(&lock, Some(&Core { node: "another-node".into(), ..other.core() })).unwrap();
         assert!(matches!(force(), Ended::Unidentified));
         assert!(other.alive() && !dir.join("stopped").exists(), "nothing was signalled");
-        // A named process, but no one holds the lock: no start is under way.
         write_core(&lock, Some(&other.core())).unwrap();
         drop(lock);
         wait_free(&dir);
@@ -1081,8 +890,6 @@ mod tests {
         let mut other = Sleeper::new();
         let lock = open_starting(&dir).unwrap();
         lock.lock().unwrap();
-        // The lock was read as held with no core named; the core has recorded itself since.
-        // Without a port, so that the stop does not wait for the runtime to answer a shutdown.
         let state = serde_json::json!({ "launcher": "process", "node": crate::hostname(), "pid": other.pid(), "started": other.started(), "boot": crate::own_boot(), "token": "t" });
         std::fs::write(dir.join("runtime.json"), state.to_string()).unwrap();
         let ended = std::thread::scope(|scope| {
