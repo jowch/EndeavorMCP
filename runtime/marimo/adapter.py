@@ -806,6 +806,22 @@ def bundle_of(out):
     return {}
 
 
+# What makes HTML interactive, as the Julia runtime decides it (`_INTERACTIVE` in Output.jl): a script,
+# a canvas or a control. A plotly figure comes as an iframe with scripts; marimo's own elements
+# (`mo.ui.slider`, `mo.ui.plotly`) are `<marimo-…>` ones, but not a table, math or a JSON tree, which
+# show as text.
+INTERACTIVE = re.compile(r"<(script|canvas|input|select|button|textarea|iframe)\b"
+                         r"|<marimo-(?!ui-element\b|table\b|tex\b|json-output\b|callout-output\b)[a-z]", re.I)
+
+
+def interactive_bundle(bundle):
+    """Whether an output has scripts or controls, so a picture of it can't show that they work (#398).
+    An altair chart is a Vega-Lite spec, which marimo draws with tooltips."""
+    if any(mime.startswith(("application/vnd.vega", "application/vnd.plotly")) for mime in bundle):
+        return True
+    return any(INTERACTIVE.search(str(bundle.get(mime) or "")) for mime in ("text/html", "text/markdown"))
+
+
 def html_text(html):
     """HTML output as text, for read_cell: tags dropped, entities kept simple."""
     text = re.sub(r"<(script|style)\b.*?</\1>", "", html, flags=re.S | re.I)
@@ -1447,9 +1463,11 @@ class Adapter:
         out = nb.cells[cid]["output"] or {}
         bundle = bundle_of(out)
         png = bundle.get("image/png")
-        if png:
-            return {"png": str(png).split(",", 1)[-1].replace("\n", ""), "mime": "image/png"}
-        return {"png": None, "mime": next(iter(bundle), out.get("mimetype") or "")}
+        rendered = {"png": str(png).split(",", 1)[-1].replace("\n", ""), "mime": "image/png"} if png else \
+            {"png": None, "mime": next(iter(bundle), out.get("mimetype") or "")}
+        if interactive_bundle(bundle):
+            rendered["interactive"] = True
+        return rendered
 
     def validate(self, nb, code):
         errors = []

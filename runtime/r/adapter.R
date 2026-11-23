@@ -1185,7 +1185,21 @@ render_text <- function(rec, cell) list(text = NULL)
 render_image <- function(rec, cell) {
   r <- render_png(rec$nb, cell)
   png <- if (is.raw(r$png)) gsub("\n", "", jsonlite::base64_enc(r$png), fixed = TRUE)
-  list(png = png, mime = r$mime %||% "")
+  out <- list(png = png, mime = r$mime %||% "")
+  view <- Find(function(v) identical(v$id, cell), notebook_snapshot(rec$nb)$cells)
+  if (interactive_output(view$output)) out$interactive <- TRUE
+  out
+}
+
+# What makes HTML interactive, as the Julia runtime decides it (`_INTERACTIVE` in Output.jl): a
+# script, a canvas or a control. An htmlwidget (plotly, leaflet, DT) brings its data in a script.
+INTERACTIVE_HTML <- "<(script|canvas|input|select|button|textarea|iframe)\\b"
+
+# Whether an output has scripts or controls, so a picture of it can't show that they work (#398).
+interactive_output <- function(out) {
+  !is.null(out) && identical(out$mime, "text/html") &&
+    (any(grepl(INTERACTIVE_HTML, unlist(out$data), ignore.case = TRUE, perl = TRUE)) ||
+     any(vapply(out$deps %||% list(), function(d) length(d$script) > 0, logical(1))))
 }
 
 validate <- function(rec, cell, code) {
