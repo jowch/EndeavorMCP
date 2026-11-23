@@ -1,0 +1,10 @@
+{
+  "about": "The user quotes the notebook as Claude's desktop view does (Point), and the quote is out of date: its n cell's text says n = 5, but the user has since set n = 12 and rerun, and the figure quote carries no data. The agent reads both cells again before it answers, and answers from n = 12 (#334). Tags: quotes, already_open.",
+  "checks": [
+    { "check": "called", "tool": "read_cell", "args": { "cell_id": "3c5d7e90-2a4b-4c6d-9e8f-1a2b3c4d5e01" } },
+    { "check": "called", "tool": "read_cell", "args": { "cell_id": "3c5d7e90-2a4b-4c6d-9e8f-1a2b3c4d5e02" } },
+    { "check": "final_message_contains_any", "texts": ["12", "144"] },
+    { "check": "not_called", "tool": "edit_cell" },
+    { "check": "no_errored_cells" }
+  ]
+}
