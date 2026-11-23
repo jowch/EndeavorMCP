@@ -1,1 +1,1 @@
-{ "dialog": { "new_packages": ["numpy", "pandas", "polars", "pyarrow", "tabulate"] } }
+{ "python_wait": 5, "dialog": { "new_packages": ["numpy", "pandas", "polars", "pyarrow", "tabulate"] } }

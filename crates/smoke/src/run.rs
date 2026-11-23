@@ -139,6 +139,10 @@ pub fn runtime_env(work: &Path) -> Vec<(String, PathBuf)> {
         // Read only by a debug `endeavor`, which the runner builds: it adds each link it would open to the file.
         env.push(("ENDEAVOR_TEST_BROWSER".to_owned(), work.join("browser.txt")));
     }
+    if let Some(seconds) = settings["python_wait"].as_u64() {
+        // Read only by a debug `endeavor`, as the browser's.
+        env.push(("ENDEAVOR_TEST_MARIMO_WAIT_SECS".to_owned(), PathBuf::from(seconds.to_string())));
+    }
     if settings["ssh"] == true {
         let f = crate::ssh::Folders::of(work);
         env.extend([("HOME".to_owned(), f.home), ("ENDEAVOR_TEST_ROOT".to_owned(), f.root), ("ENDEAVOR_TEST_STATE".to_owned(), f.state)]);
@@ -340,7 +344,10 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     // A stand-in browser that nobody clicks in (`"browser": true`): Endeavor's pages open, as links
     // added to `browser.txt`, and go unanswered.
     let browser = setup["browser"] == true;
-    std::fs::write(work.join("settings.json"), json!({ "julia": julia, "r": r, "depot": depot, "ssh": ssh, "browser": browser }).to_string()).unwrap();
+    // How long a call waits for Python notebooks' first start (`"python_wait"`, in seconds) before it
+    // answers `python_installing`: a short one makes the agent see that answer and call again.
+    let python_wait = setup["python_wait"].as_u64();
+    std::fs::write(work.join("settings.json"), json!({ "julia": julia, "r": r, "depot": depot, "ssh": ssh, "browser": browser, "python_wait": python_wait }).to_string()).unwrap();
     if task.join("inject.json").is_file() {
         std::fs::copy(task.join("inject.json"), work.join("inject.json")).unwrap();
     }

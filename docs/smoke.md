@@ -93,7 +93,10 @@ Each task is a folder in `smoke/tasks/`:
   list lacks is easy to find. `{ "browser": true }` gives Endeavor a stand-in
   browser that nobody clicks in: the pages it opens (each link is added to
   `browser.txt`) go unanswered. It needs the debug `endeavor` the runner
-  builds. `{ "r": true }` marks an
+  builds. `{ "python_wait": 5 }` has a call wait only 5 seconds for Python
+  notebooks' first start, so the agent gets `python_installing` and has to
+  call again (the task's uv cache starts empty, and that start takes longer);
+  it needs the debug `endeavor` too. `{ "r": true }` marks an
   R task, which needs R (above). `{ "minutes": 75 }` lets the agent run that
   long instead of 20 minutes (a whole number; anything else fails the
   attempt). `{ "long": true }` marks a long task, which runs only with
@@ -288,7 +291,7 @@ something subtle, make it soft.
 | `T1-tidy`, `T2-tidy-r` | "tidy it up" on an open notebook the user wrote, in Julia and in R, then "Yes, go ahead with that" | the skill's tidy pass (#295, #296). The notebook has a stale summary (4.2; the cleaned mean is 5.1), a report cell above the cells it reads, and two dead-end cells. The agent reads it as the page shows it (`read_notebook_code` with `order="visual"` and `include_markdown=true`), deletes and moves no cell before the user's yes, and leaves it running and reproducible, with the stale number gone. Soft checks say whether the summary shows 5.1 (an output, so a computed mean counts) and whether a dead end was deleted |
 | `L1-long-analysis` (long) | a 96-well growth plate, from loading the data to a written summary, in twelve messages with plots; the plate has a failed well, a contaminated one, a saturated reading and gaps | what a real-sized session costs: requests, context at the end, and which replies fill it. Each new package asks first, and the harness says yes to whichever ones the agent picks (`"new_packages": "any"`), but to no other question. About 100 requests and 18 minutes with Claude Code's default model, so it runs only with `--long` |
 | `Q1-ask-questions` (long) | eleven questions about L1's finished 38-cell notebook, already open and run: what it does, which wells it dropped, what the results mean, three sentences for a PI. Nothing asks for a change | what a questions-only session costs on a large notebook, and how much of it is the notebook's code read up front. The first runs (2026-11-04) used about 1M input tokens and ended at 60k context, with Sonnet 5.5 and Opus 5.5 alike. Compare `input_tokens` and `context_tokens` before and after a change to the tools or skills that affects reading |
-| `P1-new-python`, `P2-fix-python`, `P3-preview-python` | N1, N2 and N3 in Python (marimo) | the same, so a failure points at marimo. P1 and P2 say yes when asked about the usual table packages (numpy, pandas, polars and the like): with no one to answer, a new package's run would be held |
+| `P1-new-python`, `P2-fix-python`, `P3-preview-python` | N1, N2 and N3 in Python (marimo) | the same, so a failure points at marimo. P1 and P2 say yes when asked about the usual table packages (numpy, pandas, polars and the like): with no one to answer, a new package's run would be held. P1 waits only 5 s for Python's first start (`python_wait`), so its agent gets `python_installing` and must call again |
 | `P4-heading-python` | rename a heading, add one, and add a tabulate table, in an open Python notebook whose headings use plain quotes | marimo's file writes `mo.md("...")` as a triple-quoted string. The tabulate install changes the file's header under marimo, whose reload pairs cells by similar code; every heading must still show its own text (`headings_own_output`), as L1 on Haiku didn't before #431 |
 | `R1-new-r` | N1, in a new R notebook | the same for R (Ember): a `.R` path, R's rules for cells. It mirrors N1, so a failure points at R, not at the task |
 | `R2-first-package` | a dplyr table and its mean in a new R notebook | R's first package install: the agent waits through it and doesn't run the cells again; when the install outlasts a waited run, the tools say R is getting dplyr ready (#78) |

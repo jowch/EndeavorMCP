@@ -364,7 +364,7 @@ fn is_picture(output: &str) -> bool {
 /// Whether the runtime turned the call away because Julia, the runtime or the notebook's open was still
 /// starting: a normal result now, an error from an older runtime.
 fn while_starting(call: &Call) -> bool {
-    call.reply.as_str().is_some_and(|t| t.contains("is starting")) || matches!(call.reply["error"].as_str(), Some("julia_starting" | "notebook_opening"))
+    call.reply.as_str().is_some_and(|t| t.contains("is starting")) || matches!(call.reply["error"].as_str(), Some("julia_starting" | "r_installing" | "python_installing" | "notebook_opening"))
 }
 
 /// Whether a call runs cells (each tool's own default for its run argument).
@@ -545,6 +545,8 @@ mod tests {
         assert!(judge(json!({ "check": "called", "tool": "new_notebook", "max": 1 }), &waited).passed, "nor one that says so as a normal result");
         waited[0].reply = json!({ "error": "notebook_opening", "message": "Creating '/p/a.jl' is taking longer than one call waits." });
         assert!(judge(json!({ "check": "called", "tool": "new_notebook", "max": 1 }), &waited).passed, "nor one whose open outlasted the call");
+        waited[0].reply = json!({ "error": "python_installing", "message": "Setting up Python notebooks: uv is getting Python and marimo." });
+        assert!(judge(json!({ "check": "called", "tool": "new_notebook", "max": 1 }), &waited).passed, "nor one made while Python notebooks are set up");
     }
 
     fn notebook(cells: &[(&str, &str, bool)]) -> Notebook {
