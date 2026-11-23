@@ -15,7 +15,7 @@ md"""
 md"Cleaned mean: $(round(clean_mean; digits=2)), from $(length(clean)) readings."
 
 # ╔═╡ 3c1a7e20-9b4d-4f6a-8e2c-5d0f1a2b3c03
-readings = [4.8, 5.1, 5.3, 4.9, 25.0, 5.4]
+readings = [4.8, 5.2, 5.2, 4.9, 25.0, 5.4]
 
 # ╔═╡ 3c1a7e20-9b4d-4f6a-8e2c-5d0f1a2b3c04
 first_try = sum(readings) / length(readings)

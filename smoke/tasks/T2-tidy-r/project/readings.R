@@ -9,7 +9,7 @@
 sprintf("Cleaned mean: %.2f, from %d readings.", clean_mean, length(clean))
 
 # %% id=D
-readings <- c(4.8, 5.1, 5.3, 4.9, 25.0, 5.4)
+readings <- c(4.8, 5.2, 5.2, 4.9, 25.0, 5.4)
 
 # %% id=F
 first_try <- mean(readings)
