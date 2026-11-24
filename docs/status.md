@@ -382,6 +382,12 @@ Checked live on 2026-10-03:
 
 Not yet checked:
 
+- Stop clearing a held card on Windows (#300, fixed by #581). The Windows
+  tests cover the hang-up itself; the app picks it up once it pins a build
+  with it. Check, in the next Windows app check after that pin: open a
+  notebook in safe preview, have the agent run a cell so the run-approval
+  card shows and its call waits, press Stop before answering. The card should
+  go within about 2 s, and the state dump should show no ask waiting.
 - The machine tools against a real cluster (`e2e_slurm` covers the helper
   and Slurm, `tests/machines.rs` the tools with fake Slurm). On 2026-10-07 an
   agent drove the machine tools through `add_machine`, `needs_install`,

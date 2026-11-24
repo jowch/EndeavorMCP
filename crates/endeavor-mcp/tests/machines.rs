@@ -412,6 +412,34 @@ fn a_failing_add_machine_leaves_no_record_and_no_connection() {
 }
 
 #[test]
+fn a_server_that_says_nothing_after_connecting_times_out_but_one_that_asks_to_sign_in_waits() {
+    let place = Place::with("silent", &[("ENDEAVOR_TEST_ASK", "sleep 30"), ("ENDEAVOR_TEST_CONNECT_DEADLINE_MS", "500")]);
+    let mut front = place.front();
+    front.initialize();
+    let began = Instant::now();
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": place.julia.display().to_string() }));
+    assert!(failed && text(&said).contains("didn't answer (the connection timed out)"), "{said}");
+    assert!(began.elapsed() < Duration::from_secs(20), "it gave up at its own deadline, not ssh's or the server's: {:?}", began.elapsed());
+    front.finish();
+
+    let place = Place::with("refused-late", &[("ENDEAVOR_TEST_ASK", "echo 'jc@lab: Permission denied (publickey).' >&2; sleep 30"), ("ENDEAVOR_TEST_CONNECT_DEADLINE_MS", "500")]);
+    let mut front = place.front();
+    front.initialize();
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": place.julia.display().to_string() }));
+    assert!(failed && text(&said).contains("refused the sign-in") && !text(&said).contains("didn't answer"), "what ssh said comes first: {said}");
+    front.finish();
+
+    let ask = r#"test "$("$SSH_ASKPASS" "jc@lab's password: ")" = install && sleep 1"#;
+    let place = Place::with("slow-sign-in", &[("ENDEAVOR_TEST_ASK", ask), ("ENDEAVOR_TEST_CONNECT_DEADLINE_MS", "500")]);
+    let opened = place.dir.join("opened.txt");
+    let mut front = start_front(&place, &[("ENDEAVOR_TEST_BROWSER", opened.to_str().unwrap())]);
+    front.initialize();
+    let added = front.ok("add_machine", json!({ "host": "lab", "julia": place.julia.display().to_string() }));
+    assert_eq!(added["state"], "connected", "a sign-in may take longer than the deadline: {added}");
+    front.finish();
+}
+
+#[test]
 fn a_server_that_asks_for_a_password_gets_it_from_a_page_in_the_browser() {
     let ask = r#"test -n "$SSH_ASKPASS" && test "$("$SSH_ASKPASS" "jc@lab's password: ")" = install"#;
     let place = Place::with("signin-page", &[("ENDEAVOR_TEST_ASK", ask)]);

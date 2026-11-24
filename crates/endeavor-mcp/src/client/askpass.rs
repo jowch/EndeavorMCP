@@ -1,7 +1,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,13 @@ const READ_LIMIT: Duration = Duration::from_secs(10);
 const MOST_BYTES: u64 = 16 * 1024;
 
 const MOST_AT_ONCE: usize = 8;
+
+static ASKED: LazyLock<Mutex<HashMap<u16, Instant>>> = LazyLock::new(Default::default);
+
+pub(crate) fn asked_since(address: &str, since: Instant) -> bool {
+    let Some(port) = address.rsplit_once(':').and_then(|(_, port)| port.parse::<u16>().ok()) else { return false };
+    ASKED.lock().unwrap().get(&port).is_some_and(|&at| at >= since)
+}
 
 pub type AnswerFn = dyn Fn(Ask) -> Reply + Send + Sync;
 
@@ -54,7 +62,7 @@ impl Asker {
                     }
                     let (token, answer, serving) = (token.clone(), answer.clone(), serving.clone());
                     std::thread::spawn(move || {
-                        serve(socket, &token, &*answer);
+                        serve(socket, port, &token, &*answer);
                         serving.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
@@ -80,19 +88,20 @@ impl Asker {
 impl Drop for Asker {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::SeqCst);
+        ASKED.lock().unwrap().remove(&self.port);
         let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port));
     }
 }
 
 const DRAIN_LIMIT: Duration = Duration::from_millis(500);
 
-fn serve(socket: TcpStream, token: &str, answer: &AnswerFn) {
+fn serve(socket: TcpStream, port: u16, token: &str, answer: &AnswerFn) {
     let socket = wire::Shared::new(socket);
-    answer_one(socket.clone(), token, answer);
+    answer_one(socket.clone(), port, token, answer);
     close(&socket);
 }
 
-fn answer_one(socket: wire::Shared, token: &str, answer: &AnswerFn) {
+fn answer_one(socket: wire::Shared, port: u16, token: &str, answer: &AnswerFn) {
     let mut writer = socket.clone();
     let mut reader = BufReader::new(Until { socket, until: Instant::now() + READ_LIMIT }.take(MOST_BYTES));
     let mut line = String::new();
@@ -101,6 +110,7 @@ fn answer_one(socket: wire::Shared, token: &str, answer: &AnswerFn) {
     }
     line.clear();
     let Ok(ask) = reader.read_line(&mut line).map_err(|_| ()).and_then(|_| serde_json::from_str::<Ask>(&line).map_err(|_| ())) else { return };
+    ASKED.lock().unwrap().insert(port, Instant::now());
     let answer = match answer(ask) {
         Reply::Answered(text) => Answer { text: Some(text), gave_up: false },
         Reply::Refused => Answer { text: None, gave_up: false },

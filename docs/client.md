@@ -32,7 +32,7 @@ ssh is started with:
   at the first address that refuses (IPv6 `localhost`, say) instead of trying
   the next (#35). There, Windows' own connect gives up on each address that
   doesn't answer after about 21 s. A server that takes the connection and
-  then says nothing isn't covered (#462).
+  then says nothing is covered by the connect's own deadline, below.
 - On Windows, `ControlMaster=no` and `ControlPath=none`: its ssh has no
   connection sharing, so a ControlMaster line in a config copied from a Mac
   would make the connect fail.
@@ -41,6 +41,14 @@ ssh is started with:
   ssh's prompts itself passes `Auth::Env` with its askpass variables, which
   set `SSH_ASKPASS_REQUIRE=force`: Windows' ssh uses an askpass only then, and
   otherwise waits on a console nobody sees.
+
+The connect keeps its own deadline of 60 s, on every platform, from starting
+ssh to the bootstrap's first `ENDEAVOR` line. It ends there, or as soon as ssh
+asks a question through the caller's askpass (`Auth::Env`), so a user typing a
+password or a code is never cut off. Past it, Endeavor ends ssh's process
+group (`taskkill /T` on Windows), and the error says the server didn't answer,
+unless ssh said something more specific first. A login script that hangs
+for a minute before the bootstrap runs times out too.
 
 Which ssh: on Windows, Windows' own OpenSSH when it is installed, else the
 first `ssh` on the PATH. In Git Bash that is Git's, which signs in with the
