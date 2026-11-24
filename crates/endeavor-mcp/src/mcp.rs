@@ -404,6 +404,7 @@ impl Bridge {
                 return Some(answer(Ok(json!({ "notebooks": stopping }))));
             }
             "endeavor/move_notebook" => return Some(answer(self.notebooks.move_notebook(&text("notebook_id", ""), &text("path", "")))),
+            "endeavor/export_notebook" => return Some(answer(self.notebooks.export(&text("notebook_id", ""), &text("format", "")))),
             "endeavor/file_info" => return Some(answer(notebooks::file_info(&text("path", "")))),
             "endeavor/new_notebook" => {
                 let owner = text("owner", "");

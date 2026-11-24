@@ -127,6 +127,10 @@ runs every five minutes.
 - **`move_notebook`**: rename or move a notebook's file, never over another
   file. A notebook keeps its engine (a Julia notebook ends in .jl, an R one in
   .R). Bound sessions and an `idle_stopped` entry follow it.
+- **`export_notebook`**: a Python notebook's Share and export. `file` is the
+  notebook's file as it is on disk. `html` is marimo's own web page export,
+  made in the notebook's marimo session, so it needs the notebook out of safe
+  preview. Julia and R notebooks export through their own page instead.
 - **`approve_install`** covers only the packages the user's yes named that
   the call asked for, so a yes never widens what was asked (#418). Names
   compare as PyPI's do (case, `-`, `_`, `.`), and the names that go on are
