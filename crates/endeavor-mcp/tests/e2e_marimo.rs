@@ -1106,6 +1106,10 @@ fn a_computer_without_uv_gets_endeavors_own_after_the_users_yes() {
         assert!(failed && offer["error"] == "python_not_found", "{offer}");
         let message = offer["message"].as_str().unwrap_or_default();
         assert!(message.contains("may download its own only if the user agrees: uv 0.11.32") && message.contains("`install: true`"), "{offer}");
+        app_call(port, &token, "endeavor/set_session_folder", json!({ "owner": "app-1", "folder": folder, "kind": "python", "shows_python": true }));
+        let in_app = app_call(port, &token, "endeavor/new_notebook", json!({ "owner": "app-1" }));
+        let said = in_app["error"]["message"].as_str().unwrap_or_default();
+        assert!(said.starts_with("python_not_found::") && said.contains("click Install uv in its notebook pane") && !said.contains("use_machine"), "the app's own call gets the app's words: {in_app}");
         assert!(!own.exists() && !home.join(".cache/endeavor").read_dir().is_ok_and(|mut d| d.any(|e| e.is_ok_and(|e| e.file_name().to_string_lossy().starts_with("uv-")))), "nothing downloaded before the yes");
     });
 

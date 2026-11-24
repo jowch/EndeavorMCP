@@ -14,7 +14,7 @@ const PLUTO_HEADER: &str = "### A Pluto.jl notebook ###";
 const EMBER_HEADER: &str = "### An Ember notebook ###";
 
 impl Backend {
-    pub const ALL: [Backend; 2] = [Backend::Pluto, Backend::Ember];
+    pub const ALL: [Backend; 3] = [Backend::Pluto, Backend::Ember, Backend::Marimo];
 
     pub fn name(self) -> &'static str {
         match self {
