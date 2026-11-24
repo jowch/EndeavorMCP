@@ -47,6 +47,9 @@ copilot = false
 manager = "uv"
 [display]
 default_table_page_size = 25
+theme = "system"
+[ai]
+enabled = false
 """
 
 NEW_HEADER = """# /// script
