@@ -2269,7 +2269,7 @@ fn where_the_client_can_show_a_dialog_the_user_says_yes_to_an_install_there() {
     assert_eq!((declined["state"].as_str(), declined["install_declined"].clone()), (Some("ready"), json!(true)), "{declined}");
     assert!(text(&declined).contains("said no"), "{declined}");
     assert_eq!(front.asked.len(), 4);
-    assert!(front.asked[3]["params"]["message"].as_str().unwrap().contains("download its own copy of Julia"), "{}", front.asked[3]);
+    assert!(front.asked[3]["params"]["message"].as_str().unwrap().contains("needs Julia, or uv for Python notebooks, and none is found there, may Endeavor download its own copy?"), "{}", front.asked[3]);
     front.dialog = Some("accept");
     let allowed = front.ok("use_machine", json!({ "machine": "lab", "install": true }));
     assert_eq!((allowed["state"].as_str(), allowed.get("install_declined")), (Some("ready"), None), "{allowed}");
