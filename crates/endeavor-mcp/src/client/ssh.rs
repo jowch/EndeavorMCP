@@ -436,9 +436,12 @@ fn connect_as(server: &Server, transport: &Transport, options: &Options, own_wit
         let status = child.wait().ok();
         match why {
             Some(why) => wrong(why),
-            None if answering.timed_out() => ConnectError { message: didnt_answer(host), retry: true, needs: None },
             None => {
-                let (message, retry) = explain_retry(transport, &options.auth, &stderr.finish(), status, cancel.cancelled.load(Ordering::SeqCst), signed_in);
+                let (stderr, cancelled) = (stderr.finish(), cancel.cancelled.load(Ordering::SeqCst));
+                let (message, retry) = match answering.timed_out() {
+                    true => explained(transport, &options.auth, &stderr, status, cancelled, signed_in).unwrap_or_else(|| (didnt_answer(host), true)),
+                    false => explain_retry(transport, &options.auth, &stderr, status, cancelled, signed_in),
+                };
                 ConnectError { message, retry, needs: None }
             }
         }
@@ -689,15 +692,25 @@ const ADD_KEY: &str = if cfg!(windows) {
 pub const SIGN_IN_GAVE_UP: &str = "the server stopped waiting for the sign-in.";
 
 fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: Option<ExitStatus>, cancelled: bool, signed_in: bool) -> (String, bool) {
+    explained(transport, auth, stderr, status, cancelled, signed_in).unwrap_or_else(|| {
+        let host = transport.host();
+        let message = match stderr.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty()) {
+            Some(line) => format!("The connection to {host} ended: {line}"),
+            None => format!("The connection to {host} ended before Endeavor could start{}.", status.map(|s| format!(" ({s})")).unwrap_or_default()),
+        };
+        (message, true)
+    })
+}
+
+fn explained(transport: &Transport, auth: &Auth, stderr: &[String], status: Option<ExitStatus>, cancelled: bool, signed_in: bool) -> Option<(String, bool)> {
     if cancelled {
-        return ("Cancelled.".into(), false);
+        return Some(("Cancelled.".into(), false));
     }
     let host = transport.host();
     let batch = *auth == Auth::Batch;
     let said = |needle: &str| stderr.iter().any(|l| l.contains(needle));
-    let last = stderr.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty());
     let ssh_failed = !signed_in && status.is_none_or(|s| s.code().is_none_or(|code| code == 255));
-    let ssh_said = if !ssh_failed {
+    if !ssh_failed {
         None
     } else if said("Could not resolve hostname") {
         Some((format!("Couldn't find a server called {host}. Check the SSH host."), true))
@@ -721,14 +734,7 @@ fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: 
         Some((format!("Couldn't reach {host} from this network."), true))
     } else {
         None
-    };
-    ssh_said.unwrap_or_else(|| {
-        let message = match last {
-            Some(line) => format!("The connection to {host} ended: {line}"),
-            None => format!("The connection to {host} ended before Endeavor could start{}.", status.map(|s| format!(" ({s})")).unwrap_or_default()),
-        };
-        (message, true)
-    })
+    }
 }
 
 fn didnt_answer(host: &str) -> String {

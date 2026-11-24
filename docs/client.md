@@ -45,8 +45,9 @@ ssh is started with:
 The connect keeps its own deadline of 60 s, on every platform, from starting
 ssh to the bootstrap's first `ENDEAVOR` line. It ends there, or as soon as ssh
 asks a question through the caller's askpass (`Auth::Env`), so a user typing a
-password or a code is never cut off. Past it, ssh is ended through the cancel
-path, and the error says the server didn't answer. A login script that hangs
+password or a code is never cut off. Past it, Endeavor ends ssh's process
+group (`taskkill /T` on Windows), and the error says the server didn't answer,
+unless ssh said something more specific first. A login script that hangs
 for a minute before the bootstrap runs times out too.
 
 Which ssh: on Windows, Windows' own OpenSSH when it is installed, else the

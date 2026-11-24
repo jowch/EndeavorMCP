@@ -422,6 +422,13 @@ fn a_server_that_says_nothing_after_connecting_times_out_but_one_that_asks_to_si
     assert!(began.elapsed() < Duration::from_secs(20), "it gave up at its own deadline, not ssh's or the server's: {:?}", began.elapsed());
     front.finish();
 
+    let place = Place::with("refused-late", &[("ENDEAVOR_TEST_ASK", "echo 'jc@lab: Permission denied (publickey).' >&2; sleep 30"), ("ENDEAVOR_TEST_CONNECT_DEADLINE_MS", "500")]);
+    let mut front = place.front();
+    front.initialize();
+    let (failed, said) = front.call("add_machine", json!({ "host": "lab", "julia": place.julia.display().to_string() }));
+    assert!(failed && text(&said).contains("refused the sign-in") && !text(&said).contains("didn't answer"), "what ssh said comes first: {said}");
+    front.finish();
+
     let ask = r#"test "$("$SSH_ASKPASS" "jc@lab's password: ")" = install && sleep 1"#;
     let place = Place::with("slow-sign-in", &[("ENDEAVOR_TEST_ASK", ask), ("ENDEAVOR_TEST_CONNECT_DEADLINE_MS", "500")]);
     let opened = place.dir.join("opened.txt");
