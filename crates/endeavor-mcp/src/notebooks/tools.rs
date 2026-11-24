@@ -1386,6 +1386,7 @@ impl Call<'_> {
                 let path = absolute_path(&super::requested_path(requested, folder)?)?;
                 match super::engines::of_path(&path) {
                     wire::backend::Backend::Ember => r_notebooks(&format!("'{path}' would be an R notebook"))?,
+                    wire::backend::Backend::Marimo => {}
                     _ if !path.ends_with(".jl") => {
                         let ends = if cfg!(windows) { ".jl (Julia) or .py (Python, marimo)" } else { ".jl (Julia), .R (R) or .py (Python, marimo)" };
                         return Err(argument_error(&format!("invalid_path::Notebook path must end in {ends}: '{path}'")));

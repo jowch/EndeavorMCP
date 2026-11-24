@@ -109,11 +109,16 @@ impl Agent {
         serde_json::from_str(body).unwrap()
     }
 
-    fn ok(&mut self, name: &str, arguments: Value) -> Value {
+    fn call(&mut self, name: &str, arguments: &Value) -> (bool, String) {
         let reply = self.mcp("tools/call", json!({ "name": name, "arguments": arguments }));
         let text = reply["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{name}: {reply}"));
-        assert!(reply["result"]["isError"] != true, "{name}({arguments}): {text}");
-        serde_json::from_str(text).unwrap_or_else(|_| json!(text))
+        (reply["result"]["isError"] == true, text.to_owned())
+    }
+
+    fn ok(&mut self, name: &str, arguments: Value) -> Value {
+        let (failed, text) = self.call(name, &arguments);
+        assert!(!failed, "{name}({arguments}): {text}");
+        serde_json::from_str(&text).unwrap_or_else(|_| json!(text))
     }
 
     fn started(&mut self, name: &str, arguments: Value) -> Value {
@@ -196,6 +201,17 @@ fn a_python_notebook_runs_on_windows_and_stop_ends_marimo() {
     let made = agent.started("new_notebook", json!({ "path": "decay.py" }));
     assert!(made["notebook_id"].is_string(), "{made}");
     assert!(folder.join("decay.py").is_file());
+
+    let drive = |path: &Path| path.components().next().map(|part| part.as_os_str().to_ascii_lowercase());
+    let elsewhere = std::env::temp_dir().join("endeavor-e2e-other-drive.py");
+    if drive(&elsewhere) != drive(&folder) {
+        let _ = std::fs::remove_file(&elsewhere);
+        let (failed, text) = agent.call("new_notebook", &json!({ "path": elsewhere }));
+        assert!(failed && text.contains("unsupported::") && text.contains("one drive at a time"), "{text}");
+        assert!(!elsewhere.exists(), "nothing was made on the other drive");
+    } else {
+        eprintln!("NOTE: the temporary folder is on the notebooks' drive, so the other-drive refusal isn't checked here.");
+    }
 
     let marimo: Value = serde_json::from_str(&std::fs::read_to_string(state.join("marimo.json")).unwrap()).unwrap();
     let (adapter, page, bridge) = (marimo["pid"].as_u64().unwrap(), marimo["marimo_port"].as_u64().unwrap() as u16, marimo["bridge_port"].as_u64().unwrap() as u16);

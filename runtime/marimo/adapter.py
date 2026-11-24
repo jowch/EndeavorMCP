@@ -31,6 +31,7 @@ from marimo._ast.load import load_app
 TOKEN = os.environ.get("ENDEAVOR_TOKEN", "")
 STATE_FILE = os.environ.get("ENDEAVOR_MARIMO_STATE", "")
 BASE_URL = "/marimo"
+ROOT = os.environ.get("ENDEAVOR_MARIMO_ROOT") or os.path.abspath(os.sep)
 POLL_HOLD = 25
 NOTES_KEPT = 500
 TEXT_MAX = 20_000
@@ -109,6 +110,13 @@ def real(path):
     return os.path.realpath(os.path.expanduser(path))
 
 
+def on_marimos_drive(path):
+    drive = os.path.splitdrive(path)[0]
+    if drive.lower() != os.path.splitdrive(ROOT)[0].lower():
+        root = os.path.splitdrive(ROOT)[0]
+        raise argument_error("unsupported", f"'{path}' is on {drive}, and Python notebooks run from one drive at a time: since Endeavor started, that is {root}, the drive of the first one opened. Tell the user; after Endeavor restarts, the first Python notebook opened or made can be on {drive}.")
+
+
 class Marimo:
     def __init__(self):
         self.port = free_port()
@@ -126,9 +134,8 @@ class Marimo:
         env = {**os.environ, "XDG_CONFIG_HOME": str(self.config), "MARIMO_SKIP_UPDATE_CHECK": "1"}
         env.pop("ENDEAVOR_TOKEN", None)
         env.pop("ENDEAVOR_MARIMO_TOKEN", None)
-        root = os.path.abspath(os.sep)
         self.child = asyncio.subprocess.create_subprocess_exec(
-            sys.executable, "-m", "marimo", "-q", "edit", root, "--headless", "--sandbox", "--watch",
+            sys.executable, "-m", "marimo", "-q", "edit", ROOT, "--headless", "--sandbox", "--watch",
             "--skip-update-check", "--host", "127.0.0.1", "--port", str(self.port), "--base-url", BASE_URL,
             "--token-password-file", str(token_file), env=env, stdin=asyncio.subprocess.DEVNULL)
 
@@ -1179,6 +1186,7 @@ class Adapter:
         path = real(path)
         if not os.path.isfile(path):
             raise argument_error("file_not_found", f"No file at '{path}'")
+        on_marimos_drive(path)
         if (nb := self.by_path(path)) is not None:
             raise argument_error("notebook_already_open", f"'{path}' is already open as notebook_id {nb.id}; use that id")
         nb = Notebook(self, path, allowed=bool(run))
@@ -1197,6 +1205,7 @@ class Adapter:
                 n += 1
                 path = os.path.join(folder, f"notebook {n}.py")
         path = os.path.abspath(os.path.expanduser(path))
+        on_marimos_drive(path)
         if os.path.exists(path):
             raise argument_error("file_exists", f"'{path}' already exists; use open_notebook to load it")
         os.makedirs(os.path.dirname(path), exist_ok=True)

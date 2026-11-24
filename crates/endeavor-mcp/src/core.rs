@@ -154,7 +154,7 @@ pub fn main(argv: &[String]) -> ! {
     let weak = Arc::downgrade(&served);
     let _ = r.after_install.set(Box::new(move || {
         let Some(served) = weak.upgrade() else { return };
-        match served.bridge.notebooks.start_engine(Backend::Ember, Duration::ZERO) {
+        match served.bridge.notebooks.start_engine(Backend::Ember, None, Duration::ZERO) {
             Err(why) if !why.starts_with("r_installing::") => eprintln!("endeavor core: R didn't start after its install: {why}"),
             _ => {}
         }
@@ -164,9 +164,9 @@ pub fn main(argv: &[String]) -> ! {
     let marimo = MarimoStarter { mask: Some(inherited_mask), ..marimo };
     let marimo = Arc::new(marimo);
     let starting = (r.clone(), served.clone(), marimo.clone());
-    let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, came, wait| match backend {
+    let _ = served.bridge.notebooks.starter.set(Box::new(move |backend, first, came, wait| match backend {
         Backend::Ember => starting.0.start_noting(&starting.1, came + wait.min(ember_wait())),
-        Backend::Marimo => starting.2.start(&starting.1, came + wait.min(marimo_wait())),
+        Backend::Marimo => starting.2.start(&starting.1, first.map(Path::new), came + wait.min(marimo_wait())),
         Backend::Pluto => starting.1.julia.wait(&starting.1, wait.saturating_sub(came.elapsed()).min(julia_wait())).map(|()| starting.1.bridge.julia.clone() as Arc<dyn crate::notebooks::Upstream>),
     }));
     let weak = Arc::downgrade(&served);
@@ -1221,6 +1221,11 @@ const NO_COMPILER: &str = "r_failed::Couldn't install Ember for R notebooks: it 
 
 const MARIMO_PYTHON: &str = "3.12";
 
+fn marimo_root(first: Option<&Path>) -> PathBuf {
+    let drive_of = |path: &Path| path.components().next().filter(|part| matches!(part, std::path::Component::Prefix(_))).map(|drive| Path::new(drive.as_os_str()).join(std::path::MAIN_SEPARATOR_STR));
+    first.and_then(drive_of).or_else(|| std::env::current_dir().ok().as_deref().and_then(drive_of)).unwrap_or_else(|| PathBuf::from(std::path::MAIN_SEPARATOR_STR))
+}
+
 struct MarimoStarter {
     adapter: PathBuf,
     requirements: PathBuf,
@@ -1283,14 +1288,14 @@ impl MarimoStarter {
         }
     }
 
-    fn start(&self, served: &Served, until: std::time::Instant) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
+    fn start(&self, served: &Served, first: Option<&Path>, until: std::time::Instant) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
         if served.bridge.standalone.is_none() && !self.this_computer {
             return Err("unsupported::Python notebooks work with the Endeavor plugin on this computer (`endeavor serve` or `endeavor mcp`), not yet on a server".into());
         }
         let mut pending = self.pending.lock().unwrap();
         if pending.is_none() {
             let uv = self.uv(served, until)?;
-            *pending = Some(self.spawn_adapter(&uv)?);
+            *pending = Some(self.spawn_adapter(&uv, &marimo_root(first))?);
         }
         let deadline = pending.as_ref().unwrap().began + MARIMO_START;
         let state = loop {
@@ -1382,12 +1387,12 @@ impl MarimoStarter {
         }
     }
 
-    fn spawn_adapter(&self, uv: &Path) -> Result<MarimoPending, String> {
+    fn spawn_adapter(&self, uv: &Path, root: &Path) -> Result<MarimoPending, String> {
         let _ = std::fs::remove_file(&self.state);
         let secret = ember_secret().map_err(|e| format!("python_failed::{e}"))?;
         let mut command = Command::new(uv);
         command.args(["run", "--quiet", "--no-project", "--python", MARIMO_PYTHON, "--with-requirements"]).arg(&self.requirements).arg("python").arg(&self.adapter);
-        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_MARIMO_TOKEN", &secret).env("ENDEAVOR_MARIMO_STATE", &self.state).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+        command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_MARIMO_TOKEN", &secret).env("ENDEAVOR_MARIMO_STATE", &self.state).env("ENDEAVOR_MARIMO_ROOT", root).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
         if !cfg!(debug_assertions) {
             command.env_remove("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS");
         }
@@ -2547,6 +2552,19 @@ mod tests {
         assert!(standalone.starts_with("r_not_found::") && standalone.contains("`use_machine`") && standalone.contains("R 4.6.1 (about 165 MB"), "{standalone}");
         let app = own_r_offer(&item, true);
         assert!(app.starts_with("r_not_found::") && app.contains("Install R in the notebook pane") && app.contains("Settings under Notebooks, then R") && !app.contains("use_machine"), "{app}");
+    }
+
+    #[test]
+    fn marimo_is_started_at_the_root_of_the_first_notebooks_drive() {
+        if cfg!(windows) {
+            assert_eq!(marimo_root(Some(Path::new(r"D:\data\growth.py"))), PathBuf::from(r"D:\"));
+            assert_eq!(marimo_root(Some(Path::new(r"\\server\share\a.py"))), PathBuf::from(r"\\server\share\"));
+            let here = std::env::current_dir().unwrap();
+            assert_eq!(marimo_root(None).components().next(), here.components().next(), "with no notebook, the drive the core runs on");
+        } else {
+            assert_eq!(marimo_root(Some(Path::new("/w/growth.py"))), PathBuf::from("/"));
+            assert_eq!(marimo_root(None), PathBuf::from("/"));
+        }
     }
 
     #[test]
