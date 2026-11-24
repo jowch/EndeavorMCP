@@ -89,6 +89,7 @@ pub fn read_preview(path: &Path) -> Result<Preview, String> {
     let text = String::from_utf8_lossy(&bytes);
     Ok(match Backend::of_file(path) {
         Some(Backend::Ember) => ember_preview(&text),
+        Some(Backend::Marimo) => marimo_preview(&text),
         _ => preview(&text),
     })
 }
@@ -187,6 +188,63 @@ pub fn ember_preview(text: &str) -> Preview {
             .map(|body| Cell { code: body[..body.len().min(LINES)].join("\n"), clipped: body.len() > LINES })
             .collect(),
     }
+}
+
+pub fn marimo_preview(text: &str) -> Preview {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut codes: Vec<Vec<&str>> = Vec::new();
+    let mut at = 0;
+    while at < lines.len() {
+        let line = lines[at];
+        if line.starts_with("@app.cell") {
+            let body_from = signature_end(&lines, at + 1) + 1;
+            let body_to = indented_until(&lines, body_from);
+            codes.push(cell_code(&lines[body_from..body_to]));
+            at = body_to;
+        } else if line.starts_with("with app.setup") {
+            let body_to = indented_until(&lines, at + 1);
+            codes.push(dedent(trim_blank(&lines[at + 1..body_to])));
+            at = body_to;
+        } else if line.starts_with("@app.function") || line.starts_with("@app.class_definition") {
+            let def_from = at + 1;
+            let body_to = indented_until(&lines, signature_end(&lines, def_from) + 1);
+            codes.push(trim_blank(&lines[def_from..body_to]).to_vec());
+            at = body_to;
+        } else {
+            at += 1;
+        }
+    }
+    Preview {
+        total: codes.len(),
+        cells: codes
+            .iter()
+            .take(CELLS)
+            .map(|body| Cell { code: body[..body.len().min(LINES)].join("\n"), clipped: body.len() > LINES })
+            .collect(),
+    }
+}
+
+fn signature_end(lines: &[&str], from: usize) -> usize {
+    (from..lines.len()).find(|&i| lines[i].trim_end().ends_with(':')).unwrap_or(lines.len())
+}
+
+fn indented_until(lines: &[&str], from: usize) -> usize {
+    let from = from.min(lines.len());
+    (from..lines.len()).find(|&i| !lines[i].trim().is_empty() && !lines[i].starts_with([' ', '\t'])).unwrap_or(lines.len())
+}
+
+fn cell_code<'a>(body: &[&'a str]) -> Vec<&'a str> {
+    let body = trim_blank(body);
+    let is_return = |line: &&str| line.strip_prefix("    ").is_some_and(|rest| rest == "return" || rest.starts_with("return ") || rest.starts_with("return("));
+    let code = match body.iter().rposition(is_return) {
+        Some(at) => &body[..at],
+        None => body,
+    };
+    dedent(trim_blank(code))
+}
+
+fn dedent<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+    lines.iter().map(|line| line.strip_prefix("    ").or_else(|| line.strip_prefix('\t')).unwrap_or(line.trim_start())).collect()
 }
 
 fn trim_blank<'a, 'b>(lines: &'b [&'a str]) -> &'b [&'a str] {
@@ -382,14 +440,28 @@ curves <- read.csv(\"growth.csv\")
         assert_eq!(ember_preview(text).cells[0].code, "x <- 1");
     }
 
+    const MARIMO_SAMPLE: &str = "# /// script\n# requires-python = \">=3.10\"\n# dependencies = [\n#     \"marimo==0.25.1\",\n# ]\n# ///\n\nimport marimo\n\n__generated_with = \"0.25.1\"\napp = marimo.App(width=\"medium\")\n\nwith app.setup:\n    import numpy as np\n\n\n@app.cell\ndef _():\n    import marimo as mo\n    return (mo,)\n\n\n@app.cell(hide_code=True)\ndef _(mo):\n    mo.md(\"\"\"\n    ## Growth\n    \"\"\")\n    return\n\n\n@app.cell\ndef _(\n    mo,\n    np,\n):\n    x = np.arange(3)\n    if x.sum() > 0:\n        y = x * 2\n    return (\n        x,\n        y,\n    )\n\n\n@app.function\ndef double(v):\n    return v * 2\n\n\n@app.cell\ndef _():\n    return\n\n\nif __name__ == \"__main__\":\n    app.run()\n";
+
+    #[test]
+    fn a_marimo_preview_shows_each_cell_without_its_def_and_return() {
+        let p = marimo_preview(MARIMO_SAMPLE);
+        let codes: Vec<&str> = p.cells.iter().map(|c| c.code.as_str()).collect();
+        assert_eq!(codes, ["import numpy as np", "import marimo as mo", "mo.md(\"\"\"\n## Growth\n\"\"\")", "x = np.arange(3)\nif x.sum() > 0:\n    y = x * 2", "def double(v):\n    return v * 2", ""]);
+        assert_eq!(p.total, 6);
+        let one_cell = "import marimo\n\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    x = 42\n    x\n    return\n";
+        assert_eq!(marimo_preview(one_cell), Preview { cells: vec![Cell { code: "x = 42\nx".into(), clipped: false }], total: 1 });
+    }
+
     #[test]
     fn read_preview_picks_the_format_from_the_file() {
         let dir = std::env::temp_dir().join(format!("endeavor-preview-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.R"), EMBER_SAMPLE).unwrap();
         std::fs::write(dir.join("b.jl"), SAMPLE).unwrap();
+        std::fs::write(dir.join("c.py"), MARIMO_SAMPLE).unwrap();
         assert_eq!(read_preview(&dir.join("a.R")).unwrap().cells[1].code, "library(dplyr)");
         assert_eq!(read_preview(&dir.join("b.jl")).unwrap().cells[1].code, "using CSV, DataFrames");
+        assert_eq!(read_preview(&dir.join("c.py")).unwrap().cells[1].code, "import marimo as mo");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
