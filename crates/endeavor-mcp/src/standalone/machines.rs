@@ -979,8 +979,7 @@ impl Relay {
             return None;
         }
         let mut said: Value = serde_json::from_str(result["content"][0]["text"].as_str()?).ok()?;
-        let cluster = self.connections.get(&machine.id).is_some_and(|session| session.cluster());
-        said["message"] = crate::core::uv_offer_on(said["message"].as_str()?, &machine.id, cluster)?.into();
+        said["message"] = crate::core::uv_offer_on(said["message"].as_str()?, &machine.id)?.into();
         Some(to_json(&said))
     }
 
