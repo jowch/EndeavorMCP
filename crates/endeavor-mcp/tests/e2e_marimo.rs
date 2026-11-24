@@ -912,7 +912,7 @@ fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
     let path = path.to_str().unwrap();
     step("the app's session is refused the Python notebook", || {
         let (failed, text) = call("app", "open_notebook", json!({ "path": path }));
-        assert!(failed && text.contains("not yet in the Endeavor app"), "{text}");
+        assert!(failed && text.contains("This version of the Endeavor app"), "{text}");
     });
     let notebook = step("the plugin's session opens it there", || {
         let began = Instant::now();

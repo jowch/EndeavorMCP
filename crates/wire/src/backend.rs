@@ -54,9 +54,9 @@ impl Backend {
         (read && first == header.as_bytes()).then_some(backend)
     }
 
-    pub fn notebook_url(self, root: &str, id: &str) -> String {
+    pub fn notebook_url(self, root: &str, id: &str, path: &str) -> String {
         match self {
-            Backend::Marimo => root.replacen("/?", &format!("{}/?", self.prefix()), 1),
+            Backend::Marimo => root.replacen("/?", &format!("{}/?file={}&", self.prefix(), query_value(path)), 1),
             _ => root.replacen("/?", &format!("{}/edit?id={id}&", self.prefix()), 1),
         }
     }
@@ -69,6 +69,47 @@ impl Backend {
         }
         query.split('&').find_map(|kv| kv.strip_prefix("id="))
     }
+
+    pub fn notebook_path(self, url: &str) -> Option<String> {
+        let (address, query) = url.split_once('?')?;
+        let path = address.split_once("://").map_or(address, |(_, rest)| rest.find('/').map_or("", |slash| &rest[slash..]));
+        if self != Backend::Marimo || path != format!("{}/", self.prefix()) {
+            return None;
+        }
+        let mut files = query.split('&').filter_map(|kv| kv.strip_prefix("file="));
+        match (files.next(), files.next()) {
+            (Some(file), None) => query_decoded(file),
+            _ => None,
+        }
+    }
+}
+
+fn query_decoded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hex = text.get(i + 1..i + 3).filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+pub fn query_value(text: &str) -> String {
+    text.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
 fn is_marimo(path: &Path) -> bool {
@@ -89,7 +130,7 @@ mod tests {
 
     #[test]
     fn pluto_notebook_urls() {
-        let url = Backend::Pluto.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc");
+        let url = Backend::Pluto.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc", "/w/a.jl");
         assert_eq!(url, "http://127.0.0.1:1234/edit?id=abc&token=t0k3n");
         assert_eq!(Backend::Pluto.notebook_id(&url), Some("abc"));
         assert_eq!(Backend::Pluto.notebook_id("http://127.0.0.1:1234/edit?id=abc"), Some("abc"), "once the token has gone from the URL");
@@ -98,7 +139,7 @@ mod tests {
 
     #[test]
     fn ember_pages_are_under_their_own_prefix() {
-        let url = Backend::Ember.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc");
+        let url = Backend::Ember.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc", "/w/a.R");
         assert_eq!(url, "http://127.0.0.1:1234/ember/edit?id=abc&token=t0k3n");
         assert_eq!(Backend::Ember.notebook_id(&url), Some("abc"));
         assert_eq!(Backend::Pluto.notebook_id(&url), None, "an Ember page isn't a Pluto one");
@@ -133,9 +174,16 @@ mod tests {
 
     #[test]
     fn marimo_pages_are_under_their_own_prefix() {
-        let url = Backend::Marimo.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc");
-        assert_eq!(url, "http://127.0.0.1:1234/marimo/?token=t0k3n");
+        let url = Backend::Marimo.notebook_url("http://127.0.0.1:1234/?token=t0k3n", "abc", "/w/a b&c.py");
+        assert_eq!(url, "http://127.0.0.1:1234/marimo/?file=/w/a%20b%26c.py&token=t0k3n", "marimo's page names its notebook by path");
         assert_eq!(Backend::Marimo.notebook_id(&url), None);
+        assert_eq!(Backend::Marimo.notebook_path(&url).as_deref(), Some("/w/a b&c.py"), "the path its URL was made from");
+        assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=/w/a+b.py").as_deref(), Some("/w/a b.py"));
+        assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=/a.py&file=/b.py"), None, "one file or none");
+        assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=%zz"), None);
+        assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=%+f"), None, "a sign isn't a hex digit");
+        assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/api/x?file=/w/a.py"), None, "only the page");
+        assert_eq!(Backend::Pluto.notebook_path(&url), None);
         assert_eq!(Backend::Marimo.notebook_id("http://127.0.0.1:1234/marimo/edit?id=abc"), None);
     }
 
