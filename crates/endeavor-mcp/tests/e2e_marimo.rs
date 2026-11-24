@@ -648,6 +648,7 @@ fn a_python_notebook_through_the_runtime() {
         };
         let slider = add(&mut agent, "n = mo.ui.slider(1, 10, value=3)\nn");
         let doubled = add(&mut agent, "doubled = n.value * 2\ndoubled");
+        add(&mut agent, "fives = mo.ui.slider(0, 20, step=5)");
         let tripled = add(&mut agent, "doubled * 3");
         add(&mut agent, "kind = mo.ui.dropdown({\"Pearson\": \"pearson\", \"Spearman\": \"spearman\"}, value=\"Pearson\")\nkind");
         let chosen = add(&mut agent, "kind.value");
@@ -663,6 +664,9 @@ fn a_python_notebook_through_the_runtime() {
         let (failed, refused) = agent.call("set_input", json!({ "notebook_id": nb, "name": "n", "value": 11 }));
         assert!(failed && refused.to_string().contains("invalid_value") && refused.to_string().contains("1 to 10"), "{refused}");
         assert!(output(&mut agent, &doubled).contains("14"), "nothing changed");
+        let (failed, refused) = agent.call("set_input", json!({ "notebook_id": nb, "name": "fives", "value": 3 }));
+        assert!(failed && refused.to_string().contains("in steps of 5"), "{refused}");
+        agent.ok("set_input", json!({ "notebook_id": nb, "name": "fives", "value": 15 }));
         agent.ok("set_input", json!({ "notebook_id": nb, "name": "kind", "value": "Spearman", "wait_for_completion": true }));
         assert!(output(&mut agent, &chosen).contains("spearman"), "{}", output(&mut agent, &chosen));
         let (failed, refused) = agent.call("set_input", json!({ "notebook_id": nb, "name": "kind", "value": "kendall" }));

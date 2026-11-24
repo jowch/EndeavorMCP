@@ -1231,6 +1231,9 @@ def _endeavor_ui_value(el, value):
         low, high = getattr(el, "start", None), getattr(el, "stop", None)
         if (low is not None and v < low) or (high is not None and v > high):
             raise ValueError(f"It allows {low} to {high}")
+        step = getattr(el, "step", None)
+        if step and low is not None and abs((v - low) / step - round((v - low) / step)) > 1e-9:
+            raise ValueError(f"It allows {low} to {high} in steps of {step}")
         return v
 
     def stepped(v):
