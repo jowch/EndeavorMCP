@@ -300,7 +300,7 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
         problems.push(format!("setup.json: minutes must be a whole number, not {}", setup["minutes"]));
     }
     let server = if ssh {
-        match crate::ssh::start(work) {
+        match crate::ssh::start(work, setup["server_without_uv"] == true) {
             Ok(server) => Some(server),
             Err(e) => {
                 problems.push(format!("starting the ssh server: {e}"));
