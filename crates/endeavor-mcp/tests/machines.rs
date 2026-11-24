@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::os::unix::process::CommandExt;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -2823,6 +2824,40 @@ fn a_front_with_a_folder_still_resolves_relative_paths_in_it() {
 }
 
 #[test]
+fn a_front_over_ssh_tells_how_to_open_a_machines_notebook_through_its_own_port() {
+    let place = Place::new("browser-machine");
+    place.add_lab();
+    let path = place.notebook("machine.jl");
+    let mut front = start_front(&place, &[("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")]);
+    front.initialize();
+    assert_eq!(front.ok("use_machine", json!({ "machine": "lab", "folder": place.project.display().to_string() }))["state"], "ready");
+    let shut = front.ok("open_notebook", json!({ "path": path }));
+    let url = shut["browser_url"].as_str().unwrap_or_default().to_owned();
+    let port: u16 = url.strip_prefix("http://localhost:").and_then(|rest| rest.split('/').next()).and_then(|p| p.parse().ok()).expect("the connection's port here");
+    assert_ne!(port, place.runtime_port(), "{shut}");
+    let note = shut["browser_note"].as_str().unwrap_or_default();
+    assert!(note.contains(&format!("`ssh -L {port}:localhost:{port} ")) && note.contains(&format!(" open --state-dir {} --port {port}`", place.local_state.display())), "{shut}");
+    let pages = read_record(&place.state)["page_token"].as_str().unwrap().to_owned();
+    let status = front.ok("session_status", json!({}));
+    for result in [&shut, &status] {
+        assert!(!result.to_string().contains(TOKEN) && !result.to_string().contains(&pages), "{result}");
+    }
+
+    let opened = place.dir.join("opened.txt");
+    let open = || Command::new(env!("CARGO_BIN_EXE_endeavor")).args(["open", "--state-dir"]).arg(&place.local_state).args(["--port", &port.to_string()]).env_clear().envs(place.env.iter().map(|(k, v)| (k, v))).env("ENDEAVOR_TEST_BROWSER", &opened).output().unwrap();
+    let out = open();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read_to_string(&opened).unwrap().trim(), format!("http://localhost:{port}/?token={pages}"), "the machine's key, at this computer's port");
+    let file = place.local_state.join(format!("forwarded/{port}.json"));
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    front.finish();
+
+    let out = open();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && said.contains(&format!("forwards port {port}")) && !said.contains(&pages), "once the session ends, the port could be anyone's: {said}");
+}
+
+#[test]
 fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     let place = Place::new("browser");
     let opened = place.dir.join("opened.txt");
@@ -2876,7 +2911,9 @@ fn a_notebook_opens_in_the_users_browser_and_no_result_holds_the_token() {
     assert!(note.contains(&format!("`ssh -L {port}:localhost:{port} ")) && note.contains("Only if the address doesn't load") && note.contains(" open --state-dir "), "{shut}");
     let status = front.ok("session_status", json!({}));
     assert!(status["browser_note"].as_str().is_some_and(|n| n.contains("ssh -L")), "asked for the link again, the agent gets the steps again: {status}");
-    assert!(!shut.to_string().contains(TOKEN) && !shut.to_string().contains(&pages), "{shut}");
+    for result in [&shut, &status] {
+        assert!(!result.to_string().contains(TOKEN) && !result.to_string().contains(&pages), "{result}");
+    }
     front.finish();
 
     let mut front = start_front(&place, &[("ENDEAVOR_TEST_BROWSER", place.dir.to_str().unwrap())]);

@@ -30,12 +30,13 @@ const USAGE: &str = "usage: endeavor serve [OPTIONS]   run Endeavor here and pri
        endeavor mcp [OPTIONS]     MCP over stdin/stdout for an agent on this machine
        endeavor stop [--force]    stop what serve or mcp started; --force cancels a start under way
        endeavor status [--json]   show what Endeavor has on this computer; changes nothing
-       endeavor open              open the notebooks that serve or mcp started in your browser
+       endeavor open [--port PORT]  open the notebooks that serve or mcp started in your browser
 
 options:
   --folder DIR         where new notebooks go (default: the current folder)
   --no-folder          the agent is not told a project folder: its notebook paths must be absolute, unless a call names one as Codex's do [mcp]
-  --port PORT          the port to listen on, on 127.0.0.1 (default: a free one) [serve, mcp]
+  --port PORT          the port to listen on, on 127.0.0.1 (default: a free one) [serve, mcp];
+                       for open, the port an agent's session forwards to a machine's notebooks
   --host-tools         give every agent session list_folder, read_file and run_shell here [serve]
   --skills plugin      the agent has Endeavor's skills from its plugin [mcp]
   --julia PATH|auto|own  the julia to use (default auto: your login shell's, else Endeavor's own;
@@ -63,7 +64,7 @@ pub(crate) enum Command {
     Mcp(Options),
     Stop { state_dir: PathBuf, force: bool },
     Status { state_dir: PathBuf, json: bool },
-    Open { state_dir: PathBuf },
+    Open { state_dir: PathBuf, forwarded: Option<u16> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -84,7 +85,7 @@ pub(crate) struct Options {
 
 pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     let (command, rest) = argv.split_first().ok_or("expected serve, mcp, stop, status or open")?;
-    let (mut state_dir, mut julia, mut depot, mut folder, mut port, mut r) = (None, None::<julia::Source>, None, None, 0, None);
+    let (mut state_dir, mut julia, mut depot, mut folder, mut port, mut r) = (None, None::<julia::Source>, None, None, None::<u16>, None);
     let mut cache = None;
     let (mut host_tools, mut idle_hours, mut skills_plugin, mut json, mut force, mut no_folder) = (false, crate::notebooks::IDLE_HOURS, false, false, false, false);
     let mut args = rest.iter();
@@ -124,8 +125,8 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
                 no_folder = true
             }
             "--port" => {
-                only(&["serve", "mcp"])?;
-                port = value()?.parse().map_err(|_| "--port needs a port number".to_owned())?
+                only(&["serve", "mcp", "open"])?;
+                port = Some(value()?.parse().map_err(|_| "--port needs a port number".to_owned())?)
             }
             "--idle-stop" => {
                 only(&["serve", "mcp"])?;
@@ -159,7 +160,7 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
     match command.as_str() {
         "stop" => return Ok(Command::Stop { state_dir: now(), force }),
         "status" => return Ok(Command::Status { state_dir: now(), json }),
-        "open" => return Ok(Command::Open { state_dir: now() }),
+        "open" => return Ok(Command::Open { state_dir: now(), forwarded: port }),
         _ => {}
     }
     let folder = match folder {
@@ -178,7 +179,7 @@ pub(crate) fn parse(argv: &[String], env: &Env) -> Result<Command, String> {
         r: r.unwrap_or_default(),
         depot: depot.unwrap_or_else(|| env.depot()),
         folder,
-        port,
+        port: port.unwrap_or(0),
         host_tools,
         idle_hours,
         skills_plugin,
@@ -205,7 +206,8 @@ pub fn main(argv: &[String]) -> ! {
         Command::Mcp(options) => relay(options),
         Command::Stop { state_dir, force } => stop(&state_dir, force),
         Command::Status { state_dir, json } => status::main(&env, &state_dir, json),
-        Command::Open { state_dir } => open(&state_dir),
+        Command::Open { state_dir, forwarded: None } => open(&state_dir),
+        Command::Open { state_dir, forwarded: Some(port) } => open_forwarded(&state_dir, port),
     }
 }
 
@@ -688,21 +690,34 @@ fn open(dir: &Path) -> ! {
         std::process::exit(1)
     };
     match runtime::look(dir, false, true) {
-        Looked::Running(state, port) => {
-            let link = crate::mcp::entry_link(&crate::mcp::browser_link(port, "/"), state.page_token.as_deref().unwrap_or(&state.token));
-            use std::io::IsTerminal;
-            if browser::open(&link) {
-                println!("Opened Endeavor's notebooks in your browser.");
-            } else if io::stdout().is_terminal() {
-                println!("Open this link in your browser. It holds the notebooks' key: don't share it.\n    {link}");
-            } else {
-                failed("No browser could be opened here. Run `endeavor open` in your own terminal: the link it prints holds the notebooks' key, so it isn't printed anywhere else.".into());
-            }
-        }
+        Looked::Running(state, port) => show_entry(port, state.page_token.as_deref().unwrap_or(&state.token), "Endeavor's notebooks"),
         Looked::OtherNode(state) => failed(format!("The Endeavor recorded in {} runs on {}, not here ({}). Run `endeavor open` there.", dir.display(), state.node, crate::hostname())),
         Looked::Silent(_) => failed("Endeavor is running but not answering. Try again in a moment.".into()),
         Looked::Older(_) => failed(format!("The Endeavor running from {} was started by an older version, which has no page for a browser. `endeavor stop` stops it.", dir.display())),
         Looked::NotRunning | Looked::Dead(_) => failed(format!("Endeavor isn't running from {}.", dir.display())),
+    }
+}
+
+fn open_forwarded(dir: &Path, port: u16) -> ! {
+    match browser::forwarded(dir, port) {
+        Ok((machine, page_token)) => show_entry(port, &page_token, &format!("the notebooks on {machine}")),
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1)
+        }
+    }
+}
+
+fn show_entry(port: u16, page_token: &str, what: &str) -> ! {
+    let link = crate::mcp::entry_link(&crate::mcp::browser_link(port, "/"), page_token);
+    use std::io::IsTerminal;
+    if browser::open(&link) {
+        println!("Opened {what} in your browser.");
+    } else if io::stdout().is_terminal() {
+        println!("Open this link in your browser. It holds the notebooks' key: don't share it.\n    {link}");
+    } else {
+        eprintln!("No browser could be opened here. Run `endeavor open` in your own terminal: the link it prints holds the notebooks' key, so it isn't printed anywhere else.");
+        std::process::exit(1)
     }
     std::process::exit(0)
 }
@@ -1190,8 +1205,13 @@ impl Relay {
             failed = !opened;
         }
         let var = |name: &str| std::env::var(name).ok();
-        if route.host.is_none() && !in_view && (failed || !browser::shows(var)) {
-            let open = crate::core::open_command(&self.options.state_dir());
+        if !in_view && (failed || !browser::shows(var)) {
+            let dir = self.options.state_dir();
+            let forwarded = route.host.as_deref().map(|machine| browser::remember_forwarded(&dir, route.port, machine, &route.page_token).map(|()| route.port));
+            if let Some(Err(e)) = &forwarded {
+                eprintln!("endeavor: {e}");
+            }
+            let open = crate::core::open_command(&dir, forwarded.and_then(Result::ok));
             fields.insert("browser_note".into(), browser::note(&crate::hostname(), route.port, &open).into());
         }
         fields.insert("browser_url".into(), url.into());

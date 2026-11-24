@@ -324,7 +324,9 @@ how to get in.
 folder: it opens the start page in your browser, or prints the link with the
 token when the computer shows no browser (over ssh, say). It prints the link
 only to a terminal, so an agent that runs it in its shell doesn't get the
-token. It takes `--state-dir` like `stop`.
+token. It takes `--state-dir` like `stop`. With `--port PORT` it opens the
+notebooks of a machine that an agent's `mcp` here reaches through that port;
+the agent's note gives the whole command.
 
 If you forward a different local port than the runtime's, change the port in
 the link.

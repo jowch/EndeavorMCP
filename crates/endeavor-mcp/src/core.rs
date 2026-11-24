@@ -140,7 +140,7 @@ pub fn main(argv: &[String]) -> ! {
         bridge.notebooks.set_idle_limit(hours);
     }
     bridge.notebooks.exits_when_idle.store(exit_idle, std::sync::atomic::Ordering::SeqCst);
-    let not_let_in = not_let_in(&open_command(&args.state_dir));
+    let not_let_in = not_let_in(&open_command(&args.state_dir, None));
     let allow_r_install = Arc::new(std::sync::atomic::AtomicBool::new(args.install_r));
     let allow_uv_install = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone(), allow_uv_install: allow_uv_install.clone(), r: OnceLock::new(), marimo: Default::default(), state_dir: args.state_dir.clone(), left: Default::default(), left_generation: Default::default() });
@@ -2281,12 +2281,13 @@ fn not_let_in(open: &str) -> String {
     )
 }
 
-pub(crate) fn open_command(dir: &Path) -> String {
+pub(crate) fn open_command(dir: &Path, forwarded: Option<u16>) -> String {
     let quote = |text: &str| if text.is_empty() || text.contains([' ', '"', '\'', '$', '&']) { format!("\"{text}\"") } else { text.to_owned() };
     let program = std::env::current_exe().map_or_else(|_| "endeavor".to_owned(), |exe| exe.display().to_string());
     let mut words = vec![quote(&program)];
     words.extend(crate::HELPER_ARGS.get().copied().unwrap_or_default().iter().map(|arg| arg.to_string()));
     words.extend(["open".to_owned(), "--state-dir".to_owned(), quote(&dir.display().to_string())]);
+    words.extend(forwarded.into_iter().flat_map(|port| ["--port".to_owned(), port.to_string()]));
     let line = words.join(" ");
     if cfg!(windows) { format!("& {line}") } else { line }
 }

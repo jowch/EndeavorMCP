@@ -1,4 +1,7 @@
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use serde_json::{Value, json};
 
 #[derive(Debug, PartialEq)]
 enum Opener {
@@ -57,6 +60,42 @@ Only if the address doesn't load at all, their browser is on another computer: t
 (with the name they use to ssh to {host}), keep it open, and open `browser_url` again. \
 You can't forward the port for them: it starts on their computer."
     )
+}
+
+fn forwarded_file(dir: &Path, port: u16) -> PathBuf {
+    dir.join("forwarded").join(format!("{port}.json"))
+}
+
+pub(crate) fn remember_forwarded(dir: &Path, port: u16, machine: &str, page_token: &str) -> Result<(), String> {
+    let file = forwarded_file(dir, port);
+    let record = json!({ "machine": machine, "page_token": page_token, "pid": std::process::id(), "started": crate::own_start_time(), "boot": crate::own_boot(), "node": crate::hostname() });
+    if std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).is_some_and(|known| known == record) {
+        return Ok(());
+    }
+    let folder = file.parent().unwrap_or(dir);
+    std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't create {}: {e}", folder.display()))?;
+    for stale in std::fs::read_dir(folder).into_iter().flatten().flatten().map(|entry| entry.path()) {
+        if stale.extension().is_some_and(|ext| ext == "json") && forwarder(&stale).is_none() {
+            let _ = std::fs::remove_file(stale);
+        }
+    }
+    crate::core::write_private(&file, serde_json::to_string(&record).unwrap_or_default().as_bytes())
+}
+
+fn forwarder(file: &Path) -> Option<(String, String)> {
+    let record: Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
+    let pid = i32::try_from(record["pid"].as_u64()?).ok()?;
+    if !crate::is_this_node(record["node"].as_str()?) || !crate::pid_alive(pid, record["started"].as_u64(), record["boot"].as_str()) {
+        return None;
+    }
+    Some((record["machine"].as_str()?.to_owned(), record["page_token"].as_str()?.to_owned()))
+}
+
+pub(crate) fn forwarded(dir: &Path, port: u16) -> Result<(String, String), String> {
+    let gone = || format!("Nothing from Endeavor in {} forwards port {port} now: the agent's session that used it has ended. Ask the agent to open the notebook again.", dir.display());
+    let (machine, page_token) = forwarder(&forwarded_file(dir, port)).ok_or_else(gone)?;
+    std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), std::time::Duration::from_secs(5)).map_err(|_| gone())?;
+    Ok((machine, page_token))
 }
 
 fn commands(url: &str, opener: Opener) -> Vec<(String, Vec<String>)> {
