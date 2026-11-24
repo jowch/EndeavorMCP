@@ -335,6 +335,7 @@ class Notebook:
         self.missing = set()
         self.watched, self.installing = collections.Counter(), None
         self.asking, self.approved = None, set()
+        self.failed = None
         self.previewed = None
         self.ws = None
         self.watcher = None
@@ -648,6 +649,9 @@ class Notebook:
             ok, out = False, str(e)
         finally:
             self.installing = None
+        refused = re.findall(r"^failed to install (\S+)$", out or "", re.M)
+        ok = ok and not refused
+        self.failed = None if ok else {"packages": sorted(refused or {pypi_name(m) for m in modules}), "log": out[-6000:]}
         if not ok:
             print(f"endeavor marimo: couldn't install {sorted(modules)}: {out[-500:]}", file=sys.stderr)
             for c in rerun:
@@ -711,6 +715,11 @@ class Notebook:
                 "safe_preview": not self.allowed, "lazy": True,
                 "packages": self.install_state(), "package_date": day_of(package_date(self.path)),
                 "cells": [self.snapshot_cell(cid) for cid in self.order]}
+
+    def environment(self):
+        header = read_header(self.path) or ""
+        return {"python": header_python(header), "packages": [direct_package(d) for d in header_deps(header)] if header else [],
+                "package_date": day_of(package_date(self.path)), "install": self.install_state(), "failed": self.failed}
 
     def install_state(self):
         if self.asking and not self.installing:
@@ -879,6 +888,23 @@ def read_header(path):
 def header_deps(header):
     import tomlkit
     return [str(d) for d in (tomlkit.parse(header).get("dependencies") or [])]
+
+
+def header_python(header):
+    import tomlkit
+    return str(tomlkit.parse(header).get("requires-python") or "") or None if header else None
+
+
+def direct_package(dep):
+    pinned = exact_pin(dep)
+    if pinned:
+        return {"name": pinned[0].name, "version": pinned[1]}
+    from packaging.requirements import Requirement
+    try:
+        req = Requirement(dep)
+    except Exception:  # noqa: BLE001
+        return {"name": dep, "version": None}
+    return {"name": req.name, "version": str(req.specifier) or None}
 
 
 def is_marimo(dep):
@@ -1831,6 +1857,8 @@ class Adapter:
             return await self.shutdown(nb)
         if method == "move":
             return await self.move(nb, p.get("path", ""))
+        if method == "environment":
+            return nb.environment()
         if method == "export":
             return await self.export(nb, p.get("format"))
         if method == "render_text":
