@@ -1586,8 +1586,8 @@ impl Call<'_> {
 
     fn set_input(&self) -> Result<Value, String> {
         let nb = self.notebook()?;
-        if self.nbs.backend_of(&nb.id) != Backend::Ember {
-            return Err(argument_error("not_r_notebook::Only an R notebook has inputs. A Julia notebook's `@bind` widgets are set from the page"));
+        if !matches!(self.nbs.backend_of(&nb.id), Backend::Ember | Backend::Marimo) {
+            return Err(argument_error("not_r_notebook::Only R and Python notebooks have inputs. A Julia notebook's `@bind` widgets are set from the page"));
         }
         let Value::String(name) = self.arg("name")? else { return Err(argument_error("invalid_argument::name must be the name the input is assigned to")) };
         let value = self.arg("value")?.clone();

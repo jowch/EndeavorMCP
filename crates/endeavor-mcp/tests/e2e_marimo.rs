@@ -632,6 +632,57 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("close_notebook", json!({ "notebook_id": nb }));
     });
 
+    step("set_input moves a widget and reruns its readers; HTML around a PNG shows the PNG", || {
+        const PICTURE: &str = "import random as _r, struct as _s, zlib as _z\n_r.seed(1)\n_chunk = lambda t, d: _s.pack(\">I\", len(d)) + t + d + _s.pack(\">I\", _z.crc32(t + d))\n_rows = b\"\".join(b\"\\x00\" + bytes(_r.randrange(256) for _ in range(64 * 3)) for _ in range(64))\npicture = b\"\\x89PNG\\r\\n\\x1a\\n\" + _chunk(b\"IHDR\", _s.pack(\">IIBBBBB\", 64, 64, 8, 2, 0, 0, 0)) + _chunk(b\"IDAT\", _z.compress(_rows)) + _chunk(b\"IEND\", b\"\")\nmo.vstack([mo.md(\"A picture\"), mo.image(picture)])";
+        let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        let made = agent.ok("new_notebook", json!({ "path": "widgets.py" }));
+        let nb = made["notebook_id"].clone();
+        let first = made["cell_ids"][0].as_str().unwrap().to_owned();
+        agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": first }));
+        agent.ok("edit_cell", json!({ "notebook_id": nb, "cell_id": first, "code": "import marimo as mo" }));
+        let mut after = first.clone();
+        let mut add = |agent: &mut Agent, code: &str| {
+            after = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": after, "code": code }))["cell_id"].as_str().unwrap().to_owned();
+            after.clone()
+        };
+        let slider = add(&mut agent, "n = mo.ui.slider(1, 10, value=3)\nn");
+        let doubled = add(&mut agent, "doubled = n.value * 2\ndoubled");
+        let tripled = add(&mut agent, "doubled * 3");
+        add(&mut agent, "kind = mo.ui.dropdown({\"Pearson\": \"pearson\", \"Spearman\": \"spearman\"}, value=\"Pearson\")\nkind");
+        let chosen = add(&mut agent, "kind.value");
+        add(&mut agent, "plain = 5");
+        let picture = add(&mut agent, PICTURE);
+        agent.ok("submit_changes", json!({ "notebook_id": nb, "wait_for_completion": true }));
+        let output = |agent: &mut Agent, cell: &str| agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": cell }))["output"].as_str().unwrap_or_default().to_owned();
+        assert!(output(&mut agent, &tripled).contains("18"), "{}", output(&mut agent, &tripled));
+
+        let set = agent.ok("set_input", json!({ "notebook_id": nb, "name": "n", "value": 7, "wait_for_completion": true }));
+        assert_eq!((&set["mutation"]["cell_id"], &set["mutation"]["value"]), (&json!(slider), &json!(7)), "{set}");
+        assert!(output(&mut agent, &doubled).contains("14") && output(&mut agent, &tripled).contains("42"), "the reader and its dependent reran: {set}");
+        let (failed, refused) = agent.call("set_input", json!({ "notebook_id": nb, "name": "n", "value": 11 }));
+        assert!(failed && refused.to_string().contains("invalid_value") && refused.to_string().contains("1 to 10"), "{refused}");
+        assert!(output(&mut agent, &doubled).contains("14"), "nothing changed");
+        agent.ok("set_input", json!({ "notebook_id": nb, "name": "kind", "value": "Spearman", "wait_for_completion": true }));
+        assert!(output(&mut agent, &chosen).contains("spearman"), "{}", output(&mut agent, &chosen));
+        let (failed, refused) = agent.call("set_input", json!({ "notebook_id": nb, "name": "kind", "value": "kendall" }));
+        assert!(failed && refused.to_string().contains("invalid_value") && refused.to_string().contains("Pearson"), "{refused}");
+        let (failed, refused) = agent.call("set_input", json!({ "notebook_id": nb, "name": "plain", "value": 1 }));
+        assert!(failed && refused.to_string().contains("input_refused"), "{refused}");
+        let (failed, refused) = agent.call("set_input", json!({ "notebook_id": nb, "name": "missing", "value": 1 }));
+        assert!(failed && refused.to_string().contains("input_refused"), "{refused}");
+        assert!(std::fs::read_to_string(folder.join("widgets.py")).unwrap().contains("value=3"), "the value isn't saved");
+
+        assert!(output(&mut agent, &picture).contains("view_cell_output"), "{}", output(&mut agent, &picture));
+        let shown = agent.mcp("tools/call", json!({ "name": "view_cell_output", "arguments": { "notebook_id": nb, "cell_id": picture } }));
+        let content = shown["result"]["content"].as_array().cloned().unwrap_or_default();
+        assert!(shown["result"]["isError"] != true && content.iter().any(|c| c["type"] == "image" && c["mimeType"] == "image/png"), "{shown}");
+        assert!(content.iter().any(|c| c["text"].as_str().unwrap_or_default().contains("embedded image")), "{shown}");
+        let (failed, refused) = agent.call("view_cell_output", json!({ "notebook_id": nb, "cell_id": slider }));
+        assert!(failed && refused.to_string().contains("no_image"), "a widget has no picture: {refused}");
+        agent.ok("close_notebook", json!({ "notebook_id": nb }));
+    });
+
     step("headings from a hand-written file keep their own code when the file changes under marimo", || {
         let titles = ["Setup", "Data Loading", "Data Cleaning", "Growth Curves by Strain", "Data Quality Checks", "Summary"];
         let mut text = String::from("# /// script\n# requires-python = \">=3.10\"\n# dependencies = [\n#     \"marimo==0.25.1\",\n# ]\n# ///\n\nimport marimo\n\n__generated_with = \"0.25.1\"\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    import marimo as mo\n    return (mo,)\n\n");

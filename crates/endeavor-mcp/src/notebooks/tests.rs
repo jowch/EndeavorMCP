@@ -3754,6 +3754,14 @@ fn set_input_sets_an_r_notebooks_input_and_reruns_or_stales_its_readers() {
     s.engine.open(NB, "/n/a.jl", &[(X, "w = 1")]);
     let julia = s.call("7", "set_input", json!({ "notebook_id": NB, "name": "w", "value": 1 })).unwrap_err();
     assert!(julia.contains("not_r_notebook"), "{julia}");
+
+    const PY: &str = "cccccccc-0000-0000-0000-000000000003";
+    let marimo = Arc::new(Engine { clock: s.clock.clone(), ..Default::default() });
+    marimo.open(PY, "/n/c.py", &[(X, "w = 1")]);
+    s.notebooks.add_engine(Backend::Marimo, marimo.clone());
+    s.call("9", "list_notebooks", json!({})).unwrap();
+    let python = s.call("9", "set_input", json!({ "notebook_id": PY, "name": "w", "value": 1 })).unwrap_err();
+    assert!(python.contains("input_refused"), "a Python notebook's engine answers: {python}");
 }
 
 #[test]

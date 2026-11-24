@@ -510,8 +510,11 @@ Next:
   them ends all three; there the user installs uv themselves, since Endeavor has no uv of its
   own for Windows yet. marimo is started at the root of the drive the first Python notebook resolves
   to (a subst drive's own drive, a mapped drive's share), and until Endeavor restarts a notebook on another drive is refused
-  with a plain message (#574). Known gaps: `set_input` and
-  `view_cell_output` of HTML aren't there (#354). Where no uv is found, the agent
+  with a plain message (#574). `set_input` sets a `mo.ui`
+  slider, range_slider, number, checkbox, switch, text, text_area, dropdown, radio or
+  multiselect through marimo's code mode, then runs its readers as `execute_cell` does; other
+  widgets are refused. `view_cell_output` of HTML shows the largest PNG embedded in it, as
+  Julia's does; other HTML, interactive or not, has no picture outside the app (#354). Where no uv is found, the agent
   is told Endeavor can download its own uv 0.11.32 (from uv's GitHub release,
   checked against its SHA-256, into `~/.cache/endeavor/uv-0.11.32`) if the user
   agrees; their yes comes as `use_machine` with `install: true` on this computer,
