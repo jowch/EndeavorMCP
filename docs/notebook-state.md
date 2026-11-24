@@ -133,7 +133,7 @@ runs every five minutes.
   preview. Julia and R notebooks export through their own page instead.
 - **`environment`**: what a Python notebook runs on, for the app's Packages
   view, since marimo's page shows none of it. It gives the header's Python
-  requirement, the direct packages with their pinned versions, the package
+  requirement and the Python uv picks for it, the direct packages with their pinned versions, the package
   date, the install that waits for the user or is running, and the last
   install that failed, with marimo's log. A failure stays until the next
   install works. Julia and R notebooks read this from their own page.

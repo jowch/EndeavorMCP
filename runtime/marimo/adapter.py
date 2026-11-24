@@ -6,11 +6,13 @@ import ast
 import json
 import html as html_module
 import os
+import platform
 import re
 import secrets
 import shutil
 import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -336,6 +338,7 @@ class Notebook:
         self.watched, self.installing = collections.Counter(), None
         self.asking, self.approved = None, set()
         self.failed = None
+        self.python_found = None
         self.previewed = None
         self.ws = None
         self.watcher = None
@@ -639,7 +642,7 @@ class Notebook:
         rerun = [c for c in rerun if c in self.cells]
         for c in rerun:
             self.cells[c]["status"], self.cells[c]["queued_by_us"], self.cells[c]["awaiting_install"] = "queued", True, True
-        self.installing = {"packages": sorted(modules), "started": time.time()}
+        self.installing = {"packages": sorted({pypi_name(m) for m in modules}), "started": time.time()}
         try:
             delay = float(os.environ.get("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS") or 0)
             if delay:
@@ -716,9 +719,12 @@ class Notebook:
                 "packages": self.install_state(), "package_date": day_of(package_date(self.path)),
                 "cells": [self.snapshot_cell(cid) for cid in self.order]}
 
-    def environment(self):
+    async def environment(self):
         header = read_header(self.path) or ""
-        return {"python": header_python(header), "packages": [direct_package(d) for d in header_deps(header)] if header else [],
+        wanted = header_python(header)
+        if self.python_found is None or self.python_found[0] != wanted:
+            self.python_found = (wanted, await asyncio.to_thread(uv_python_version, wanted, os.path.dirname(self.path)))
+        return {"python": wanted, "python_version": self.python_found[1], "packages": [direct_package(d) for d in header_deps(header)] if header else [],
                 "package_date": day_of(package_date(self.path)), "install": self.install_state(), "failed": self.failed}
 
     def install_state(self):
@@ -736,7 +742,7 @@ class Notebook:
         waiting = [c for c in self.order if self.waits_for_install(c)]
         raising = [e.get("raising_cell") for c in waiting for e in self.error_data(c)]
         named = self.missing_modules(waiting + [r for r in raising if r in self.cells], tried=True)
-        return {"step": "installing", "packages": (self.installing or {}).get("packages") or sorted(named),
+        return {"step": "installing", "packages": (self.installing or {}).get("packages") or sorted({pypi_name(m) for m in named}),
                 "seconds": int(time.time() - started), "last_line": None}
 
     def check_cell(self, cid):
@@ -888,6 +894,19 @@ def read_header(path):
 def header_deps(header):
     import tomlkit
     return [str(d) for d in (tomlkit.parse(header).get("dependencies") or [])]
+
+
+def uv_python_version(requirement, folder):
+    try:
+        found = subprocess.run([os.environ.get("UV", "uv"), "python", "find", requirement or platform.python_version()], cwd=folder or None,
+                               capture_output=True, text=True, timeout=30)
+        if found.returncode != 0 or not found.stdout.strip():
+            return None
+        version = subprocess.run([found.stdout.strip(), "-c", "import platform; print(platform.python_version())"],
+                                 capture_output=True, text=True, timeout=30)
+        return version.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def header_python(header):
@@ -1860,7 +1879,7 @@ class Adapter:
         if method == "move":
             return await self.move(nb, p.get("path", ""))
         if method == "environment":
-            return nb.environment()
+            return await nb.environment()
         if method == "export":
             return await self.export(nb, p.get("format"))
         if method == "render_text":
