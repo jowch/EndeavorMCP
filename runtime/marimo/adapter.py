@@ -31,7 +31,6 @@ from marimo._ast.load import load_app
 TOKEN = os.environ.get("ENDEAVOR_TOKEN", "")
 STATE_FILE = os.environ.get("ENDEAVOR_MARIMO_STATE", "")
 BASE_URL = "/marimo"
-ROOT = os.environ.get("ENDEAVOR_MARIMO_ROOT") or os.path.abspath(os.sep)
 POLL_HOLD = 25
 NOTES_KEPT = 500
 TEXT_MAX = 20_000
@@ -110,9 +109,17 @@ def real(path):
     return os.path.realpath(os.path.expanduser(path))
 
 
+ROOT = real(os.environ.get("ENDEAVOR_MARIMO_ROOT") or os.sep)
+
+
+def other_drive(path, root, splitdrive=os.path.splitdrive):
+    drive = splitdrive(path)[0]
+    return None if drive.lower() == splitdrive(root)[0].lower() else drive
+
+
 def on_marimos_drive(path):
-    drive = os.path.splitdrive(path)[0]
-    if drive.lower() != os.path.splitdrive(ROOT)[0].lower():
+    drive = other_drive(real(path), ROOT)
+    if drive is not None:
         root = os.path.splitdrive(ROOT)[0]
         raise argument_error("unsupported", f"'{path}' is on {drive}, and Python notebooks run from one drive at a time: since Endeavor started, that is {root}, the drive of the first one opened. Tell the user; after Endeavor restarts, the first Python notebook opened or made can be on {drive}.")
 
