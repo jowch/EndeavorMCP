@@ -37,8 +37,18 @@ gets its own uv environment from its PEP 723 header.
 - It listens on loopback only, behind its token, which only the core's
   `/marimo/` route adds; that route forwards under the adapter's prefix. The
   core makes the token, as it does Ember's secret.
-- The whole filesystem is its workspace: notebooks open by absolute path,
-  anywhere.
+- marimo also looks for free ports for its language servers when it starts,
+  and it looks on every interface, which makes Windows ask to let Python
+  through the firewall. The adapter starts marimo through a small wrapper
+  (`MARIMO_ON_LOOPBACK`) that makes that search use 127.0.0.1, in the
+  server it starts and in the one `--sandbox` starts again in an environment
+  with marimo's language-server extras. If the marimo functions it changes
+  move, marimo stops with a message rather than starting unwrapped;
+  `tests/e2e_marimo_windows.rs` checks both against the pinned marimo.
+- Its workspace is the root of the drive the first Python notebook is on:
+  notebooks open by absolute path anywhere on that drive. On Unix that is the
+  whole filesystem. A notebook on another drive is refused until Endeavor
+  restarts (#574).
 - Its config is ours, not the user's: nothing runs by itself (an edit marks
   its readers stale), opening runs nothing, a file edited elsewhere marks
   cells stale, and marimo's own AI is off (there is one agent). A table shows

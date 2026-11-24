@@ -4,7 +4,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use windows_sys::Win32::Foundation::{FILETIME, HANDLE, WAIT_TIMEOUT};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectExtendedLimitInformation, SetInformationJobObject,
+    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess,
@@ -56,7 +56,7 @@ pub fn own_start_time() -> Option<u64> {
     start_time(unsafe { GetCurrentProcess() } as RawHandle)
 }
 
-pub fn job_ending_with_this_process() -> io::Result<OwnedHandle> {
+fn job_ending_with_its_last_handle() -> io::Result<OwnedHandle> {
     // SAFETY: no security attributes and no name: a private job.
     let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if raw.is_null() {
@@ -71,11 +71,37 @@ pub fn job_ending_with_this_process() -> io::Result<OwnedHandle> {
     if unsafe { SetInformationJobObject(job.as_raw_handle() as HANDLE, JobObjectExtendedLimitInformation, (&raw const limits).cast(), size) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: the job we own, and the pseudo-handle for this process.
-    if unsafe { AssignProcessToJobObject(job.as_raw_handle() as HANDLE, GetCurrentProcess()) } == 0 {
+    Ok(job)
+}
+
+fn assign(job: &OwnedHandle, process: HANDLE) -> io::Result<()> {
+    // SAFETY: the job we own, and a process handle with PROCESS_SET_QUOTA and PROCESS_TERMINATE access.
+    if unsafe { AssignProcessToJobObject(job.as_raw_handle() as HANDLE, process) } == 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(())
+}
+
+pub fn job_ending_with_this_process() -> io::Result<OwnedHandle> {
+    let job = job_ending_with_its_last_handle()?;
+    // SAFETY: the pseudo-handle for this process.
+    assign(&job, unsafe { GetCurrentProcess() })?;
     Ok(job)
+}
+
+pub struct Tree(OwnedHandle);
+
+impl Tree {
+    pub fn of(child: &std::process::Child) -> io::Result<Tree> {
+        let job = job_ending_with_its_last_handle()?;
+        assign(&job, child.as_raw_handle() as HANDLE)?;
+        Ok(Tree(job))
+    }
+
+    pub fn end(&self) {
+        // SAFETY: the job we own.
+        unsafe { TerminateJobObject(self.0.as_raw_handle() as HANDLE, 1) };
+    }
 }
 
 #[cfg(test)]
@@ -131,6 +157,36 @@ mod tests {
         for (process, pid) in started.iter().zip(&pids) {
             assert!(process.wait(10_000), "process {pid} outlived the job's first process");
         }
+    }
+
+    #[test]
+    fn ending_a_tree_ends_the_child_and_what_it_started() {
+        const TEST: &str = "winproc::tests::ending_a_tree_ends_the_child_and_what_it_started";
+        if std::env::var(ROLE).as_deref() == Ok("worker") {
+            let mut ping = Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap();
+            let path = std::env::var(PIDS).unwrap();
+            std::fs::write(format!("{path}.part"), ping.id().to_string()).unwrap();
+            std::fs::rename(format!("{path}.part"), &path).unwrap();
+            let _ = ping.wait();
+            return;
+        }
+        let file = std::env::temp_dir().join(format!("endeavor-tree-test-{}", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let mut worker = rerun(TEST, "worker").env(PIDS, &file).spawn().unwrap();
+        let tree = Tree::of(&worker).unwrap();
+        let mut grandchild = None;
+        for _ in 0..300 {
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                grandchild = text.trim().parse::<u32>().ok();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = std::fs::remove_file(&file);
+        let grandchild = Process::open_pid(grandchild.expect("the worker wrote its child's pid")).expect("the worker's child runs");
+        tree.end();
+        worker.wait().unwrap();
+        assert!(grandchild.wait(10_000), "the worker's child outlived the tree");
     }
 
     #[test]

@@ -192,3 +192,30 @@ jobs:
             echo "::error::e2e_marimo was skipped"
             exit 1
           fi
+
+  marimo-windows:
+    name: e2e marimo windows
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Git
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.32'
+      - name: Build
+        run: cargo build --locked -p endeavor-mcp --tests
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p endeavor-mcp --test e2e_marimo_windows -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/e2e_marimo_windows.log"
+          if grep -q 'SKIPPED:' "$RUNNER_TEMP/e2e_marimo_windows.log"; then
+            echo "::error::e2e_marimo_windows was skipped"
+            exit 1
+          fi

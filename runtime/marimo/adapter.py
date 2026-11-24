@@ -35,6 +35,35 @@ POLL_HOLD = 25
 NOTES_KEPT = 500
 TEXT_MAX = 20_000
 
+MARIMO_ON_LOOPBACK = """
+import functools, inspect, os, sys
+from marimo._environments import backends
+from marimo._server import lsp
+from marimo._utils import net
+
+def moved(what):
+    sys.exit(f"Endeavor: marimo's {what} moved, so Endeavor can't keep marimo on 127.0.0.1")
+
+if lsp.find_free_port is not net.find_free_port or "addr" not in inspect.signature(net.find_free_port).parameters:
+    moved("language-server port search")
+if next(iter(inspect.signature(backends.launch_server).parameters), None) != "args":
+    moved("server relaunch")
+lsp.find_free_port = functools.partial(net.find_free_port, addr="127.0.0.1")
+launch_server = backends.launch_server
+
+def relaunch_on_loopback(args, **options):
+    if list(args[:2]) != ["-m", "marimo"]:
+        moved("server relaunch")
+    return launch_server(["-c", os.environ["ENDEAVOR_MARIMO_CLI"], *args[2:]], **options)
+
+backends.launch_server = relaunch_on_loopback
+"""
+
+MARIMO_CLI = MARIMO_ON_LOOPBACK + """
+from marimo._cli.cli import main
+main(prog_name="marimo")
+"""
+
 MARIMO_CONFIG = """[runtime]
 on_cell_change = "lazy"
 auto_instantiate = false
@@ -109,6 +138,25 @@ def real(path):
     return os.path.realpath(os.path.expanduser(path))
 
 
+def drive_root(path, splitdrive=os.path.splitdrive, sep=os.sep):
+    return splitdrive(path)[0] + sep
+
+
+ROOT = drive_root(real(os.environ.get("ENDEAVOR_MARIMO_ROOT") or os.sep))
+
+
+def other_drive(path, root, splitdrive=os.path.splitdrive):
+    drive = splitdrive(path)[0]
+    return None if drive.lower() == splitdrive(root)[0].lower() else drive
+
+
+def on_marimos_drive(path):
+    drive = other_drive(real(path), ROOT)
+    if drive is not None:
+        root = os.path.splitdrive(ROOT)[0]
+        raise argument_error("unsupported", f"'{path}' is on {drive}, but Python notebooks run from one drive at a time, and since Endeavor started that is {root}. Don't change the path. Tell the user exactly this: Python notebooks can use one drive at a time, this one is on {drive}, and after Endeavor restarts the first Python notebook opened or made can be on {drive}.")
+
+
 class Marimo:
     def __init__(self):
         self.port = free_port()
@@ -123,12 +171,11 @@ class Marimo:
         token_file = self.config / "token"
         token_file.write_text(self.token)
         token_file.chmod(0o600)
-        env = {**os.environ, "XDG_CONFIG_HOME": str(self.config), "MARIMO_SKIP_UPDATE_CHECK": "1"}
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.config), "MARIMO_SKIP_UPDATE_CHECK": "1", "ENDEAVOR_MARIMO_CLI": MARIMO_CLI}
         env.pop("ENDEAVOR_TOKEN", None)
         env.pop("ENDEAVOR_MARIMO_TOKEN", None)
-        root = os.path.abspath(os.sep)
         self.child = asyncio.subprocess.create_subprocess_exec(
-            sys.executable, "-m", "marimo", "-q", "edit", root, "--headless", "--sandbox", "--watch",
+            sys.executable, "-c", MARIMO_CLI, "-q", "edit", ROOT, "--headless", "--sandbox", "--watch",
             "--skip-update-check", "--host", "127.0.0.1", "--port", str(self.port), "--base-url", BASE_URL,
             "--token-password-file", str(token_file), env=env, stdin=asyncio.subprocess.DEVNULL)
 
@@ -1179,6 +1226,7 @@ class Adapter:
         path = real(path)
         if not os.path.isfile(path):
             raise argument_error("file_not_found", f"No file at '{path}'")
+        on_marimos_drive(path)
         if (nb := self.by_path(path)) is not None:
             raise argument_error("notebook_already_open", f"'{path}' is already open as notebook_id {nb.id}; use that id")
         nb = Notebook(self, path, allowed=bool(run))
@@ -1197,12 +1245,20 @@ class Adapter:
                 n += 1
                 path = os.path.join(folder, f"notebook {n}.py")
         path = os.path.abspath(os.path.expanduser(path))
+        on_marimos_drive(path)
         if os.path.exists(path):
             raise argument_error("file_exists", f"'{path}' already exists; use open_notebook to load it")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         date = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         Path(path).write_text(NEW_HEADER.format(python=f"{sys.version_info[0]}.{sys.version_info[1]}", version=marimo.__version__, date=date) + NEW_NOTEBOOK)
-        r = await self.open(path, True)
+        try:
+            r = await self.open(path, True)
+        except BaseException:
+            if (made := self.by_path(real(path))) is not None:
+                await made.close()
+                self.forget(made)
+            Path(path).unlink(missing_ok=True)
+            raise
         nb = self.notebooks[r["notebook_id"]]
         r["cells"] = [{"cell_id": c, "code": nb.cells[c]["code"]} for c in nb.order]
         return r
@@ -1669,8 +1725,9 @@ async def main():
     write_state(port, adapter.marimo)
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
+    if sys.platform != "win32":
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop.set)
     ended = asyncio.create_task(adapter.marimo.child.wait())
     await asyncio.wait([serving, ended, asyncio.create_task(stop.wait())], return_when=asyncio.FIRST_COMPLETED)
     server.should_exit = True
@@ -1686,4 +1743,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(), loop_factory=asyncio.ProactorEventLoop if sys.platform == "win32" else None)

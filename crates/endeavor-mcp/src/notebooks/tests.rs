@@ -3438,11 +3438,19 @@ fn new_notebook_takes_an_r_path_only_where_r_notebooks_open() {
     if cfg!(windows) {
         let refused = made.unwrap_err();
         assert!(refused.contains("unsupported::") && refused.contains("R notebooks don't run on Windows yet"), "{refused}");
-        assert!(other.contains("invalid_path::Notebook path must end in .jl: "), "R isn't offered where R notebooks can't open: {other}");
+        assert!(other.contains("invalid_path::Notebook path must end in .jl (Julia) or .py (Python, marimo): "), "R isn't offered where R notebooks can't open: {other}");
     } else {
         assert_eq!(made, Err("unsupported::R notebooks aren't running in this runtime".into()), "it goes to the R engine, which this test's runtime hasn't");
         assert!(other.contains("invalid_path::Notebook path must end in .jl (Julia), .R (R) or .py (Python, marimo): "), "{other}");
     }
+}
+
+#[test]
+fn new_notebook_takes_a_python_path_on_every_platform() {
+    let s = setup();
+    let dir = std::env::temp_dir().to_string_lossy().trim_end_matches(SEP).to_owned();
+    let made = s.call("", "new_notebook", json!({ "path": format!("{dir}{SEP}endeavor-new-python-test.py") }));
+    assert_eq!(made, Err("unsupported::Python notebooks aren't running in this runtime".into()), "it goes to the Python engine, which this test's runtime hasn't");
 }
 
 #[test]

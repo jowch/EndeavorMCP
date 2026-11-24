@@ -496,8 +496,12 @@ Next:
   leaves marimo's kernel too, so what it defined is gone from the session as it is from the file,
   and the cells that read it turn stale (#410). marimo doesn't keep cell ids in the file, so
   each time the file is read again (a change from another editor, going live, a restart) the
-  cells are paired with the ones the agent knows by code, and keep their ids (#353). Not on
-  Windows. Known gaps: `set_input` and
+  cells are paired with the ones the agent knows by code, and keep their ids (#353). On
+  Windows the core keeps uv, the adapter and marimo in a Job Object of their own, so stopping
+  them ends all three; there the user installs uv themselves, since Endeavor has no uv of its
+  own for Windows yet. marimo is started at the root of the drive the first Python notebook resolves
+  to (a subst drive's own drive, a mapped drive's share), and until Endeavor restarts a notebook on another drive is refused
+  with a plain message (#574). Known gaps: `set_input` and
   `view_cell_output` of HTML aren't there (#354). Where no uv is found, the agent
   is told Endeavor can download its own uv 0.11.32 (from uv's GitHub release,
   checked against its SHA-256, into `~/.cache/endeavor/uv-0.11.32`) if the user

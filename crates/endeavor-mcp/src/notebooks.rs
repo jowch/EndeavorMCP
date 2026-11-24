@@ -43,7 +43,7 @@ pub trait Upstream: Send + Sync {
     }
 }
 
-pub type Starter = Box<dyn Fn(Backend, Instant, Duration) -> Result<Arc<dyn Upstream>, String> + Send + Sync>;
+pub type Starter = Box<dyn Fn(Backend, Option<&str>, Instant, Duration) -> Result<Arc<dyn Upstream>, String> + Send + Sync>;
 
 pub struct Julia {
     pub port: OnceLock<u16>,
@@ -538,7 +538,7 @@ impl Notebooks {
         self.engines.backend_of(id)
     }
 
-    pub(crate) fn start_engine(&self, backend: Backend, wait: Duration) -> Result<(), String> {
+    pub(crate) fn start_engine(&self, backend: Backend, first: Option<&str>, wait: Duration) -> Result<(), String> {
         if self.engines.has(backend) {
             return Ok(());
         }
@@ -548,7 +548,7 @@ impl Notebooks {
             return Ok(());
         }
         let Some(starter) = self.starter.get() else { return Ok(()) };
-        let upstream = starter(backend, began, wait)?;
+        let upstream = starter(backend, first, began, wait)?;
         self.add_engine(backend, upstream);
         Ok(())
     }
@@ -704,7 +704,7 @@ impl Notebooks {
     fn open_waited(&self, owner: &str, method: &str, params: Value, key: String, wait: Duration, doing: &str) -> Result<(Value, Value), String> {
         let began = Instant::now();
         let backend = engines::of_params(&params);
-        self.start_engine(backend, wait)?;
+        self.start_engine(backend, params["path"].as_str().or(params["folder"].as_str()), wait)?;
         let why = engines::slow_start(backend, false);
         self.waited(owner, method, params, key, (began + wait).saturating_duration_since(Instant::now()), &format!("{doing} is taking longer than one call waits: {why}"))
     }
