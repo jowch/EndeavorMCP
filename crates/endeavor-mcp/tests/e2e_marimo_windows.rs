@@ -231,12 +231,13 @@ fn a_python_notebook_runs_on_windows_and_stop_ends_marimo() {
     let second = drive(&elsewhere) != drive(&folder);
     if second {
         std::fs::write(&elsewhere, GROWTH).unwrap();
-        let opened = session(&token).started("open_notebook", json!({ "path": elsewhere }));
+        let mut other = session(&token);
+        let opened = other.started("open_notebook", json!({ "path": elsewhere }));
         let notebook = opened["notebook_id"].as_str().unwrap_or_else(|| panic!("{opened}")).to_owned();
-        agent.ok("allow_execution", json!({ "notebook_id": notebook, "run_notebook": false }));
-        agent.ok("run_all_cells", json!({ "notebook_id": notebook, "wait_for_completion": true }));
-        let order = agent.ok("get_cell_order", json!({ "notebook_id": notebook }))["cell_ids"][1].as_str().unwrap().to_owned();
-        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order }));
+        other.ok("allow_execution", json!({ "notebook_id": notebook, "run_notebook": false }));
+        other.ok("run_all_cells", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+        let order = other.ok("get_cell_order", json!({ "notebook_id": notebook }))["cell_ids"][1].as_str().unwrap().to_owned();
+        let read = other.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order }));
         assert!(read["errored"] == false && read["output"].as_str().unwrap_or_default().contains("21"), "a notebook on another drive runs: {read}");
 
         let path = opened["path"].as_str().unwrap_or_else(|| panic!("{opened}"));
