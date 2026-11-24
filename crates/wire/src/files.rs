@@ -140,7 +140,8 @@ fn list(dir: &Path) -> Result<Reply, String> {
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
             let dir = std::fs::metadata(entry.path()).ok()?.is_dir();
-            (!name.starts_with('.') && (dir || name.ends_with(".jl"))).then_some(Entry { name, dir })
+            let notebook = || name.ends_with(".jl") || crate::backend::Backend::of_file(&entry.path()).is_some();
+            (!name.starts_with('.') && (dir || notebook())).then_some(Entry { name, dir })
         })
         .collect();
     entries.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
@@ -366,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_folders_first_then_julia_files() {
+    fn lists_folders_first_then_julia_files_and_r_and_python_notebooks() {
         let dir = std::env::temp_dir().join(format!("endeavor-files-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         for sub in ["b-data", "A-figures", ".git"] {
@@ -375,10 +376,14 @@ mod tests {
         for file in ["fit.jl", "notes.txt", ".hidden.jl", "Analysis.jl"] {
             std::fs::write(dir.join(file), "").unwrap();
         }
+        std::fs::write(dir.join("growth.py"), "import marimo\n\napp = marimo.App()\n").unwrap();
+        std::fs::write(dir.join("script.py"), "print(1)\n").unwrap();
+        std::fs::write(dir.join("model.R"), "### An Ember notebook ###\n").unwrap();
+        std::fs::write(dir.join("plain.R"), "x <- 1\n").unwrap();
         let Reply::List { path, entries } = answer(&Request::List { path: dir.display().to_string() }) else { panic!() };
         assert_eq!(path, text(&real_path(&dir).unwrap()));
         let names: Vec<(&str, bool)> = entries.iter().map(|e| (e.name.as_str(), e.dir)).collect();
-        assert_eq!(names, [("A-figures", true), ("b-data", true), ("Analysis.jl", false), ("fit.jl", false)]);
+        assert_eq!(names, [("A-figures", true), ("b-data", true), ("Analysis.jl", false), ("fit.jl", false), ("growth.py", false), ("model.R", false)]);
         let missing = answer(&Request::List { path: dir.join("nope").display().to_string() });
         assert!(matches!(missing, Reply::Error { message } if message.ends_with("it doesn't exist")));
         std::fs::remove_dir_all(&dir).unwrap();

@@ -288,7 +288,7 @@ impl Bridge {
             let id = message.get("id").cloned().unwrap_or(Value::Null);
             to_json(&match result {
                 Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-                Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": e } }),
+                Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": crate::core::offer_for(&e, true) } }),
             })
         };
         let text = |key: &str, default: &str| params.get(key).map_or(default.to_owned(), julia_string);

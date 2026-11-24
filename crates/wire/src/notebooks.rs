@@ -298,6 +298,8 @@ julia_version = "1.12.6"
         std::fs::write(dir.join("node_modules/e.jl"), notebook).unwrap();
         std::fs::write(dir.join("sub/f.R"), "### An Ember notebook ###\n").unwrap();
         std::fs::write(dir.join("script.R"), "x <- 1\n").unwrap();
+        std::fs::write(dir.join("sub/g.py"), "import marimo\n\napp = marimo.App()\n").unwrap();
+        std::fs::write(dir.join("script.py"), "print(1)\n").unwrap();
         let found = |backends: &[Backend]| {
             let mut found: Vec<_> = scan(&dir, backends).into_iter().map(|f| (Path::new(&f.path).strip_prefix(&dir).unwrap().to_path_buf(), f.backend)).collect();
             found.sort_by(|a, b| a.0.cmp(&b.0));
@@ -306,7 +308,8 @@ julia_version = "1.12.6"
         let pluto = [(PathBuf::from("a.jl"), Backend::Pluto), (PathBuf::from("sub/b.jl"), Backend::Pluto), (PathBuf::from("sub/deeper/c.jl"), Backend::Pluto)];
         assert_eq!(found(&[Backend::Pluto]), pluto);
         assert_eq!(found(&[Backend::Ember]), [(PathBuf::from("sub/f.R"), Backend::Ember)]);
-        assert_eq!(found(&Backend::ALL).len(), 4);
+        assert_eq!(found(&[Backend::Marimo]), [(PathBuf::from("sub/g.py"), Backend::Marimo)]);
+        assert_eq!(found(&Backend::ALL).len(), 5, "a server's list has every kind of notebook");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
