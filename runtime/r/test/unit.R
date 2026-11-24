@@ -1,17 +1,8 @@
-# Checks of the adapter's pure functions, with no Ember and no server: the
-# functions are read out of adapter.R and run on hand-made values. Run from
-# anywhere:
-#
-#   Rscript --vanilla runtime/r/test/unit.R
-#
-# e2e_r runs it.
 
 args <- commandArgs(trailingOnly = FALSE)
 here <- dirname(normalizePath(sub("^--file=", "", args[startsWith(args, "--file=")])))
 adapter <- normalizePath(file.path(here, "..", "adapter.R"))
 
-# Only these definitions are evaluated; the rest of the file (libraries, the
-# server) never runs.
 wanted <- c("%||%", "package_step", "download_step", "structure_error", "EXTRA_FIX", "snapshot_cell", "output_text", "text_output", "INLINE_SPAN", "cap_text", "TEXT_MAX", "cell_notes", "date_proposal", "update_proposal", "input_line", "input_value", "moved_input_notes", "note_value", "json_value", "json_choice", "run_user_profile", "INTERACTIVE_HTML", "interactive_output")
 A <- new.env()
 for (e in parse(adapter, keep.source = FALSE)) {
@@ -38,7 +29,6 @@ state <- function(status = "ready", progress = NULL, log = character(), download
 }
 to_json <- function(x) as.character(jsonlite::toJSON(x, auto_unbox = TRUE, null = "null"))
 
-# ---- package_step ----
 rec <- new.env()
 check("nothing waiting, not installing: NULL",
       is.null(A$package_step(rec, snap(cell(), cell()), state())))
@@ -85,7 +75,6 @@ if (requireNamespace("jsonlite", quietly = TRUE)) {
 check("the work ending clears the first sighting",
       is.null(A$package_step(rec, snap(cell()), state())) && is.null(rec$packages_since))
 
-# ---- structure_error ----
 d <- A$structure_error(list(kind = "missing_package", message = "there is no package called 'svglite'",
                             names = "svglite", fixes = "Add svglite to [extra_packages]"))
 check("a package the code doesn't name: the fix names it in the cell, not the header",
@@ -102,7 +91,6 @@ d <- A$structure_error(list(kind = "error", message = "The textdata package is r
 check("a run error naming a package (Ember #184): the fix the tools can do (trial 20)",
       identical(unclass(d$fixes), "Add `requireNamespace(\"textdata\")` as the first line of this cell and run it"))
 
-# ---- cell_notes ----
 check("no notes: none", length(A$cell_notes(list())) == 0)
 n <- A$cell_notes(list(from_lock = c("mypkg", "", "other")))
 check("install calls that didn't run: one note naming their packages, and the agent's way to a newer version",
@@ -116,7 +104,6 @@ check("readers given no file Ember can watch: one note naming them, worded as Em
         grepl("Pass a file path or a file() connection", n, fixed = TRUE))
 check("no reader left unresolved: no note", length(A$cell_notes(list(untracked_files = character()))) == 0)
 
-# ---- snapshot_cell ----
 view <- function(...) modifyList(list(id = "c", code = "x <- 1", kind = "code", status = "success", errors = list(), runtime = 0.1, last_run = 100, disabled = FALSE, disabled_by = NA_character_), list(...))
 check("a cell that runs: not off", isFALSE(A$snapshot_cell(view())$off))
 check("a disabled cell: off", isTRUE(A$snapshot_cell(view(disabled = TRUE))$off))
@@ -126,8 +113,6 @@ check("a result from code the cell no longer has: stale (#291)", isTRUE(A$snapsh
 check("a current result: not stale", isFALSE(A$snapshot_cell(view(code_differs = FALSE))$stale) && isFALSE(A$snapshot_cell(view())$stale))
 check("a result before an ancestor ran: stale", isTRUE(A$snapshot_cell(view(stale = TRUE))$stale))
 
-# A cell rerun after an error, now waiting at a prompt: Ember keeps the last run's error on it
-# while it runs. The agent sees what this run printed, not the old error (trial 20).
 asking <- A$snapshot_cell(view(running = TRUE, status = "error",
                                errors = list(list(kind = "error", message = "textdata is required")),
                                output = list(mime = "text/plain", text = "old value"),
@@ -140,11 +125,9 @@ check("  and the prompt", identical(asking$prompt$id, 2L) && identical(unclass(a
 check("a running cell not at a prompt keeps the last run's error, as before",
       isTRUE(A$snapshot_cell(view(running = TRUE, status = "error", errors = list(list(kind = "error", message = "boom"))))$errored))
 
-# A text cell's output is its prose with the inline values put in, as the page shows it (#270).
 prose <- "#' ## Results\n#'\n#' The slope is `r round(b, 3)` over `r n` plates.\n#' Write `` `r x` `` to show a value."
 inline <- function(...) list(mime = "application/vnd.ember.inline", data = list(values = list(...)), text = "")
 text_view <- function(...) view(kind = "markdown", code = prose, ...)
-# Ember counts a span inside double backticks too, so the page shows a value there.
 check("a text cell that ran: its prose with each value in place of its span",
       identical(A$snapshot_cell(text_view(output = inline("0.409", "72", "1")))$output,
                 "## Results\n\nThe slope is 0.409 over 72 plates.\nWrite `` 1 `` to show a value."))
@@ -157,7 +140,6 @@ check("a text cell edited since its values were made: the spans as written, not 
 check("a text cell with no spans: its prose",
       identical(A$snapshot_cell(view(kind = "markdown", code = "#' Just words."))$output, "Just words."))
 
-# ---- update_proposal ----
 ready <- function(name, version) list(status = "ready", date = "2026-04-23", update = list(name = name, version = version))
 newest <- list(name = "ggplot2", version = NULL)
 check("the newest asked for: Ember's resolved version still matches (#267)",
@@ -170,8 +152,6 @@ check("another package's, a date's, or nothing asked: NULL",
         is.null(A$update_proposal(list(status = "ready", date = "2026-10-01"), newest)) &&
         is.null(A$update_proposal(ready("ggplot2", "4.0.3"), NULL)))
 
-# ---- date_proposal ----
-# A preview of a day not published yet moved back to the newest that is (#247).
 moved <- list(date = "2026-10-22", asked = "2026-10-23", status = "ready")
 check("a preview moved back is found by the day asked for", identical(A$date_proposal(moved, "2026-10-23"), moved))
 check("  and by the day it moved to", identical(A$date_proposal(moved, "2026-10-22"), moved))
@@ -180,7 +160,6 @@ check("a proposal with no `asked` (an older Ember) is found by its date",
       identical(A$date_proposal(list(date = "2026-10-22"), "2026-10-22"), list(date = "2026-10-22")))
 check("no proposal: NULL", is.null(A$date_proposal(NULL, "2026-10-22")))
 
-# ---- input_line ----
 input <- function(spec, value = spec$value, default = spec$value, name = "n", bound = TRUE, reason = NULL, output = bound) {
   list(name = name, bound = bound, reason = reason, spec = spec, default = default, value = value, output = output)
 }
@@ -211,7 +190,6 @@ check("an input read in another cell isn't bound, and says how to fix it",
 check("an input not assigned at the top of a cell has no name",
       startsWith(A$input_line(input(slider, name = NULL, bound = FALSE, reason = "not_assigned")), "slider 10 to 500"))
 
-# ---- json_value ----
 check("JSON's 2 is the choice 2L",
       identical(A$json_value(list(type = "select", choices = 1:3), 2L), 2L) &&
       identical(A$json_value(list(type = "radio", choices = c(1.5, 2)), 2L), 2))
@@ -224,8 +202,6 @@ check("a JSON array for a single dropdown is one choice that is a vector",
 check("a number for a slider is left as it is",
       identical(A$json_value(slider, 7L), 7L))
 
-# ---- moved_input_notes ----
-# C holds the input n; A reads n, B reads A, D reads C's other name k, S is stale.
 graph_of <- list(
   edges = data.frame(from = c("A", "B", "D", "S"), to = c("C", "A", "C", "C"), name = c("n", "a", "k", "n")),
   downstream = list(C = c("A", "D", "S"), A = "B", B = character(), D = character(), S = character()))
@@ -245,8 +221,6 @@ check("a moved input notes its readers and theirs, not its own cell, another nam
 check("an input_list() part reads as R code without the L",
       identical(A$note_value(list(n = 3L, method = "a")), 'list(n = 3, method = "a")'))
 
-# The user's R profile: run into the notebook's environment, and an error in it
-# is logged instead of stopping R (Rscript stops on one when R reads it itself).
 local({
   dir <- tempfile("profile-"); dir.create(dir)
   good <- file.path(dir, "good.Rprofile")
@@ -266,8 +240,6 @@ local({
   unlink(dir, recursive = TRUE)
 })
 
-
-# ---- interactive outputs (#398) ----
 
 html <- function(data, deps = list()) list(mime = "text/html", data = data, text = "", deps = deps)
 check("an htmlwidget's HTML (its data in a script) is interactive",

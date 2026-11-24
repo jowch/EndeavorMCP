@@ -1,21 +1,3 @@
-//! A second person in the notebook. A task's `inject.json` names a moment, the
-//! first time the agent calls one of `tools` (`"when": "before"` the call
-//! reaches the server, or `"after"` its reply, if it succeeded), and the calls
-//! another Endeavor session then makes in `notebook`. Which notebook the
-//! agent's call was on isn't checked: a task has one. The proxy holds the
-//! agent's message until they are done, so the timing is the same every run.
-//! Each step is logged as `"dir": "inject"`, which the `injected` check reads.
-//!
-//!     { "when": "after", "tools": ["read_cell", "read_notebook_code"], "notebook": "decay.jl",
-//!       "steps": [{ "tool": "read_cell", "args": { "cell_id": "..." } }, { "tool": "edit_cell", "args": { ... } }] }
-//!
-//! A step `{ "page": { "bond": "cutoff", "value": 7 } }` is the user moving a Pluto widget on the
-//! page instead: the value is the page's own (a Slider's index, from 1), sent over the socket the
-//! notebook view uses, as Pluto's page sends it.
-//!
-//! Each step's `notebook_id` is filled in. It happens once per attempt, even if
-//! the agent restarts its server.
-
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -32,13 +14,11 @@ pub struct Injection {
 }
 
 impl Injection {
-    /// The task's injection, if it has one.
     pub fn load(work: &Path, endeavor: &Path, project: &Path) -> Option<Injection> {
         let spec: Value = serde_json::from_str(&std::fs::read_to_string(work.join("inject.json")).ok()?).ok()?;
         Some(Injection { spec, work: work.to_owned(), endeavor: endeavor.to_owned(), project: project.to_owned() })
     }
 
-    /// Whether an agent's call to `tool` at this moment is the one to act on.
     pub fn matches(&self, when: &str, tool: &str) -> bool {
         self.spec["when"] == when && self.spec["tools"].as_array().into_iter().flatten().any(|t| t == tool) && !self.marker().exists()
     }
@@ -47,7 +27,6 @@ impl Injection {
         self.work.join("injected")
     }
 
-    /// Make the other session's calls, logging each.
     pub fn run(&self, log: &Mutex<Log>) {
         let _ = std::fs::write(self.marker(), "");
         let result = (|| -> Result<(), String> {
@@ -71,7 +50,6 @@ impl Injection {
                 log.lock().unwrap().write("inject", &entry.to_string());
                 reply?;
             }
-            // Its runs finish before the agent goes on.
             crate::mcp::wait_until_done(&mut session, &id, Duration::from_secs(300))
         })();
         if let Err(e) = result {
@@ -80,8 +58,6 @@ impl Injection {
     }
 }
 
-/// The user moving a widget on Pluto's page: Pluto's `connect`, then an `update_notebook` that sets
-/// the bond, as the page sends them, over the notebook view's socket.
 fn move_on_page(session: &mut crate::mcp::Session, id: &str, page: &Value) -> Result<(), String> {
     use base64::Engine;
     let bond = page["bond"].as_str().ok_or("page: bond must be a string")?;
@@ -97,13 +73,11 @@ fn move_on_page(session: &mut crate::mcp::Session, id: &str, page: &Value) -> Re
         session.view("notebook_socket_send", json!({ "socket": socket, "data": data }))?;
         session.view("notebook_socket_recv", json!({ "socket": socket, "wait_ms": 1000 }))?;
     }
-    // Pluto runs the readers once it has the value; give it a moment to start them.
     std::thread::sleep(Duration::from_secs(1));
     let _ = session.view("notebook_socket_close", json!({ "socket": socket }));
     Ok(())
 }
 
-/// A JSON value as MessagePack, which Pluto's socket speaks.
 fn msgpack(value: &Value) -> Vec<u8> {
     fn put(out: &mut Vec<u8>, value: &Value) {
         let len = |out: &mut Vec<u8>, n: usize, fix: u8, small: usize, codes: [u8; 2]| {

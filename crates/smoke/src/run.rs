@@ -1,17 +1,3 @@
-//! The runner: for each task, a fresh state and project folder, the notebooks
-//! its `setup.json` opens, the agent started on the task's prompt (and its
-//! `followup.md`, in the same session) with the plugin and this binary as its
-//! server, then the checks, then the runtime stopped. A task whose checks ask
-//! for it also has its notebooks run again from their files in a fresh
-//! runtime. A task that fails runs twice more, to tell a flaky failure from a
-//! real one.
-//!
-//! The agent runs in a folder under the system's temporary folder, outside any
-//! checkout, so it sees no CLAUDE.md of ours; with an environment of its own,
-//! so it can't reach the session that started the run; and with only the
-//! notebook tools and the file-reading ones. Its first event is checked for
-//! that before the task counts.
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -20,40 +6,27 @@ use serde_json::{Value, json};
 
 use crate::checks::{self, Evidence};
 
-/// The model the agent runs (`--model`), if not its default.
 static MODEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// How long one agent run may take before it is ended, unless the task's `setup.json` gives `minutes`.
 const AGENT_LIMIT: Duration = Duration::from_secs(20 * 60);
 
-/// How long the harness's own runs of a notebook (setting one up, running one again) may take.
 const RUN_LIMIT: Duration = Duration::from_secs(15 * 60);
 
-/// The built-in tools the agent has.
 const BUILT_IN_TOOLS: &[&str] = &["Read", "Glob", "Grep", "Skill", "ToolSearch"];
 
-/// The plugin's MCP server, as Claude Code names its tools (`mcp__plugin_endeavor_endeavor__new_notebook`).
 const OUR_SERVER: &str = "mcp__plugin_endeavor_endeavor";
 
-/// The variables the agent keeps from this process's environment: enough to
-/// run, sign in and reach the network. Anything else (a Claude Code session's
-/// own variables above all, which would connect the agent to that session) is
-/// left out.
 fn agent_env() -> Vec<(String, String)> {
     const KEEP: &[&str] = &[
         "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ",
         "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "ALL_PROXY", "all_proxy",
         "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
         "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
-        // Windows.
         "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH",
     ];
     std::env::vars().filter(|(k, _)| KEEP.contains(&k.as_str())).collect()
 }
 
-/// What in the agent's first event says the run isn't the isolated one this
-/// harness promises: a tool beyond ours, a plugin or server beyond the
-/// plugin's, or the starting session's memory.
 fn isolation_problems(init: &Value) -> Vec<String> {
     let mut problems = Vec::new();
     let tools: Vec<&str> = init["tools"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -65,7 +38,6 @@ fn isolation_problems(init: &Value) -> Vec<String> {
     if !servers.is_empty() {
         problems.push(format!("the agent had other MCP servers: {servers:?}"));
     }
-    // Claude Code's own built-in plugins come along; any other doesn't belong.
     let plugins: Vec<&str> = init["plugins"].as_array().into_iter().flatten().filter(|p| p["path"] != "builtin").filter_map(|p| p["name"].as_str()).filter(|n| *n != "endeavor").collect();
     if !plugins.is_empty() {
         problems.push(format!("the agent had other plugins: {plugins:?}"));
@@ -80,14 +52,10 @@ struct Options {
     only: Option<Vec<String>>,
     out: Option<PathBuf>,
     julia: String,
-    /// The R for R notebooks: a path, or `auto` for Rscript on the PATH.
     r: String,
-    /// An R task shows as skipped on a computer without R, instead of failing.
     skip_r: bool,
     depot: Option<String>,
-    /// Runs after a failed first one; if not given, 2, and none for a long task.
     retries: Option<u32>,
-    /// Run the long tasks too (`"long": true` in their `setup.json`), which otherwise run only when `--only` names them.
     long: bool,
 }
 
@@ -112,12 +80,10 @@ fn options(args: &[String]) -> Result<Options, String> {
     Ok(o)
 }
 
-/// The repository this binary was built from: the tasks and the plugin are there.
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("the repository")
 }
 
-/// The arguments the agent's server and the checker's both get, so they share one runtime.
 pub fn runtime_args(work: &Path) -> Vec<String> {
     let settings: Value = std::fs::read_to_string(work.join("settings.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     let mut args = vec!["--state-dir".to_owned(), work.join("state").display().to_string()];
@@ -129,18 +95,13 @@ pub fn runtime_args(work: &Path) -> Vec<String> {
     args
 }
 
-/// The runtime's own folders, inside the task's. A server task's (ssh.rs) also
-/// gets a home folder whose ssh config names its servers, an `ssh` first on
-/// the PATH that reads that config, and its server's install, state and depot folders.
 pub fn runtime_env(work: &Path) -> Vec<(String, PathBuf)> {
     let mut env: Vec<(String, PathBuf)> = ["XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME"].iter().map(|k| (k.to_string(), work.join("home").join(k.to_lowercase()))).collect();
     let settings: Value = std::fs::read_to_string(work.join("settings.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     if settings["browser"] == true {
-        // Read only by a debug `endeavor`, which the runner builds: it adds each link it would open to the file.
         env.push(("ENDEAVOR_TEST_BROWSER".to_owned(), work.join("browser.txt")));
     }
     if let Some(seconds) = settings["python_wait"].as_u64() {
-        // Read only by a debug `endeavor`, as the browser's.
         env.push(("ENDEAVOR_TEST_MARIMO_WAIT_SECS".to_owned(), PathBuf::from(seconds.to_string())));
     }
     if settings["ssh"] == true {
@@ -170,12 +131,10 @@ pub fn main(args: &[String]) -> i32 {
         return 2;
     }
     let mut commit = git(&repo, &["rev-parse", "--short", "HEAD"]);
-    // A run of uncommitted changes says so, so it isn't taken for that commit's.
     if git(&repo, &["status", "--porcelain"]) != "unknown" {
         commit += "-dirty";
     }
     let out = o.out.clone().unwrap_or_else(|| repo.join("target/smoke").join(format!("{}-{commit}", utc_stamp())));
-    // The agent runs in each task's project folder, so every path it is given is absolute.
     std::fs::create_dir_all(&out).unwrap();
     let out = out.canonicalize().unwrap();
     let depot = o.depot.clone().unwrap_or_else(|| format!("{}:", repo.join("target/smoke/depot").display()));
@@ -202,8 +161,6 @@ pub fn main(args: &[String]) -> i32 {
     let mut rows = Vec::new();
     for task in &tasks {
         let id = task.file_name().unwrap().to_string_lossy().into_owned();
-        // An R task on a computer without R fails, so a run that gates a merge can't pass a broken R
-        // as skipped; `--skip-r` says this computer is known to have none.
         if r_task(task) && !have_r {
             eprintln!("── {id}: no R here ({})", if o.r == "auto" { "no Rscript on the login shell's PATH".to_owned() } else { o.r.clone() });
             rows.push(no_r_row(&id, &o.r, o.skip_r));
@@ -217,7 +174,6 @@ pub fn main(args: &[String]) -> i32 {
             let result = attempt(&id, task, &work, &endeavor, &exe, &repo, &o.julia, &o.r, &depot);
             eprintln!("   {} in {:.0}s", if result["passed"] == true { "passed" } else { "FAILED" }, result["metrics"]["seconds"].as_f64().unwrap_or(0.0));
             let _ = std::fs::write(work.join("result.json"), serde_json::to_string_pretty(&result).unwrap());
-            // Keep what the attempt left, not the runtime's own folders.
             let kept = out.join(&id).join(format!("attempt-{n}"));
             let _ = std::fs::remove_dir_all(&kept);
             std::fs::create_dir_all(&kept).unwrap();
@@ -225,9 +181,6 @@ pub fn main(args: &[String]) -> i32 {
             remove_work(&work);
             let passed = result["passed"] == true;
             attempts.push(result);
-            // A first run that passes is enough; one that fails runs `retries` more times.
-            // A task known to fail runs once: its retries would only say so again.
-            // A long one runs once unless `--retries` says otherwise: each run is an hour and dollars.
             let retries = o.retries.unwrap_or(if long_task(task) { 0 } else { 2 });
             if (n == 1 && passed) || n as u32 > retries || expected_failure(task).is_some() {
                 break;
@@ -247,13 +200,6 @@ pub fn main(args: &[String]) -> i32 {
     if rows.iter().all(|r| r["status"] == "pass" || r["status"] == "expected failure" || r["status"] == SKIPPED_NO_R) { 0 } else { 1 }
 }
 
-/// Install and precompile, into the shared depot, the packages the tasks'
-/// notebooks reach for (smoke/warm/warm.jl), so no task's result depends on
-/// whether an earlier task installed them. A first install on an empty depot is
-/// a task of its own. With `r`, also open an R notebook (smoke/warm/warm.R), so
-/// Ember's first install isn't charged to the R task. Ember goes into the R
-/// library that the app and `endeavor mcp` share (`~/.cache/endeavor/r`), as it
-/// would for anyone's first R notebook.
 #[allow(clippy::too_many_arguments)]
 fn warm(repo: &Path, work: &Path, endeavor: &Path, julia: &str, r: &str, depot: &str, with_r: bool) -> Result<(), String> {
     eprintln!("── warming the depot (the first time, this installs Pluto and the packages, and takes several minutes)");
@@ -266,7 +212,6 @@ fn warm(repo: &Path, work: &Path, endeavor: &Path, julia: &str, r: &str, depot: 
         crate::mcp::open_and_run(&mut s, "warm.jl", RUN_LIMIT)?;
         if with_r {
             eprintln!("   and Ember, for R notebooks");
-            // A session works in one notebook, so the R one gets a session of its own on the same runtime.
             let mut r = crate::mcp::Session::start(endeavor, work, &project)?;
             crate::mcp::open_and_run(&mut r, "warm.R", RUN_LIMIT)?;
             let errored: Vec<String> = crate::mcp::notebooks(&mut r)?.iter().flat_map(|nb| nb.cells.iter().filter(|c| c.errored).map(|c| format!("{}: {}", c.code, c.output))).collect();
@@ -283,25 +228,21 @@ fn warm(repo: &Path, work: &Path, endeavor: &Path, julia: &str, r: &str, depot: 
     result
 }
 
-/// The issue a task is known to fail on until it is fixed: `"expected_to_fail": "#58"` in its checks.json.
 fn expected_failure(task: &Path) -> Option<String> {
     let specs: Value = serde_json::from_str(&std::fs::read_to_string(task.join("checks.json")).ok()?).ok()?;
     specs["expected_to_fail"].as_str().map(str::to_owned)
 }
 
-/// Whether a task is long: `"long": true` in its setup.json. A setup.json that doesn't parse leaves the task in.
 fn long_task(task: &Path) -> bool {
     let setup: Value = std::fs::read_to_string(task.join("setup.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     setup["long"] == true
 }
 
-/// Whether a task is about R notebooks: `"r": true` in its setup.json.
 fn r_task(task: &Path) -> bool {
     let setup: Value = std::fs::read_to_string(task.join("setup.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     setup["r"] == true
 }
 
-/// Whether there is an R to run: `r` is a path to it, or `auto` for Rscript on the login shell's PATH (as the runtime looks).
 fn have_r(r: &str) -> bool {
     let mut command = if r == "auto" {
         let mut c = Command::new(std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into()));
@@ -317,7 +258,6 @@ fn have_r(r: &str) -> bool {
 
 const SKIPPED_NO_R: &str = "skipped (no R)";
 
-/// The row of an R task on a computer without R: skipped with `--skip-r`, else failing.
 fn no_r_row(id: &str, r: &str, skip: bool) -> Value {
     let failure = format!("no R here ({}); install R, or give --skip-r on a computer known to have none", if r == "auto" { "no Rscript on the login shell's PATH" } else { r });
     let (status, failed, failures) = if skip { (SKIPPED_NO_R, 0, vec![]) } else { ("failing", 1, vec![failure]) };
@@ -334,33 +274,22 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     }
     let project = project.canonicalize().unwrap();
     let setup: Value = std::fs::read_to_string(task.join("setup.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-    // A task about a first install gets an empty depot of its own instead of the shared, warmed one: that
-    // folder alone, with no trailing ":", which would add Julia's defaults and so the user's ~/.julia,
-    // where the packages may well be installed. Julia's own libraries are precompiled again into it.
     let depot = if setup["depot"] == "empty" { work.join("depot").display().to_string() } else { depot.to_owned() };
     let ssh = setup["ssh"] == true;
     let limit = setup["minutes"].as_u64().map_or(AGENT_LIMIT, |m| Duration::from_secs(m * 60));
     let mut problems_before: Vec<String> = Vec::new();
-    // A stand-in browser that nobody clicks in (`"browser": true`): Endeavor's pages open, as links
-    // added to `browser.txt`, and go unanswered.
     let browser = setup["browser"] == true;
-    // How long a call waits for Python notebooks' first start (`"python_wait"`, in seconds) before it
-    // answers `python_installing`: a short one makes the agent see that answer and call again.
     let python_wait = setup["python_wait"].as_u64();
     std::fs::write(work.join("settings.json"), json!({ "julia": julia, "r": r, "depot": depot, "ssh": ssh, "browser": browser, "python_wait": python_wait }).to_string()).unwrap();
     if task.join("inject.json").is_file() {
         std::fs::copy(task.join("inject.json"), work.join("inject.json")).unwrap();
     }
-    // The user's answer to Endeavor's own dialogs (`"dialog"`: `"accept"`, `"decline"`, or yes only to
-    // some new Julia packages). In `claude -p` no one sees a dialog, and Claude Code closes it at once
-    // unless a hook answers it.
     if !setup["dialog"].is_null()
         && let Err(e) = answer_dialogs(work, &project, exe, &setup["dialog"])
     {
         problems_before.push(format!("setting up the dialog's answer: {e}"));
     }
     let mut turns = messages(&std::fs::read_to_string(task.join("prompt.md")).unwrap(), &std::fs::read_to_string(task.join("followup.md")).unwrap_or_default());
-    // `{server_folder}` in a message is the folder on the server task's server where a notebook may go.
     let server_folder = crate::ssh::Folders::of(work).remote;
     for turn in &mut turns {
         *turn = turn.replace("{server_folder}", &server_folder.display().to_string());
@@ -382,12 +311,10 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
         None
     };
 
-    // The notebooks the task starts with open, as a person working in them left them.
     let opens: Vec<&str> = setup["open"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     if !opens.is_empty() {
         let opened = crate::mcp::Session::start(endeavor, work, &project).and_then(|mut s| opens.iter().map(|path| crate::mcp::open_and_run(&mut s, path, RUN_LIMIT)).collect::<Result<Vec<_>, _>>());
         match opened {
-            // `{opened_notebook_id}` in a message is the first one's id, as a quote of it names it.
             Ok(ids) => {
                 for turn in &mut turns {
                     *turn = turn.replace("{opened_notebook_id}", &ids[0]);
@@ -406,7 +333,6 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
     stop_runtime(endeavor, work);
     let server_files = if ssh { files_under(&server_folder) } else { Vec::new() };
     if ssh {
-        // The runtime the helper started on the server, then the server.
         stop_state(endeavor, work, &crate::ssh::Folders::of(work).state);
         drop(server);
     }
@@ -450,20 +376,16 @@ fn attempt(id: &str, task: &Path, work: &Path, endeavor: &Path, exe: &Path, repo
         "model": agent.model,
         "models_used": agent.models_used,
         "final_message": agent.final_message,
-        // What the harness answered for the user in Endeavor's dialogs, and why.
         "dialogs": std::fs::read_to_string(work.join("dialogs.jsonl")).unwrap_or_default().lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).map(|d| json!({ "message": d["asked"]["message"], "answer": d["answer"], "why": d["why"] })).collect::<Vec<_>>(),
         "notebooks": notebooks_json(&notebooks),
         "rerun": rerun.as_ref().map(|r| r.as_ref().map_or_else(|e| json!(e), |n| notebooks_json(n))),
     })
 }
 
-/// Whether a check is `reproducible` or holds one, inside `any_of` or `all_of` (N8's): the task's
-/// notebook is then run again afresh.
 fn wants_reproducible(check: &Value) -> bool {
     check["check"] == "reproducible" || check["checks"].as_array().into_iter().flatten().any(wants_reproducible)
 }
 
-/// The user's messages: the prompt, then each of `followup.md`'s, which a line of `---` alone separates.
 fn messages(prompt: &str, followups: &str) -> Vec<String> {
     let mut turns = vec![prompt.trim().to_owned()];
     let mut next = String::new();
@@ -481,13 +403,6 @@ fn messages(prompt: &str, followups: &str) -> Vec<String> {
     turns
 }
 
-/// The agent's notebooks run again from their files, from the top, in a
-/// runtime of their own: what someone who opens them later would see.
-///
-/// They run in a fresh copy of the task's project folder holding only the
-/// notebook files the agent left, so a file a cell wrote, which a later cell
-/// read after the first was deleted, isn't there. The notebooks come back
-/// under the agent's paths, to compare.
 fn rerun(notebooks: &[crate::mcp::Notebook], task: &Path, work: &Path, project: &Path, endeavor: &Path) -> Result<Vec<crate::mcp::Notebook>, String> {
     let fresh = work.join("rerun");
     let copy = fresh.join("project");
@@ -524,9 +439,6 @@ fn rerun(notebooks: &[crate::mcp::Notebook], task: &Path, work: &Path, project: 
     Ok(again)
 }
 
-/// A re-run's output with its project folder written as the agent's, so a cell that prints its own
-/// folder (`@__DIR__`, a saved figure's path) compares the same (#440). macOS's temporary folders
-/// show as /var/... or /private/var/..., so both spellings are replaced.
 fn in_agents_folder(output: &str, copy: &Path, project: &Path) -> String {
     let (copy, project) = (copy.display().to_string(), project.display().to_string());
     let mut out = output.replace(&copy, &project);
@@ -536,7 +448,6 @@ fn in_agents_folder(output: &str, copy: &Path, project: &Path) -> String {
     out
 }
 
-/// Notebooks as a result shows them: each cell's first line, state and output, cut short.
 fn notebooks_json(notebooks: &[crate::mcp::Notebook]) -> Value {
     json!(notebooks.iter().map(|nb| json!({
         "path": nb.path,
@@ -548,33 +459,24 @@ fn notebooks_json(notebooks: &[crate::mcp::Notebook]) -> Value {
 #[derive(Default)]
 struct AgentRun {
     final_message: String,
-    /// The model the session started with, and every model that answered (a subagent can use another).
     model: Option<String>,
     models_used: Vec<String>,
     tools: Vec<String>,
     turns: Option<u64>,
     cost_usd: Option<f64>,
     tokens: Tokens,
-    /// How many times Claude Code compacted the conversation: a run that did can't be compared with one that didn't.
     compactions: u64,
     problem: Option<String>,
 }
 
-/// What the model read and wrote, from the usage on Claude's messages. Each
-/// request reads the whole conversation so far, so `input` (the sum over
-/// requests) is what the session's input costs scale with, cached or not.
 #[derive(Default)]
 struct Tokens {
     requests: u64,
-    /// The conversation's size at the last request.
     context: u64,
     input: u64,
     output: u64,
 }
 
-/// Claude Code, headless, with the plugin from this checkout and this binary as
-/// its server. Each of `turns` is a message from the user, in one session: the
-/// next is sent once Claude's answer to the one before has ended.
 fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, exe: &Path, repo: &Path, limit: Duration) -> AgentRun {
     let mut transcript = std::fs::File::create(work.join("transcript.jsonl")).unwrap();
     let stderr = std::fs::File::create(work.join("agent-stderr.txt")).unwrap();
@@ -582,18 +484,13 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
         .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--max-turns", "80"])
         .arg("--plugin-dir")
         .arg(repo.join("claude-plugin"))
-        // The only built-in tools there are: reading files, and the two that load skills and deferred tools.
         .args(["--tools", &BUILT_IN_TOOLS.join(",")])
-        // Approved without asking: those, and the plugin's server.
         .args(["--allowedTools", &format!("{OUR_SERVER},{}", BUILT_IN_TOOLS.join(","))])
-        // Only the project's settings: the user's own plugins, servers and hooks stay out of the run.
         .args(["--setting-sources", "project,local"])
         .args(MODEL.get().map(|m| ["--model", m.as_str()]).into_iter().flatten())
         .current_dir(project)
         .env_clear()
         .envs(agent_env())
-        // The signed-in account's claude.ai connectors: `--setting-sources` doesn't keep them out, and they
-        // load after the first turn has started, so only a later turn's first event lists them.
         .env("ENABLE_CLAUDEAI_MCP_SERVERS", "false")
         .env("ENDEAVOR_BIN", exe)
         .env("SMOKE_ENDEAVOR", endeavor)
@@ -608,7 +505,6 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
         Err(e) => return AgentRun { problem: Some(format!("can't start claude: {e}")), ..AgentRun::default() },
     };
     use std::io::{BufRead, Write};
-    // Each message sent is also logged, so a check can tell what the agent did before the user said something.
     let log = std::sync::Mutex::new(crate::log::Log::create(&work.join("mcp.jsonl")));
     let say = |stdin: &mut std::process::ChildStdin, turn: &str| {
         log.lock().unwrap().write("user", &json!(turn).to_string());
@@ -621,7 +517,6 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
         sent = 1;
     }
     if sent == turns.len() {
-        // Closed, so Claude ends after its answer.
         stdin = None;
     }
     let (lines, events) = std::sync::mpsc::channel();
@@ -642,7 +537,6 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
                 let _ = writeln!(transcript, "{line}");
                 if serde_json::from_str::<Value>(&line).is_ok_and(|e| e["type"] == "result") {
                     answers += 1;
-                    // The user's next message, only now that the last answer has ended.
                     if let Some(input) = stdin.as_mut().filter(|_| sent < turns.len()) {
                         let _ = say(input, &turns[sent]);
                         sent += 1;
@@ -684,7 +578,6 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
                 }
             }
             Some("assistant") => {
-                // A message with several parts comes as several events with the same id and usage.
                 if last_message.as_deref() != event["message"]["id"].as_str() {
                     last_message = event["message"]["id"].as_str().map(str::to_owned);
                     let usage = &event["message"]["usage"];
@@ -697,13 +590,10 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
                     run.tools.push(part["name"].as_str().unwrap_or_default().to_owned());
                 }
             }
-            // One per user message: its turns count alone, its cost is the session's so far.
             Some("result") => {
                 run.final_message = event["result"].as_str().unwrap_or_default().to_owned();
                 run.turns = Some(run.turns.unwrap_or(0) + event["num_turns"].as_u64().unwrap_or(0));
                 run.cost_usd = event["total_cost_usd"].as_f64();
-                // A message's own usage counts its output only up to its first part, so the output is the
-                // session's so far, from here, its subagents' included.
                 run.tokens.output = event["modelUsage"].as_object().into_iter().flat_map(|m| m.values()).map(|u| u["outputTokens"].as_u64().unwrap_or(0)).sum();
                 for model in event["modelUsage"].as_object().into_iter().flat_map(|m| m.keys()) {
                     if !run.models_used.contains(model) {
@@ -717,7 +607,6 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
             _ => {}
         }
     }
-    // A server that connects after a turn's first event isn't in it: the tools the agent used catch that.
     let foreign = foreign_tools_used(&text);
     if run.problem.is_none() && !foreign.is_empty() {
         run.problem = Some(format!("the agent used other tools: {foreign:?}"));
@@ -725,10 +614,6 @@ fn run_claude(turns: &[String], work: &Path, project: &Path, endeavor: &Path, ex
     run
 }
 
-/// The tools beyond ours and the built-ins that the agent used, from the
-/// transcript. A call Claude Code refused because the agent hasn't got that
-/// tool (`Bash`, say) doesn't count: the harness kept it out, and trying it is
-/// the agent's mistake, which a task's checks judge.
 fn foreign_tools_used(transcript: &str) -> Vec<String> {
     let events: Vec<Value> = transcript.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     let parts = |kind: &'static str| {
@@ -748,15 +633,8 @@ fn foreign_tools_used(transcript: &str) -> Vec<String> {
     used
 }
 
-/// How long `remove_work` waits for a task's background precompile.
 const PRECOMPILE_WAIT: Duration = Duration::from_secs(10 * 60);
 
-/// Remove a task's folder once no process uses it. Stopping the runtime doesn't stop the background
-/// precompile `endeavor mcp` starts (meant to outlive the server), and it runs from the runtime
-/// unpacked in the task's folder. Removing that folder under it made Julia write the new cache
-/// file, in the shared depot, as mode 200 (it gives the file its source's mode, and a missing
-/// source's is 0), which then failed every later start that read it (#383). After the wait, one
-/// still running is ended before the folder goes.
 fn remove_work(work: &Path) {
     let mut started = None;
     loop {
@@ -781,14 +659,11 @@ fn remove_work(work: &Path) {
     let _ = std::fs::remove_dir_all(work);
 }
 
-/// The processes, apart from this one, whose command line names a path in `folder` (Julia's
-/// `--project`). None on Windows, where there is no `ps`.
 fn processes_naming(folder: &Path) -> Vec<u32> {
     if cfg!(windows) {
         return Vec::new();
     }
     let Ok(out) = Command::new("ps").args(["axww", "-o", "pid=,args="]).stderr(Stdio::null()).output() else { return Vec::new() };
-    // macOS's temporary folder is a symlink (/var to /private/var), and a process may name either.
     let mut names = vec![folder.display().to_string()];
     if let Ok(real) = folder.canonicalize() {
         names.push(real.display().to_string());
@@ -796,8 +671,6 @@ fn processes_naming(folder: &Path) -> Vec<u32> {
     naming(&String::from_utf8_lossy(&out.stdout), &names, std::process::id())
 }
 
-/// `processes_naming`'s choice from `ps` output: the pids of lines whose command names a path
-/// under one of `folders`, other than `own`.
 fn naming(ps: &str, folders: &[String], own: u32) -> Vec<u32> {
     ps.lines()
         .filter_map(|line| {
@@ -809,12 +682,6 @@ fn naming(ps: &str, folders: &[String], own: u32) -> Vec<u32> {
         .collect()
 }
 
-/// A hook in the project's Claude settings that answers Endeavor's dialogs (MCP elicitation) as the
-/// user, by running this binary's `dialog` (`dialog_hook`), which logs each question and its answer
-/// to `dialogs.jsonl`. `dialog` is `"accept"` or `"decline"` for every dialog, or
-/// `{ "new_packages": [...] }`: yes only to Julia's or Python's question about packages new to a
-/// notebook, when every package it names is one of those (or whatever it names, with `"any"`), and no
-/// to any other question.
 fn answer_dialogs(work: &Path, project: &Path, exe: &Path, dialog: &Value) -> Result<(), String> {
     let valid = match dialog {
         Value::String(answer) => matches!(answer.as_str(), "accept" | "decline"),
@@ -832,8 +699,6 @@ fn answer_dialogs(work: &Path, project: &Path, exe: &Path, dialog: &Value) -> Re
     std::fs::write(&settings, current.to_string()).map_err(|e| e.to_string())
 }
 
-/// `endeavor-smoke dialog WORK`, the hook `answer_dialogs` sets up: Claude Code's Elicitation hook
-/// input on stdin, the answer on stdout.
 pub fn dialog_hook(args: &[String]) -> i32 {
     let Some(work) = args.first().map(PathBuf::from) else {
         eprintln!("usage: endeavor-smoke dialog WORK");
@@ -852,11 +717,6 @@ pub fn dialog_hook(args: &[String]) -> i32 {
     0
 }
 
-/// How the user answers the dialog that asks `message`, and why. With `new_packages`, the user says
-/// yes only to the question the front asks before Julia or Python installs packages new to a notebook
-/// (`Consent::download_question`: "Julia needs to install A, B, new to the notebook ..."), and only
-/// when it names nothing else; everything else, an R download or a server's helper included, gets a no.
-/// A task where the agent picks the language (L1) needs both, or a Python run can't install anything.
 fn dialog_answer(policy: &Value, message: &str) -> (&'static str, String) {
     if let Some(answer) = policy.as_str() {
         return (if answer == "accept" { "accept" } else { "decline" }, format!("the task answers every dialog with {answer}"));
@@ -879,7 +739,6 @@ fn stop_runtime(endeavor: &Path, work: &Path) {
     stop_state(endeavor, work, &work.join("state"));
 }
 
-/// Stop the runtime whose state folder is `state`.
 fn stop_state(endeavor: &Path, work: &Path, state: &Path) {
     let stop = |force: bool| {
         let mut c = Command::new(endeavor);
@@ -894,9 +753,6 @@ fn stop_state(endeavor: &Path, work: &Path, state: &Path) {
     }
 }
 
-/// A task's line in the summary: pass on the first try, flaky if some attempts failed, failing if all did.
-/// A task expected to fail on an open issue is an "expected failure" when it fails, and says the issue may
-/// be fixed when it passes.
 fn row(id: &str, attempts: &[Value], expected: Option<&str>) -> Value {
     let failed = attempts.iter().filter(|a| a["passed"] != true).count();
     let status = match expected {
@@ -922,7 +778,6 @@ fn row(id: &str, attempts: &[Value], expected: Option<&str>) -> Value {
     json!({ "task": id, "status": status, "expected_to_fail": expected, "attempts": attempts.len(), "failed": failed, "failures": failures, "first": first, "models": models })
 }
 
-/// A token count in thousands, or `?` when the agent didn't report one.
 fn thousands(n: &Value) -> String {
     n.as_u64().filter(|n| *n > 0).map_or("?".into(), |n| format!("{:.1}k", n as f64 / 1000.0))
 }
@@ -972,7 +827,6 @@ fn git(repo: &Path, args: &[&str]) -> String {
     Command::new("git").args(args).current_dir(repo).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).filter(|s| !s.is_empty()).unwrap_or_else(|| "unknown".into())
 }
 
-/// The files under a folder, as paths relative to it.
 fn files_under(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_owned()];
@@ -989,7 +843,6 @@ fn files_under(dir: &Path) -> Vec<String> {
     out
 }
 
-/// Copy a folder's contents, leaving out the top-level entries named in `skip`.
 fn copy_dir(from: &Path, to: &Path, skip: &[&str]) {
     for entry in std::fs::read_dir(from).into_iter().flatten().flatten() {
         if skip.iter().any(|s| entry.file_name() == *s) {
@@ -1005,11 +858,9 @@ fn copy_dir(from: &Path, to: &Path, skip: &[&str]) {
     }
 }
 
-/// The time now as `2026-10-10T0215Z`, for a results folder's name.
 fn utc_stamp() -> String {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
     let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    // Howard Hinnant's civil_from_days.
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -1042,7 +893,6 @@ mod tests {
                     104 endeavor-smoke run --only N1\n\
                     105 cat /tmp/smoke/N1/attempt-1/log.txt\n";
         let folders = ["/tmp/smoke/N1/attempt-1".to_owned(), "/private/tmp/smoke/N1/attempt-1".to_owned()];
-        // Not attempt-10, which only starts with the same text, and not this process.
         assert_eq!(naming(ps, &folders, 105), vec![101, 103]);
         assert!(naming("", &folders, 1).is_empty());
     }
@@ -1084,7 +934,6 @@ mod tests {
         let nested = json!({ "check": "any_of", "checks": [{ "check": "all_of", "checks": [{ "check": "notebooks" }, { "check": "reproducible" }] }] });
         assert!(wants_reproducible(&nested));
         assert!(!wants_reproducible(&json!({ "check": "any_of", "checks": [{ "check": "notebooks" }] })));
-        // Every task whose checks hold one, at any depth, asks for it: N8's nests it (#524).
         let n8: Value = serde_json::from_str(include_str!("../../../smoke/tasks/N8-one-notebook/checks.json")).unwrap();
         assert!(n8["checks"].as_array().unwrap().iter().any(wants_reproducible));
     }

@@ -15,7 +15,8 @@ the standalone `endeavor serve` / `endeavor mcp`, and the Slurm relay.
 - `crates/wire/`: the protocol between the app and the helper
   ([docs/wire.md](docs/wire.md)). `backend.rs`
   is the notebook-engine enum (Pluto only today).
-- `runtime/`: the Julia side (`EndeavorRuntime`, the Pluto adapter), embedded
+- `runtime/`: the Julia side (`EndeavorRuntime`, the Pluto adapter,
+  [docs/pluto-adapter.md](docs/pluto-adapter.md)), embedded
   into the binary by `build.rs`.
 - `plugin/skills/`: the skills. `claude-plugin/`, `codex-plugin/` and
   `antigravity-plugin/` hold copies; `scripts/plugins.sh sync` refreshes them.

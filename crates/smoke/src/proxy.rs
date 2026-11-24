@@ -1,11 +1,3 @@
-//! The recording proxy. The plugin's launcher runs `$ENDEAVOR_BIN mcp ARGS`; with
-//! ENDEAVOR_BIN set to this binary, it starts the real `endeavor mcp ARGS` with
-//! the task's own state, Julia and depot, passes stdin and stdout through, and
-//! writes every message to the task's log. Its settings come from the runner in
-//! SMOKE_* variables, since an agent passes a plugin's server only what the
-//! plugin's own command line says. A task with an `inject.json` also gets a
-//! second person, at the moment it names (inject.rs).
-
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -22,7 +14,6 @@ pub fn main(args: &[String]) -> i32 {
     let (real, work, project) = (var("SMOKE_ENDEAVOR"), var("SMOKE_WORK"), var("SMOKE_PROJECT"));
     let log = Arc::new(Mutex::new(Log::create(&work.join("mcp.jsonl"))));
     let injection = Arc::new(Injection::load(&work, &real, &project));
-    // The tool each pending request called, by its id, to know the reply's.
     let pending: Arc<Mutex<HashMap<String, String>>> = Arc::default();
     let mut child = match Command::new(&real)
         .arg("mcp")
@@ -77,7 +68,6 @@ pub fn main(args: &[String]) -> i32 {
     child.wait().ok().and_then(|s| s.code()).unwrap_or(1)
 }
 
-/// A `tools/call` request's id (as JSON text) and tool.
 fn tool_call(line: &str) -> Option<(String, String)> {
     let msg: Value = serde_json::from_str(line).ok()?;
     (msg["method"] == "tools/call").then(|| (msg["id"].to_string(), msg["params"]["name"].as_str().unwrap_or_default().to_owned()))

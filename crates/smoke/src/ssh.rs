@@ -1,18 +1,3 @@
-//! A server for the machine tasks: this computer, reached over ssh. The runner
-//! starts an sshd of its own on a free port of 127.0.0.1 with its own host key
-//! and the attempt's own client key, and gives the agent's server a home folder
-//! whose `~/.ssh/config` names it `smoke-host`. `gone-host` is a port nothing
-//! listens on. The user's own ssh setup is neither read nor changed. OpenSSH
-//! finds `~/.ssh/config` through the account's home, not `$HOME`, so the
-//! runtime's PATH starts with a folder whose `ssh` runs the real one with `-F`
-//! that config.
-//!
-//! On the server side, Endeavor's debug-only `ENDEAVOR_TEST_ROOT`, `_STATE` and
-//! `_DEPOT` put the helper's install, its runtime's state and its depot inside
-//! the attempt's folder, so nothing is installed in the user's real home. The
-//! depot is the shared one, with its trailing `:`, so the server's Julia also
-//! searches the account's own `~/.julia`, as the local tasks' does.
-
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -29,15 +14,11 @@ impl Drop for Server {
     }
 }
 
-/// The folders the server tasks use, under the attempt's.
 pub struct Folders {
-    /// The home folder the agent's server runs with: its `.ssh/config`.
     pub home: PathBuf,
-    /// Where the helper installs, its runtime keeps its state, and a notebook can go.
     pub root: PathBuf,
     pub state: PathBuf,
     pub remote: PathBuf,
-    /// Goes first on the runtime's PATH: an `ssh` that reads the config above.
     pub bin: PathBuf,
 }
 
@@ -67,7 +48,6 @@ pub fn start(work: &Path) -> Result<Server, String> {
     keygen(&dir.join("host_key"))?;
     keygen(&dir.join("client_key"))?;
     std::fs::copy(dir.join("client_key.pub"), dir.join("authorized_keys")).unwrap();
-    // USER isn't always set (a container's root shell); `id -un` always answers.
     let user = match std::env::var("USER").or_else(|_| std::env::var("LOGNAME")) {
         Ok(user) if !user.is_empty() => user,
         _ => {
@@ -76,9 +56,6 @@ pub fn start(work: &Path) -> Result<Server, String> {
         }
     };
     if user.is_empty() { return Err("couldn't tell this account's user name".into()); }
-    // `closed` is a port that was free a moment ago. Something could start
-    // listening on it during the run, and M2 would then see another error than
-    // a refusal; unlikely enough not to guard.
     let (port, closed) = (free_port(), free_port());
     std::fs::write(
         dir.join("sshd_config"),

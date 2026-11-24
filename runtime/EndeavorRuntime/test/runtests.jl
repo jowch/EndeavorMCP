@@ -8,15 +8,9 @@ using Sockets
 using SHA
 using Base64
 
-# Notebooks made without a path would otherwise pile up in the app's own depot.
 ENV["JULIA_PLUTO_NEW_NOTEBOOKS_DIR"] = mktempdir()
 
-# Pluto saves (and backs up) notebooks it opens, so tests work on a temp copy.
 fresh_fixture() = cp(joinpath(@__DIR__, "fixtures", "test_notebook.jl"), joinpath(mktempdir(), "test_notebook.jl"))
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 function make_session_with_notebook(cells...)
     session  = Pluto.ServerSession()
@@ -26,17 +20,11 @@ function make_session_with_notebook(cells...)
     session, nb, nb_cells
 end
 
-# No retries, so a port must answer as soon as start returns. The long read
-# timeout is for the first request, which compiles its handler.
 answers(url) = try
     HTTP.get(url, ["Connection" => "close"]; retry=false, readtimeout=60, status_exception=false).status == 200
 catch
     false
 end
-
-# ---------------------------------------------------------------------------
-# Unit tests — no Pluto web server required
-# ---------------------------------------------------------------------------
 
 @testset "EndeavorRuntime.jl" begin
 
@@ -77,17 +65,11 @@ end
         @test EndeavorRuntime._html_text(html) == "\$e^{i\\pi} + 1 = 0\$ — &#123; <b> &#0; &#99999999;"
     end
 
-    # ---------------------------------------------------------------------------
-    # MCP protocol round-trip tests (no network, no Pluto web server)
-    # ---------------------------------------------------------------------------
-
-    # Helper: write a newline-delimited JSON message to a buffer
     function write_msg(buf, msg)
         write(buf, EndeavorRuntime.JSON.json(msg))
         write(buf, '\n')
     end
 
-    # Helper: read one newline-delimited JSON response from a buffer
     function read_resp(buf)
         seekstart(buf)
         EndeavorRuntime.JSON.parse(readline(buf; keep=false), Dict{String,Any})
@@ -126,12 +108,10 @@ end
         @test 74 <= step["seconds"] <= 80
         @test step["last_line"] == "✓ https://github.com/x/Y.jl"
         @test !occursin("s3cret", JSON.json(step)) && !occursin("ghp_token123", JSON.json(step))
-        # The same, but for the clock.
         same(other) = delete!(copy(other), "seconds") == delete!(copy(step), "seconds")
         @test same(EndeavorRuntime.snapshot(nb)["packages"])
         @test same(only(EndeavorRuntime._notebook_summaries(session))["packages"])
 
-        # No log yet, and a step Pluto names that the runtime doesn't know.
         empty!(nb.nbpkg_terminal_outputs)
         Pluto.Status.report_business_finished!(pkg, :precompile)
         Pluto.Status.report_business_started!(pkg, :something_new)
@@ -141,7 +121,6 @@ end
         Pluto.Status.report_business_finished!(nb.status_tree, :pkg)
         @test EndeavorRuntime.package_step(nb) === nothing
 
-        # A Pluto whose internals changed shape: no package step, not an error.
         @test EndeavorRuntime.package_step((; notebook_id = nb.notebook_id)) === nothing
     end
 
@@ -164,19 +143,17 @@ end
         """
         session, nb, cells = make_session_with_notebook(two_formats, "1 + 1", "md\"# hi\"")
         Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
-        @test cells[1].output.mime == MIME("image/svg+xml")      # Pluto shows the SVG...
+        @test cells[1].output.mime == MIME("image/svg+xml")
         rendered = EndeavorRuntime.render_png(session, nb, cells[1])
-        @test (base64decode(rendered["png"]), rendered["mime"]) == (UInt8[0x89, 0x50, 0x4e, 0x47], "image/svg+xml")  # ...the PNG comes back
+        @test (base64decode(rendered["png"]), rendered["mime"]) == (UInt8[0x89, 0x50, 0x4e, 0x47], "image/svg+xml")
         @test occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[1]))
         @test EndeavorRuntime.render_png(session, nb, cells[2]) == Dict("png" => nothing, "mime" => "text/plain")
-        # Markdown is text/html with no PNG form: its output must not point at the tool.
         @test cells[3].output.mime == MIME("text/html")
         @test !occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[3]))
         @test EndeavorRuntime.render_png(session, nb, cells[3])["png"] === nothing
     end
 
     @testset "controls: how read_cell words a widget, from its hooks" begin
-        # Stand-ins for AbstractPlutoDingetjes' answers, matched by name as the runtime matches them.
         struct NotGiven end
         struct InfinitePossibilities end
         struct Slide; values::AbstractRange; end
@@ -191,7 +168,6 @@ end
         moved = line(slide, Some(0.3), 0.5, 1:100)
         @test moved["line"] == "x: Slide 0.01 to 1.0, step 0.01, value 0.3 (default 0.5)"
         @test (moved["moved"], moved["value"], moved["default"]) == (true, "0.3", "0.5")
-        # Choices show their label when it differs, as the agent would otherwise guess the label.
         pick = Pick(["a" => "Apple", "b" => "b"])
         @test line(pick, Some("b"), "b", 1:2)["line"] == "x: Pick of Apple = \"a\", \"b\", value \"b\""
         many = Pick(["v$i" => "v$i" for i in 1:40])
@@ -200,12 +176,9 @@ end
         @test line(:w, Some("hi"), "hi", InfinitePossibilities())["line"] == "x: Symbol, any text, value \"hi\""
         @test line(:w, Some(2), 2, :NotGiven)["line"] == "x: Symbol, value 2"
         @test line(:w, Some(2), 2, NotGiven())["line"] == "x: Symbol, value 2"
-        # A widget with its own text form (Masque's) says what it is in its own words.
         @test line(Box(), Some(1), 1, NotGiven())["line"] == "x: Box, value 1. A box over the plot"
-        # No default (a home-made `html"<input>"`): never moved. Not yet defined: not set.
         @test !line(:w, Some(3), missing, NotGiven())["moved"]
         @test line(:w, nothing, 1, NotGiven())["line"] == "x: Symbol, value not set"
-        # Long values are cut.
         long = repeat("a", 200)
         @test endswith(line(:w, Some(long), long, InfinitePossibilities())["line"], "…")
     end
@@ -229,7 +202,6 @@ end
         @test !haskey(s[id(3)], "inputs") && !haskey(s[id(5)], "inputs")
         @test all(i -> isempty(moved_notes(s, i)), 1:5)
 
-        # The user moves it on the page: the cells that read it, and theirs, say which value they used.
         nb.bonds[:w] = Pluto.BondValue(9)
         Pluto.set_bond_values_reactive(; session, notebook=nb, bound_sym_names=[:w], run_async=false)
         s = snap()
@@ -238,14 +210,11 @@ end
         @test moved_notes(s, 3) == [note] && moved_notes(s, 4) == [note]
         @test isempty(moved_notes(s, 2)) && isempty(moved_notes(s, 5))
 
-        # The control's own cell running again puts it back to its default, and the notes go.
         Pluto.update_save_run!(session, nb, cells[2:2]; run_async=false, save=true)
         s = snap()
         @test s[id(2)]["inputs"] == ["w: Knob, value 4"]
         @test isempty(moved_notes(s, 3))
 
-        # A process that doesn't answer (busy in a task that never yields, no cell running) holds
-        # up only the snapshot that asked it, and that one for at most the wait.
         spin = Pluto.Cell(; code="spin = @async (sleep(1); while true end)")
         push!(nb.cells, spin)
         nb.cells_dict[spin.cell_id] = spin
@@ -258,7 +227,6 @@ end
         @test first_wait < EndeavorRuntime._CONTROLS_WAIT + 1
         @test all(<(0.5), later)
 
-        # A notebook with no control asks its process nothing.
         session2, nb2, _ = make_session_with_notebook("a = 1")
         Pluto.update_save_run!(session2, nb2, nb2.cells; run_async=false, save=true)
         @test EndeavorRuntime.controls(session2, nb2) == Dict()
@@ -283,12 +251,9 @@ end
         settle() = (t = time(); while any(c -> c.running || c.queued, nb.cells) && time() - t < 60; sleep(0.1) end)
         staged() = EndeavorRuntime.current_topology(nb) !== nb.topology
         id(c) = string(c.cell_id)
-        # As the page sends it. Its client isn't connected, so Pluto's reply to it is dropped.
         page_run(c) = Pluto.responses[:run_multiple_cells](Pluto.ClientRequest(; session, notebook=nb,
             body=Dict{String,Any}("cells" => [id(c)]), initiator=Pluto.Initiator(Pluto.ClientSession(:page, nothing), :run)))
 
-        # The agent adds a cell below and doesn't run it; the user runs `y` on the page. The new
-        # cell, downstream, runs with it.
         inserted = only(EndeavorRuntime.apply!(session, nb, [Dict("op" => "insert", "code" => "z * 10", "folded" => false, "index" => 4)])["inserted"])
         @test staged()
         page_run(cells[3])
@@ -296,8 +261,6 @@ end
         @test nb.cells_dict[UUID(inserted)].output.body == "90"
         @test !staged()
 
-        # The agent's edit makes `z`'s cell define `more` too, unrun; the user moves the knob. The
-        # cell runs with its new names, so the one reading `more` runs as well.
         EndeavorRuntime.apply!(session, nb, [Dict("op" => "set_code", "cell_id" => id(cells[4]), "code" => "begin z = y + 1; more = z end")])
         @test staged()
         nb.bonds[:w] = Pluto.BondValue(5)
@@ -307,8 +270,6 @@ end
         @test nb.cells_dict[UUID(inserted)].output.body == "110"
         @test !staged()
 
-        # The edit taken back, unrun, and the knob moved again: `more` is gone, as on a fresh run,
-        # rather than left over from before.
         EndeavorRuntime.apply!(session, nb, [Dict("op" => "set_code", "cell_id" => id(cells[4]), "code" => "z = y + 1")])
         nb.bonds[:w] = Pluto.BondValue(6)
         Pluto.set_bond_values_reactive(; session, notebook=nb, bound_sym_names=[:w], run_async=false)
@@ -316,15 +277,12 @@ end
         @test cells[5].errored && occursin("more", string(cells[5].output.body))
         @test !staged()
 
-        # A staged edit that newly reads the knob: Pluto's own readers of `w` don't include it, but
-        # the knob moving runs it, as a run from the page would.
         EndeavorRuntime.apply!(session, nb, [Dict("op" => "set_code", "cell_id" => id(cells[5]), "code" => "w + 100")])
         nb.bonds[:w] = Pluto.BondValue(8)
         Pluto.set_bond_values_reactive(; session, notebook=nb, bound_sym_names=[:w], run_async=false)
         @test !cells[5].errored && cells[5].output.body == "108"
         @test !staged()
 
-        # With nothing staged, both run as Pluto's own do.
         nb.bonds[:w] = Pluto.BondValue(7)
         Pluto.set_bond_values_reactive(; session, notebook=nb, bound_sym_names=[:w], run_async=false)
         @test cells[4].output.body == "15" && nb.cells_dict[UUID(inserted)].output.body == "150" && cells[5].output.body == "107"
@@ -343,43 +301,39 @@ end
             Picture()
         end
         """
-        # A computation that never yields, so the worker answers nothing until it ends.
         long = "let t = time(); s = 0.0; while time() - t < 35; s += 1; end; s end"
         session, nb, cells = make_session_with_notebook(picture, long)
         Pluto.update_save_run!(session, nb, [cells[1]]; run_async=false, save=true)
         Pluto.update_save_run!(session, nb, [cells[2]]; run_async=true, save=true)
         timedwait(() -> cells[2].running, 30.0)
-        sleep(1)   # `running` is set before the worker is inside the loop
+        sleep(1)
         @test cells[2].running
         took = @elapsed err = try EndeavorRuntime.render_png(session, nb, cells[1]); "" catch e; e.msg end
         @test startswith(err, "no_image::") && occursin(EndeavorRuntime._BUSY, err)
         @test EndeavorRuntime._BUSY_RENDER_WAIT <= took < 20
-        # The render that timed out still waits on the worker; asking again joins it.
         key = (nb.notebook_id, string(cells[1].cell_id))
         first = last(EndeavorRuntime._RENDERS[key])
         err = try EndeavorRuntime.render_png(session, nb, cells[1]); "" catch e; e.msg end
         @test occursin(EndeavorRuntime._BUSY, err)
         @test last(EndeavorRuntime._RENDERS[key]) === first && !istaskdone(first)
-        # Once the run ends, the worker renders it again.
         timedwait(() -> !cells[2].running, 60.0)
         @test base64decode(EndeavorRuntime.render_png(session, nb, cells[1])["png"]) == UInt8[0x89, 0x50, 0x4e, 0x47]
-        @test !haskey(EndeavorRuntime._RENDERS, key)   # a finished render leaves
+        @test !haskey(EndeavorRuntime._RENDERS, key)
         Pluto.SessionActions.shutdown(session, nb; async=false)
     end
 
     @testset "render_png without a worker" begin
-        session, nb, cells = make_session_with_notebook("plot", "fig")   # never run: no workspace
+        session, nb, cells = make_session_with_notebook("plot", "fig")
         png = UInt8[0x89, 0x50, 0x4e, 0x47]
         cells[1].output = Pluto.CellOutput(; body=png, mime=MIME("image/png"))
         cells[2].output = Pluto.CellOutput(; body="<svg/>", mime=MIME("image/svg+xml"))
-        @test base64decode(EndeavorRuntime.render_png(session, nb, cells[1])["png"]) == png   # a PNG passes through
+        @test base64decode(EndeavorRuntime.render_png(session, nb, cells[1])["png"]) == png
         err = try EndeavorRuntime.render_png(session, nb, cells[2]); "" catch e; e.msg end
-        @test startswith(err, "no_image::") && occursin("safe preview", err)                   # an SVG needs the worker
-        @test occursin("has no running worker", err)    # the app's picture stands in for it (`NO_WORKER`, notebooks/tools.rs)
+        @test startswith(err, "no_image::") && occursin("safe preview", err)
+        @test occursin("has no running worker", err)
     end
 
     @testset "render_png reads a picture embedded in HTML" begin
-        # A widget's static render (as Masque.jl shows a figure): HTML holding a PNG.
         png = vcat(UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], zeros(UInt8, 6_000))
         icon = vcat(UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], zeros(UInt8, 100))
         widget = "<div><img src='data:image/png;base64,$(base64encode(icon))'><img draggable=\"false\" src=\"data:image/png;base64,$(base64encode(png))\" style=\"width:100%\"><script>mount()</script></div>"
@@ -387,19 +341,15 @@ end
         cells[1].output = Pluto.CellOutput(; body=widget, mime=MIME("text/html"))
         cells[2].output = Pluto.CellOutput(; body="<img src='data:image/png;base64,$(base64encode(icon))'> n = 3", mime=MIME("text/html"))
         cells[3].output = Pluto.CellOutput(; body="<h1>hi</h1>", mime=MIME("text/html"))
-        # Without a worker (safe preview) the stored HTML is enough.
         rendered = EndeavorRuntime.render_png(session, nb, cells[1])
         @test base64decode(rendered["png"]) == png && rendered["source"] == "embedded image"
         @test occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[1]))
-        # An icon isn't the output's picture.
         @test !occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[2]))
         @test_throws ArgumentError EndeavorRuntime.render_png(session, nb, cells[2])
         @test !occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[3]))
-        # A large data URI that isn't a PNG gets neither the pointer nor an image.
         cells[3].output = Pluto.CellOutput(; body="<img src='data:image/png;base64,$(base64encode(zeros(UInt8, 6_000)))'>", mime=MIME("text/html"))
         @test !occursin("view_cell_output", EndeavorRuntime._serialize_output(cells[3]))
         @test_throws ArgumentError EndeavorRuntime.render_png(session, nb, cells[3])
-        # With a worker: a value with no PNG form falls back to the embedded one.
         session, nb, cells = make_session_with_notebook("HTML(\"$(escape_string(widget))\")", "md\"# hi\"")
         Pluto.update_save_run!(session, nb, nb.cells; run_async=false, save=true)
         @test cells[1].output.mime == MIME("text/html")
@@ -425,7 +375,6 @@ end
         rendered = EndeavorRuntime.render_png(session, nb, cells[2])
         @test (base64decode(rendered["png"]), rendered["mime"]) == (UInt8[0x89, 0x50, 0x4e, 0x47], "text/html")
         @test EndeavorRuntime.render_text(session, nb, cells[2])["text"] == "Pictured widget, value 3"
-        # A widget with no picture or text form of its own reads as before.
         @test EndeavorRuntime.render_png(session, nb, cells[3])["png"] === nothing
         @test EndeavorRuntime.render_text(session, nb, cells[3])["text"] == "plain"
     end
@@ -442,8 +391,8 @@ end
         @test cells[1].output.mime != MIME("text/plain")
         @test text(cells[1]) == "Dict{String, Float64} with 1 entry:\n  \"mean\" => 2.5"
         @test strip(text(cells[2])) == "Rates\n  ≡≡≡≡≡"
-        @test text(cells[3]) == "n\tmean\n3\t2.5 & up"      # HTML(...) has no text form of its own
-        @test text(cells[4]) === nothing                       # already text
+        @test text(cells[3]) == "n\tmean\n3\t2.5 & up"
+        @test text(cells[4]) === nothing
     end
 
     @testset "render_text without a worker strips stored HTML" begin
@@ -457,8 +406,6 @@ end
         @test length(EndeavorRuntime._cap_text("é" ^ 20_000)) < 9_000
     end
 
-    # Past about 10 MB, a lazy pattern that had to cross the whole output failed every
-    # snapshot, and with it every read tool, with "PCRE.exec error: match limit exceeded" (app #193).
     @testset "outputs of many megabytes: snapshot and render_text still read them" begin
         big = 12_000_000
         png = base64encode(UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, zeros(UInt8, 6_000)...])
@@ -476,13 +423,11 @@ end
         @test EndeavorRuntime.render_text(session, nb, cells[2])["text"] == "shown"
         text4 = EndeavorRuntime.render_text(session, nb, cells[4])["text"]
         @test startswith(text4, "a\n1 < 2\t1 < 2") && !occursin("never closed", text4)
-        # A plot's PNG of megabytes whose src comes after a long attribute: the old search failed on it.
         plot = base64encode(UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, zeros(UInt8, 6_800_000)...])
         figure = Pluto.CellOutput(; body="<img data-x='$("A" ^ 10_000_000)' src=\"data:image/png;base64,$plot\">", mime=MIME("text/html"))
         @test EndeavorRuntime._embedded_png_b64(figure) == plot
     end
 
-    # view_cell_output tells the agent it hasn't seen an interactive output work (#393).
     @testset "interactive HTML: scripts and controls, not Markdown" begin
         html(body) = Pluto.CellOutput(; body, mime=MIME("text/html"))
         @test EndeavorRuntime._interactive_html(html("<div id='p'></div><SCRIPT src='plotly.js'></SCRIPT>"))
@@ -512,7 +457,6 @@ end
         @test filemode(real) & 0o777 == 0o640
         @test sort(readdir(dir)) == ["link.jl", "real.jl"]
         @test Pluto.load_notebook_nobackup(real).cells[1].code == "x = 2"
-        # A file with a hard link is written in place, so both names still show the saved notebook.
         hard = joinpath(dir, "hard.jl")
         hardlink(real, hard)
         nb.cells[1].code = "x = 3"
@@ -538,9 +482,8 @@ end
         end
         EndeavorRuntime._remove_left_staged(path)
         @test !isfile(old)
-        @test isfile(fresh)  # it may be another save under way
-        @test isfile(other)  # another notebook's is left to that notebook's save
-        # A save does it, once per notebook in this process.
+        @test isfile(fresh)
+        @test isfile(other)
         nb2 = joinpath(mktempdir(), "nb2.jl")
         notebook2 = Pluto.Notebook([Pluto.Cell(; code="y = 1")], nb2)
         left = joinpath(dirname(nb2), ".nb2.jl.saving.999999.0")
@@ -578,14 +521,12 @@ end
         nb.process_status = Pluto.ProcessStatus.ready
         @test !EndeavorRuntime._runtime_busy(session)
 
-        # A small package in a project of its own stands in for EndeavorRuntimeWarm.
         project = mktempdir()
         uuid = UUIDs.uuid4()
         mkpath(joinpath(project, "Tiny", "src"))
         write(joinpath(project, "Tiny", "Project.toml"), "name = \"Tiny\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n")
         write(joinpath(project, "Tiny", "src", "Tiny.jl"), "module Tiny\nf() = 1\nend\n")
         write(joinpath(project, "Project.toml"), "[deps]\nTiny = \"$uuid\"\n\n[sources]\nTiny = {path = \"Tiny\"}\n")
-        # Written whole, so nothing needs resolving (or a registry).
         write(joinpath(project, "Manifest.toml"), "julia_version = \"$VERSION\"\nmanifest_format = \"2.0\"\n\n[[deps.Tiny]]\npath = \"Tiny\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n")
         julia = `$(Base.julia_cmd()) --startup-file=no --project=$project`
         precompiled() = success(`$julia -e 'exit(Base.isprecompiled(Base.identify_package("Tiny")) ? 0 : 1)'`)
@@ -604,8 +545,6 @@ end
         dir = joinpath(depot, "compiled", "v1.12", "EndeavorRuntime")
         other = joinpath(depot, "compiled", "v1.12", "Other")
         mkpath(dir); mkpath(other)
-        # A set in use, two images whose .ji is gone (one with a debug bundle, one whose name isn't
-        # ASCII), a precompile's temporary file, and someone else's image.
         for name in ("a.ji", "a.so", "b.so", "é.dylib", "jl_t.so")
             write(joinpath(dir, name), "x")
         end
@@ -621,8 +560,6 @@ end
 
     @testset "lifecycle: a compiled set of ours whose runtime folder is gone is removed" begin
         include(joinpath(@__DIR__, "..", "..", "cache_guard.jl"))
-        # The same small package in two runtime folders, as two builds unpack it: each compiles a
-        # set of its own into the one depot (#382).
         depot, uuid = mktempdir(), UUIDs.uuid4()
         sep = Sys.iswindows() ? ';' : ':'
         function folder()
@@ -643,14 +580,11 @@ end
         first_set = only(filter(endswith(".ji"), readdir(dir)))
         @test success(julia("using EndeavorRuntimeWarm", new))
         @test length(filter(endswith(".ji"), readdir(dir))) == 2
-        # While both folders are there, both sets are kept, and each is marked as seen.
         @test endeavor_drop_unreadable_caches(depot; log=devnull) == String[]
         @test count(endswith(ENDEAVOR_USED_EXT), readdir(dir)) == 2
         rm(old; recursive=true)
         stem = splitext(first_set)[1]
         mkpath(joinpath(dir, stem * ".dylib.dSYM"))
-        # Its source may still be on another machine that shares this depot (#528): a set seen
-        # lately is kept.
         @test endeavor_drop_unreadable_caches(depot; log=devnull) == String[]
         @test isfile(joinpath(dir, first_set))
         later = time() + ENDEAVOR_UNUSED_AGE + 60
@@ -659,8 +593,6 @@ end
         @test !any(n -> startswith(n, stem * "."), readdir(dir))
         @test length(filter(endswith(".ji"), readdir(dir))) == 1
         @test success(julia(check, new))
-        # A file that isn't a compiled set, by a .ji's name, is kept, and a mark whose set Julia
-        # removed goes without a word.
         write(joinpath(dir, "junk.ji"), "x")
         write(joinpath(dir, "evicted" * ENDEAVOR_USED_EXT), "")
         @test endeavor_drop_unreadable_caches(depot; log=devnull, now=later) == String[]
@@ -669,8 +601,6 @@ end
 
     @testset "lifecycle: a compiled file of ours that can't be read is removed, then compiled again" begin
         include(joinpath(@__DIR__, "..", "..", "cache_guard.jl"))
-        # A small package by the warm-up's name, in a project and a depot of its own. Loading it
-        # compiles it, with no registry needed.
         project, depot = mktempdir(), mktempdir()
         uuid = UUIDs.uuid4()
         mkpath(joinpath(project, "EndeavorRuntimeWarm", "src"))
@@ -687,12 +617,10 @@ end
         dir = only(filter(isdir, [joinpath(v, "EndeavorRuntimeWarm") for v in readdir(joinpath(depot, "compiled"); join=true)]))
         ji = only(filter(endswith(".ji"), readdir(dir; join=true)))
         stem = splitext(ji)[1]
-        # A file of someone else's, and a precompile's temporary file, are left alone.
         mkpath(joinpath(depot, "compiled", "v0.0", "Other"))
         other = joinpath(depot, "compiled", "v0.0", "Other", "x.ji")
         temp = joinpath(dir, "jl_abc.ji")
         write(other, "x"); write(temp, "x")
-        # A native image's debug bundle (macOS makes one) goes with it; here one stands in everywhere.
         mkpath(stem * ".dylib.dSYM")
         unreadable = Set([ji, other, temp])
         @test endeavor_drop_unreadable_caches(depot; log=devnull) == String[]
@@ -703,7 +631,6 @@ end
         @test !success(julia(check))
         @test success(julia("using EndeavorRuntimeWarm"))
         @test success(julia(check))
-        # Never in the user's own depot.
         home = mktempdir()
         mine = joinpath(home, ".julia", "compiled", "v1.12", "EndeavorRuntimeWarm", "x.ji")
         mkpath(dirname(mine)); write(mine, "x")
@@ -711,10 +638,6 @@ end
             @test endeavor_drop_unreadable_caches(joinpath(home, ".julia"); readable=_ -> false, log=devnull) == String[]
         end
         @test isfile(mine)
-        # The failure itself (#372). Julia calls one unreadable cache file stale and compiles over
-        # it, but beside a second cache file of the package (another runtime folder compiled into
-        # the same depot, as each update makes) every load opens it to sort them, and throws,
-        # every time. Root reads any file, so not as root.
         if !Sys.iswindows() && ccall(:geteuid, Cuint, ()) != 0
             second = joinpath(mktempdir(), "second")
             cp(project, second)
@@ -790,10 +713,8 @@ end
             @test call(["Authorization" => "Bearer s3cret-token-and-more"]).status == 401
             ok = call(["Authorization" => "Bearer s3cret-token"])
             @test ok.status == 200
-            # The core answers the tools; Julia only what the core passes on.
             @test JSON.parse(String(ok.body))["error"] == Dict("code" => -32601, "message" => "Method not found: tools/list")
             @test HTTP.get("http://127.0.0.1:$mcp_port/health"; status_exception=false, readtimeout=2).status == 200
-            # The adapter's routes, which only the core calls.
             snapshot = JSON.json(Dict("method" => "snapshot", "params" => Dict()))
             @test HTTP.post("http://127.0.0.1:$mcp_port/adapter", [], snapshot; status_exception=false, readtimeout=5).status == 401
             @test HTTP.get("http://127.0.0.1:$mcp_port/notifications"; status_exception=false, readtimeout=5).status == 401
@@ -808,7 +729,6 @@ end
             @test app_call("endeavor/set_folder", Dict("path" => folder)).status == 200
             @test EndeavorRuntime.standalone_session().options.server.notebook_path_suggestion == joinpath(folder, "")
 
-            # Shutdown answers first, then ends the process.
             shut_down = Channel{Bool}(1)
             EndeavorRuntime._SHUTDOWN[] = () -> put!(shut_down, true)
             reply = app_call("endeavor/shutdown", Dict{String,Any}())
@@ -823,7 +743,6 @@ end
     end
 
     @testset "shutdown stops a notebook process busy in a cell within seconds" begin
-        # Malt's own stop at exit would wait 15 s for it to take its exit (#509).
         worker = Pluto.Malt.Worker()
         try
             Pluto.Malt.remote_do(worker) do
@@ -862,7 +781,6 @@ end
                     put!(notes, note)
                 end
             end
-            # The next notification `method` names, skipping others.
             function next_note(method; nid = nothing)
                 deadline = time() + 60
                 while time() < deadline
@@ -874,7 +792,7 @@ end
             end
             adapter(method, params) = JSON.parse(String(HTTP.post("http://127.0.0.1:$mcp_port/adapter", [],
                 JSON.json(Dict("method" => method, "params" => params)); readtimeout=30).body))
-            sleep(0.5)   # the stream is open before anything happens
+            sleep(0.5)
 
             nid = adapter("open", Dict("path" => fixture, "run" => true))["result"]["notebook_id"]
             @test next_note("notebook_opened") == Dict("notebook_id" => nid, "path" => abspath(fixture))
@@ -882,7 +800,6 @@ end
             seq_now = last_seq[]
             all = adapter("snapshot", Dict())["result"]
             snap = adapter("snapshot", Dict("notebook_id" => nid))["result"]
-            # Numbered like the notifications.
             @test seq_now <= all["seq"] <= snap["seq"]
             @test all["notebooks"] == [delete!(copy(snap), "seq")]
             @test (snap["path"], snap["cell_order"], snap["execution_allowed"], snap["safe_preview"]) ==
@@ -900,7 +817,6 @@ end
             edges = adapter("graph", Dict("notebook_id" => nid, "edges" => true))["result"]["cells"]
             @test [(c["upstream"], c["downstream"]) for c in edges] == [([], [Y]), ([X], [])]
 
-            # A change through the adapter: its code in the next cell_state, the graph changed.
             applied = adapter("apply", Dict("notebook_id" => nid, "ops" => [Dict("op" => "set_code", "cell_id" => Y, "code" => "y = x * 8 + z")]))
             @test applied["result"]["seq"] > snap["seq"]
             state = next_note("cell_state")
@@ -912,7 +828,6 @@ end
             @test next_note("topology_changed") == Dict("notebook_id" => nid)
             @test adapter("graph", Dict("notebook_id" => nid))["result"]["cells"][2]["references"] == ["*", "+", "x", "z"]
 
-            # A change the tools didn't make (Pluto's editor submitting code) reaches the core too.
             sess = EndeavorRuntime.standalone_session()
             nb = sess.notebooks[UUID(nid)]
             nb.cells_dict[UUID(X)].code = "x = 5"
@@ -923,13 +838,11 @@ end
             end
             @test state["notebook_id"] == nid
 
-            # An error names the notebook the core asked about.
             missing = string(uuid4())
             @test adapter("snapshot", Dict("notebook_id" => missing)) ==
                   Dict("error" => "KeyError: key \"notebook_not_found::No notebook with id '$missing' in the current session\" not found")
             @test adapter("graph", Dict("notebook_id" => "nope")) == Dict("error" => "ArgumentError: invalid_notebook_id::Invalid notebook ID: 'nope'")
             @test adapter("render", Dict("notebook_id" => nid)) == Dict("error" => "ArgumentError: unknown_method::Unknown adapter method: 'render'")
-            # Analysing the notebook as it is now, without keeping the result.
             nb.cells_dict[UUID(X)].code = "x = 5; w = 1"
             fresh = adapter("graph", Dict("notebook_id" => nid, "fresh" => true))["result"]
             @test fresh["cells"][1]["definitions"] == ["w", "x"]
@@ -937,7 +850,6 @@ end
             nb.cells_dict[UUID(X)].code = "x = 5"
             @test HTTP.post("http://127.0.0.1:$mcp_port/adapter", [], "{nope"; status_exception=false).status == 400
 
-            # Shutting it down: whether it was in safe preview.
             @test adapter("shutdown", Dict("notebook_id" => nid)) == Dict("result" => Dict("safe_preview" => false))
             @test next_note("notebook_shut_down") == Dict("notebook_id" => nid)
             @test adapter("snapshot", Dict())["result"]["notebooks"] == []
@@ -993,14 +905,12 @@ end
             nb = EndeavorRuntime.standalone_session().notebooks[UUID(nid)]
             ops(list...) = Dict("notebook_id" => nid, "ops" => collect(list))
 
-            # A cell whose code isn't what the core expects refuses the whole change.
             @test adapter("apply", ops(
                 Dict("op" => "fold", "cell_id" => X, "folded" => true),
                 Dict("op" => "set_code", "cell_id" => Y, "code" => "y = 0", "expected" => "y = 1"),
             )) == Dict("error" => "ArgumentError: stale_read::Cell $Y changed since last read; call read_cell again")
             @test !nb.cells_dict[UUID(X)].code_folded
 
-            # Set code, insert, fold: saved, analysed, and a new cell_order vector.
             order_before = nb.cell_order
             applied = result("apply", ops(
                 Dict("op" => "set_code", "cell_id" => Y, "code" => "y = x * 8", "expected" => "y = x * 7"),
@@ -1016,7 +926,6 @@ end
             graph = result("graph", Dict("notebook_id" => nid, "edges" => true))
             @test [(c["cell_id"], c["upstream"], c["downstream"]) for c in graph["cells"]] == [(X, [], [Y]), (Y, [X], [z]), (z, [Y], [])]
 
-            # Runs: waited for, then not (a notification says when it's done).
             @test result("run", Dict("notebook_id" => nid, "cells" => [Y, z], "wait" => true, "timeout" => 60)) ==
                   Dict("accepted" => true, "process_status" => "ready", "completed" => [Y, z], "timed_out" => [])
             @test nb.cells_dict[UUID(z)].output.body == "49"
@@ -1024,9 +933,6 @@ end
             @test started == Dict("accepted" => true, "process_status" => "ready", "run" => started["run"])
             @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "run" => started["run"], "cells" => [X])
 
-            # A waited run that outlasts `timeout` returns when it passes, with the cell that
-            # finished and the dependent still running. The run goes on, watched: a
-            # notification says when it ends. The dependent waits for a file the test makes.
             gate = joinpath(mktempdir(), "release")
             insert(code, index) = only(result("apply", ops(Dict("op" => "insert", "code" => code, "folded" => false, "index" => index)))["inserted"])
             w, slow = insert("w = 5", 3), insert("slow = (while !isfile($(repr(gate))); sleep(0.05); end; w)", 4)
@@ -1044,8 +950,6 @@ end
             @test !any(c -> c["running"] || c["queued"], result("snapshot", Dict("notebook_id" => nid))["cells"])
             result("apply", ops(Dict("op" => "delete", "cell_id" => slow), Dict("op" => "delete", "cell_id" => w)))
 
-            # A run whose task fails with nobody waiting: the cells marked queued by hand are released
-            # and the run is said to have finished.
             failing = @task error("boom")
             schedule(failing)
             try wait(failing) catch end
@@ -1055,15 +959,12 @@ end
             @test !marked.queued
             @test next_note("run_finished"; nid) == Dict("notebook_id" => nid, "run" => "failed-run", "cells" => [X])
 
-            # Move and delete, then the cleanup run that follows a delete.
             result("apply", ops(Dict("op" => "move", "cell_id" => z, "index" => 0)))
             @test string.(nb.cell_order) == [z, X, Y]
             result("apply", ops(Dict("op" => "delete", "cell_id" => z)))
             @test result("run", Dict("notebook_id" => nid, "cells" => [], "wait" => false, "timeout" => 60))["accepted"]
             @test string.(nb.cell_order) == [X, Y] && !haskey(nb.cells_dict, UUID(z))
 
-            # A package the notebook doesn't have yet waits for the user's OK where the caller asks
-            # (#397): the cell stays queued, and the snapshot says what would be added.
             run_asking(cells) = result("run", Dict("notebook_id" => nid, "cells" => cells, "wait" => true, "timeout" => 60, "ask_new" => true))
             stdlib = insert("using Dates", 2)
             @test !haskey(run_asking([stdlib]), "asking")
@@ -1073,17 +974,13 @@ end
             asked = run_asking([pkg])
             @test (asked["asking"], asked["completed"], asked["timed_out"]) == (["Example"], [], [pkg])
             @test nb.cells_dict[UUID(pkg)].queued
-            # Nothing runs while it waits, so a finished cell still reads as text, not as "cells are running" (#506).
             @test occursin("2.5", result("render_text", Dict("notebook_id" => nid, "cell_id" => array))["text"])
             step = result("snapshot", Dict("notebook_id" => nid))["packages"]
             @test (step["step"], step["new"], [p["package"] for p in step["download"]["packages"]]) == ("asking", true, ["Example"])
             @test !haskey(Pluto.PkgCompat.project(nb.nbpkg_ctx).dependencies, "Example")
-            # An edit that drops it asks nothing: the held cell runs.
             result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "nothing")))
             @test !haskey(run_asking([pkg]), "asking")
             @test result("snapshot", Dict("notebook_id" => nid))["packages"] === nothing
-            # A cell held with it, which the run after the edit doesn't name, runs with that run: the
-            # snapshot that saw nothing new released it, and it was asked to run (#523).
             title = insert("md\"Title\"", 5)
             result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "using Example")))
             @test run_asking([pkg, title])["asking"] == ["Example"]
@@ -1094,43 +991,35 @@ end
             ran = run_asking([pkg])
             @test !haskey(ran, "asking") && title in ran["completed"]
             @test nb.cells_dict[UUID(title)].output.last_run_timestamp > 0
-            # Released, then run some other way before the agent's next run: it doesn't run again.
             hold_title() = (result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "using Example")));
                             @test run_asking([pkg, title])["asking"] == ["Example"];
                             result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "nothing")));
                             @test result("snapshot", Dict("notebook_id" => nid))["packages"] === nothing)
             hold_title()
             before_page = nb.cells_dict[UUID(title)].output.last_run_timestamp
-            # Run from Pluto's page, which doesn't go through the adapter's run.
             Pluto.update_save_run!(EndeavorRuntime.standalone_session(), nb, [nb.cells_dict[UUID(title)]]; run_async=false, save=true)
             ran_at = nb.cells_dict[UUID(title)].output.last_run_timestamp
             @test ran_at > before_page
             @test !(title in run_asking([array])["completed"]) && nb.cells_dict[UUID(title)].output.last_run_timestamp == ran_at
-            # Released, then a Stop: it doesn't run with the next run either.
             hold_title()
             result("interrupt", Dict("notebook_id" => nid))
             @test !(title in run_asking([array])["completed"]) && nb.cells_dict[UUID(title)].output.last_run_timestamp == ran_at
             result("apply", ops(Dict("op" => "delete", "cell_id" => title)))
-            # Asked again, and stopped: the cell isn't queued any more.
             result("apply", ops(Dict("op" => "set_code", "cell_id" => pkg, "code" => "using Example")))
             @test run_asking([pkg])["asking"] == ["Example"]
             @test result("interrupt", Dict("notebook_id" => nid))["interrupted"] == true
             @test !nb.cells_dict[UUID(pkg)].queued && result("snapshot", Dict("notebook_id" => nid))["packages"] === nothing
-            # The user's yes: it installs, and the cell runs.
             @test run_asking([pkg])["asking"] == ["Example"]
             approved = result("approve_install", Dict("notebook_id" => nid, "timeout" => 60))
             @test (approved["approved"], approved["packages"], approved["cells"]) == (true, ["Example"], [pkg])
             @test pkg in next_note("run_finished"; nid)["cells"]
             @test haskey(Pluto.PkgCompat.project(nb.nbpkg_ctx).dependencies, "Example") && !nb.cells_dict[UUID(pkg)].errored
             @test adapter("approve_install", Dict("notebook_id" => nid)) == Dict("error" => "ArgumentError: nothing_to_approve::Nothing in this notebook waits for the user's OK")
-            # Once in the notebook, it asks nothing.
             @test !haskey(run_asking([pkg]), "asking")
-            # A yes covers the packages the user was shown (#418): one that names none of what waits approves nothing.
             two = insert("using JSON, CSV", 4)
             @test run_asking([two])["asking"] == ["CSV", "JSON"]
             stale = result("approve_install", Dict("notebook_id" => nid, "timeout" => 60, "packages" => ["Example"]))
             @test (stale["approved"], stale["asking"]) == (false, ["CSV", "JSON"]) && nb.cells_dict[UUID(two)].queued
-            # Asked about JSON when CSV came since: the yes covers JSON, and CSV asks on its own.
             partial = result("approve_install", Dict("notebook_id" => nid, "timeout" => 60, "packages" => ["JSON"]))
             @test (partial["approved"], partial["packages"], partial["asking"]) == (true, ["JSON"], ["CSV"])
             @test nb.cells_dict[UUID(two)].queued && !haskey(Pluto.PkgCompat.project(nb.nbpkg_ctx).dependencies, "JSON")
@@ -1146,25 +1035,21 @@ end
             @test result("interrupt", Dict("notebook_id" => nid))["interrupted"] isa Bool
             @test result("status", Dict())["pluto"] == "running"
 
-            # Pluto's own Restart: a new process, and every cell runs.
             ran_before = nb.cells_dict[UUID(Y)].output.last_run_timestamp
             @test result("restart", Dict("notebook_id" => nid, "timeout" => 60)) == Dict("restarted" => true)
             @test Set(next_note("run_finished"; nid)["cells"]) == Set([X, Y])
             @test nb.process_status == Pluto.ProcessStatus.ready
             @test nb.cells_dict[UUID(Y)].output.last_run_timestamp > ran_before && nb.cells_dict[UUID(Y)].output.body == "48"
 
-            # Moving the file, as Pluto's file box does.
             renamed = joinpath(dirname(fixture), "renamed.jl")
             @test result("move", Dict("notebook_id" => nid, "path" => renamed)) == Dict("path" => renamed)
             @test isfile(renamed) && !isfile(fixture) && nb.path == renamed
 
-            # Safe preview: runs aren't accepted until execution is allowed.
             previewed = result("open", Dict("path" => fresh_fixture(), "run" => false))["notebook_id"]
             @test adapter("restart", Dict("notebook_id" => previewed, "timeout" => 60)) ==
                   Dict("error" => "ArgumentError: execution_blocked::The notebook is in safe preview; Run notebook starts it")
             @test result("run", Dict("notebook_id" => previewed, "cells" => [X], "wait" => true, "timeout" => 60)) ==
                   Dict("accepted" => false, "process_status" => "waiting_for_permission")
-            # The reply names the run it starts, and that run's `run_finished` says when it ends (#170).
             allowed = result("allow_execution", Dict("notebook_id" => previewed, "run" => true, "timeout" => 60))
             @test delete!(copy(allowed), "run") == Dict("already_allowed" => false, "ran" => true, "process_status" => "starting")
             @test allowed["run"] isa String
@@ -1173,8 +1058,6 @@ end
             @test result("allow_execution", Dict("notebook_id" => previewed, "run" => false, "timeout" => 60)) ==
                   Dict("already_allowed" => true, "ran" => false, "process_status" => "ready")
 
-            # A file with no environment of its own: every package it uses is new, and neither leaving
-            # safe preview nor an open that runs it adds one unasked (#397).
             function envless()
                 path = joinpath(mktempdir(), "envless.jl")
                 write(path, "### A Pluto.jl notebook ###\n# v0.20.0\n\nusing Markdown\nusing InteractiveUtils\n\n" *
@@ -1197,8 +1080,6 @@ end
             @test opened_nb.nbpkg_ctx === nothing || !haskey(Pluto.PkgCompat.project(opened_nb.nbpkg_ctx).dependencies, "Example")
             adapter("shutdown", Dict("notebook_id" => opened["notebook_id"]))
 
-            # Julia's own folder gone, as juliaup leaves the version it updated past: what would start a
-            # process says why and what to do, before anything stops. The running process lives on.
             session = EndeavorRuntime.standalone_session()
             worker = Pluto.WorkspaceManager.get_workspace((session, nb)).worker
             removed(reply) = haskey(reply, "error") && startswith(reply["error"], "ArgumentError: julia_removed::Julia $VERSION, which this Endeavor runs on, was removed")
@@ -1215,9 +1096,7 @@ end
                 unmade = joinpath(gone_dir, "unmade.jl")
                 @test removed(adapter("new", Dict("path" => unmade))) && !isfile(unmade)
                 @test occursin(gone_dir, adapter("restart", Dict("notebook_id" => nid, "timeout" => 60))["error"])
-                # An open notebook says so, as it does with its Julia there.
                 @test startswith(adapter("open", Dict("path" => nb.path, "run" => true))["error"], "ArgumentError: notebook_already_open::")
-                # Pluto's own Restart, from the page, does nothing rather than stop the process.
                 @test_logs (:warn, r"^Restart: Julia .* was removed") Pluto.responses[:restart_process](Pluto.ClientRequest(; session, notebook = nb))
                 @test nb.process_status == Pluto.ProcessStatus.ready && Pluto.Malt.isrunning(worker)
                 @test Pluto.WorkspaceManager.get_workspace((session, nb)).worker === worker
@@ -1226,7 +1105,6 @@ end
                 EndeavorRuntime._JULIA_EXE[] = ""
             end
 
-            # New notebooks: at a path, or named by Pluto in a folder.
             dir = realpath(mktempdir())
             made = result("new", Dict("path" => joinpath(dir, "made.jl")))
             @test made["path"] == joinpath(dir, "made.jl") && isfile(made["path"])
@@ -1281,7 +1159,6 @@ end
             nb = EndeavorRuntime.standalone_session().notebooks[UUID(nid)]
             result("apply", Dict("notebook_id" => nid, "ops" => [Dict("op" => "set_code", "cell_id" => Y, "code" => "y = (sleep(600); x)")]))
 
-            # Killed during a run the caller waits for: the run ends, saying which cell was running.
             waited = @async result("run", Dict("notebook_id" => nid, "cells" => [Y], "wait" => true, "timeout" => 600))
             @test timedwait(() -> nb.cells_dict[UUID(Y)].running, 60) == :ok
             collect_notes()
@@ -1292,9 +1169,8 @@ end
             snap = result("snapshot", Dict("notebook_id" => nid))
             @test (snap["process_status"], snap["execution_allowed"], snap["exited"]) == ("no_process", false, [Y])
             @test !any(c -> c["running"] || c["queued"], snap["cells"])
-            @test exits() == []   # said once
+            @test exits() == []
 
-            # Restart is Endeavor's own stop: a new process, and nothing said to have ended by itself.
             result("apply", Dict("notebook_id" => nid, "ops" => [Dict("op" => "set_code", "cell_id" => Y, "code" => "y = x * 7")]))
             result("restart", Dict("notebook_id" => nid, "timeout" => 60))
             next_note("run_finished"; nid)
@@ -1302,14 +1178,12 @@ end
             @test result("snapshot", Dict("notebook_id" => nid))["exited"] === nothing
             @test exits() == []
 
-            # Killed while idle: noticed too, with nothing running.
             run(`kill -9 $(worker_pid(nid))`)
             @test next_note("process_exited"; nid) == Dict("notebook_id" => nid, "running" => [])
             @test result("snapshot", Dict("notebook_id" => nid))["exited"] == []
             @test result("run", Dict("notebook_id" => nid, "cells" => [X], "wait" => true, "timeout" => 60)) ==
                   Dict("accepted" => false, "process_status" => "no_process")
 
-            # A shutdown stops the process on purpose.
             result("restart", Dict("notebook_id" => nid, "timeout" => 60))
             next_note("run_finished"; nid)
             result("shutdown", Dict("notebook_id" => nid))
@@ -1317,9 +1191,6 @@ end
             sleep(2)
             @test exits() == []
 
-            # A process that ended while it started: Pluto's own Restart, as the notebook's page
-            # sends it, starts a new one, and every cell runs (#194).
-            # The Malt workers running now, a notebook's own Julia (pgrep, as macOS has no /proc).
             workers() = Set(readlines(ignorestatus(`pgrep -f "Malt.*worker.jl"`)))
             crashing = result("open", Dict("path" => fresh_fixture(), "run" => false))["notebook_id"]
             cnb = EndeavorRuntime.standalone_session().notebooks[UUID(crashing)]
@@ -1327,7 +1198,6 @@ end
             result("allow_execution", Dict("notebook_id" => crashing, "run" => true, "timeout" => 60))
             @test timedwait(() -> !isempty(setdiff(workers(), before)), 60; pollint=0.02) == :ok
             run(`kill -9 $(collect(setdiff(workers(), before)))`)
-            # The start fails when Malt reads no port from it, at the latest after its own 30 s.
             @test timedwait(() -> istaskfailed(Pluto.WorkspaceManager.active_workspaces[cnb.notebook_id]), 60) == :ok
             Pluto.responses[:restart_process](Pluto.ClientRequest(session=EndeavorRuntime.standalone_session(), notebook=cnb); run_async=false)
             @test cnb.process_status == Pluto.ProcessStatus.ready
@@ -1351,7 +1221,7 @@ end
             adapter(method, params) = JSON.parse(String(HTTP.post("http://127.0.0.1:$mcp_port/adapter", [],
                 JSON.json(Dict("method" => method, "params" => params)); readtimeout=120).body))
             result(method, params) = (reply = adapter(method, params); haskey(reply, "error") ? error(reply["error"]) : reply["result"])
-            @test EndeavorRuntime._stop_hook_ok()   # the pinned Pluto; on another, Stop is Pluto's own
+            @test EndeavorRuntime._stop_hook_ok()
             nid = result("open", Dict("path" => fresh_fixture(), "run" => true))["notebook_id"]
             session = EndeavorRuntime.standalone_session()
             nb = session.notebooks[UUID(nid)]
@@ -1373,7 +1243,6 @@ end
                 @test Pluto.Malt.isrunning(worker) && nb.process_status == Pluto.ProcessStatus.ready
                 @test result("snapshot", Dict("notebook_id" => nid))["exited"] === nothing
             end
-            # A late stop doesn't reach the next run: only the cell it meant, and only right away.
             result("apply", Dict("notebook_id" => nid, "ops" => [Dict("op" => "set_code", "cell_id" => Y, "code" => "y = (sleep(3); x * 7)")]))
             result("run", Dict("notebook_id" => nid, "cells" => [Y], "wait" => false, "timeout" => 60))
             @test timedwait(() -> nb.cells_dict[UUID(Y)].running, 60) == :ok
@@ -1401,7 +1270,6 @@ end
     git("-C", work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "registry")
     git("-C", work, "push", "-q", remote, "HEAD:refs/heads/main")
     git("clone", "-q", "--branch", "main", remote, joinpath(theirs, "registries", "Lab"))
-    # A version registered from another computer: a new commit on the registry's remote.
     write(joinpath(work, "Registry.toml"), read(joinpath(work, "Registry.toml"), String) * "# v2\n")
     git("-C", work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "new version")
     git("-C", work, "push", "-q", remote, "HEAD:refs/heads/main")
@@ -1409,9 +1277,7 @@ end
     @test head(joinpath(theirs, "registries", "Lab")) != head(work)
     @test EndeavorRuntime.update_user_registries(; cooldown = 0, depots = [ours, theirs]) == 1
     @test head(joinpath(theirs, "registries", "Lab")) == head(work)
-    # Once per cooldown: a second open soon after doesn't fetch again.
     @test EndeavorRuntime.update_user_registries(; cooldown = 3600, depots = [ours, theirs]) == 0
-    # One we have too is left to Pkg's own update of ours.
     cp(joinpath(theirs, "registries", "Lab"), joinpath(ours, "registries", "Lab"))
     @test EndeavorRuntime.update_user_registries(; cooldown = 0, depots = [ours, theirs]) == 0
 end

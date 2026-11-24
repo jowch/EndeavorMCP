@@ -1,10 +1,3 @@
-//! The agent smoke suite: fixed notebook tasks run through a real agent, judged
-//! from the MCP traffic and the notebooks the agent leaves (docs/smoke.md).
-//!
-//!     endeavor-smoke run [--only N1,N4] [--out DIR] [--julia PATH] [--r PATH] [--skip-r] [--depot DEPOT] [--retries N] [--model MODEL]
-//!     endeavor-smoke mcp ARGS...    the recording proxy, started by the plugin as ENDEAVOR_BIN
-//!     endeavor-smoke dialog WORK    the user's answer to Endeavor's dialogs, a hook the runner sets up
-
 mod checks;
 mod inject;
 mod log;

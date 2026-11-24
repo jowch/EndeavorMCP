@@ -1,4 +1,3 @@
-# Structured cell output for MCP agents (mirrors Pluto frontend ErrorMessage.js where useful).
 
 function _dict_get(d::AbstractDict, key::AbstractString)
     if haskey(d, key)
@@ -33,11 +32,6 @@ function _parse_boundaries(msg::AbstractString)
     return Int[]
 end
 
-"""
-    _structure_error(body) -> Union{Dict{String,Any}, Nothing}
-
-Turn Pluto runner error bodies into agent-friendly structured errors.
-"""
 function _structure_error(body)
     msg = _error_msg(body)
     isempty(msg) && return nothing
@@ -70,8 +64,6 @@ function _structure_error(body)
     return d
 end
 
-# What a snapshot shows of a cell's output. One output this can't summarize mustn't
-# fail the whole snapshot, and with it `list_notebooks` and every read (app #193).
 function _serialize_output(cell)
     try
         __serialize_output(cell)
@@ -103,27 +95,12 @@ function __serialize_output(cell)
     end
 end
 
-# ---------------------------------------------------------------------------
-# Visual outputs (view_cell_output)
-# ---------------------------------------------------------------------------
-
-# Outputs view_cell_output can usually turn into a PNG: PNGs as-is, and SVGs (plots),
-# whose values typically also `show` as PNG. HTML (`md""`, `HTML()`) and other image
-# formats rarely have a PNG form, so read_cell doesn't point agents at the tool for them.
 _is_visual(mime) = mime == MIME("image/png") || mime == MIME("image/svg+xml")
 
-# The smallest embedded PNG that counts as the output's picture: smaller ones are icons
-# and the like, which would stand in for a table or a widget the agent can't see.
 const _EMBEDDED_PNG_MIN = 4_096
-
-# Big outputs and PCRE: a pattern with a lazy `.*?` or `[^>]*?` that has to cross
-# megabytes (a large JPEG data URL, a plot's `<script>`) fails with "match limit
-# exceeded" (app #193). So tags are found with short patterns and plain searches, and
-# no pattern here has to scan an unbounded stretch to give up.
 
 const _PNG_SRC = r"\bsrc\s*=\s*[\"']data:image/png;base64,([A-Za-z0-9+/=]+)[\"']"i
 
-"The `<img …>` tags of an HTML string; an unclosed last one runs to the end."
 function _img_tags(html::AbstractString)
     s = String(html)
     tags = SubString{String}[]
@@ -138,13 +115,6 @@ function _img_tags(html::AbstractString)
     return tags
 end
 
-"""
-    _embedded_png_b64(output) -> Union{SubString, Nothing}
-
-The base64 of the largest PNG an HTML output carries as `<img src="data:image/png;base64,…">`
-(a widget's static render, such as a Masque.jl figure), if it is at least
-`_EMBEDDED_PNG_MIN` bytes and starts with the PNG signature. Read from the stored HTML, so it needs no worker.
-"""
 function _embedded_png_b64(output)
     output.mime == MIME("text/html") && output.body isa AbstractString || return nothing
     best = nothing
@@ -154,7 +124,6 @@ function _embedded_png_b64(output)
         b64 = m.captures[1]
         (best === nothing || sizeof(b64) > sizeof(best)) && (best = b64)
     end
-    # "iVBORw0KGgo" is the PNG signature in base64, so read_cell's pointer and render_png agree.
     best === nothing || sizeof(best) * 3 ÷ 4 < _EMBEDDED_PNG_MIN || !startswith(best, "iVBORw0KGgo") ? nothing : best
 end
 
@@ -165,38 +134,21 @@ function _embedded_png(output)
     return length(png) >= 8 && png[1:8] == UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] ? png : nothing
 end
 
-# What makes HTML interactive: a script, a canvas, or a control (`<bond>` is Pluto's `@bind`).
 const _INTERACTIVE = r"<(script|canvas|input|select|button|textarea|iframe|bond)\b"i
 
-"""
-    _interactive_html(output) -> Bool
-
-Whether an HTML output has scripts or controls (an interactive plot, a widget), so that
-no picture of it shows that it works. Markdown and plain tables have neither.
-"""
 _interactive_html(output) = output.mime == MIME("text/html") && output.body isa AbstractString && occursin(_INTERACTIVE, output.body)
 
-"How long `_cell_png` waits for a worker that is running cells (#62)."
 const _BUSY_RENDER_WAIT = 10.0
 
-"How `_cell_png` says the worker is running cells (`BUSY` in notebooks/tools.rs)."
 const _BUSY = "is busy running cells"
 
-"""
-Renders still waiting on a notebook's worker, by notebook and cell id, with that worker.
-A render that timed out stays queued there (#62), so a retry joins it rather than
-queueing another; after Restart Julia the new worker gets its own.
-"""
 const _RENDERS = Dict{Tuple{Any, String}, Tuple{Any, Task}}()
 const _RENDERS_LOCK = ReentrantLock()
 
-"Asks `worker` for the PNG form of the cell's value, as a task that leaves `_RENDERS` when done."
 function _render_png(worker, cell_id, key)
     @async try
         Pluto.WorkspaceManager.Malt.remote_eval_fetch(worker, quote
             let value = get(PlutoRunner.cell_results, $cell_id, nothing)
-                # `@bind x widget` makes the cell's value Pluto's `Bond`, which shows only as
-                # HTML; the widget inside it may have a picture of its own.
                 value isa PlutoRunner.Bond && (value = value.element)
                 value !== nothing && showable(MIME"image/png"(), value) ?
                     repr(MIME"image/png"(), value) : nothing
@@ -209,17 +161,6 @@ function _render_png(worker, cell_id, key)
     end
 end
 
-"""
-    _cell_png(session, nb, cell) -> (Union{Vector{UInt8}, Nothing}, source)
-
-PNG rendering of a cell's output and where it came from (`"value"` or `"embedded image"`).
-Pluto displays the richest format it can (SVG before PNG for plots), so unless the
-output already is a PNG, ask the notebook's worker to re-render the cell's value as
-`image/png`. A value with no PNG form whose HTML carries one (`_embedded_png`) gives
-that. `nothing` if there is neither; throws `no_image::` if only the worker could
-render it and the notebook has none (safe preview), or if the worker is running cells
-and hasn't rendered it within `_BUSY_RENDER_WAIT` seconds.
-"""
 function _cell_png(session, nb, cell)
     body = cell.output.body
     cell.output.mime == MIME("image/png") && body isa Vector{UInt8} && return (body, "value")
@@ -227,7 +168,6 @@ function _cell_png(session, nb, cell)
     if workspace === nothing
         embedded = _embedded_png(cell.output)
         embedded === nothing || return (embedded, "embedded image")
-        # The app can show the notebook's own picture for this error (`NO_WORKER` in notebooks/tools.rs).
         throw(ArgumentError("no_image::Cell $(cell.cell_id): the notebook " *
             "has no running worker (safe preview or not yet run), so its value can't be rendered"))
     end
@@ -240,9 +180,6 @@ function _cell_png(session, nb, cell)
         _RENDERS[key] = (workspace.worker, asking)
         asking
     end
-    # A worker running cells answers only when they yield, which a long computation may not
-    # do for minutes (#62): then wait a while, not for the run. Without cells running, the
-    # render itself can take long (a first Makie plot compiles), so it's waited for.
     if _cells_running(nb) && timedwait(() -> istaskdone(asked) || !_cells_running(nb), _BUSY_RENDER_WAIT) === :timed_out
         embedded = _embedded_png(cell.output)
         embedded === nothing || return (embedded, "embedded image")
@@ -250,7 +187,6 @@ function _cell_png(session, nb, cell)
             "and didn't render its value within $(round(Int, _BUSY_RENDER_WAIT)) seconds; " *
             "view it again when read_cell says they have finished"))
     end
-    # The worker's own error, as when it was asked without a task.
     png = try
         fetch(asked)
     catch e
@@ -259,10 +195,6 @@ function _cell_png(session, nb, cell)
     png === nothing || return (png, "value")
     return (_embedded_png(cell.output), "embedded image")
 end
-
-# ---------------------------------------------------------------------------
-# Text form of rich outputs (read_cell)
-# ---------------------------------------------------------------------------
 
 const _TEXT_MAX = 16_000
 
@@ -274,7 +206,6 @@ end
 
 const _HTML_ENTITIES = ["&nbsp;" => " ", "&lt;" => "<", "&gt;" => ">", "&quot;" => "\"", "&#39;" => "'", "&amp;" => "&"]
 
-"The character a numeric entity (`&#123;`, `&#x7b;`) names; the entity as it is if it names none."
 function _numeric_entity(entity::AbstractString)
     hex = entity[3] in ('x', 'X')
     code = tryparse(UInt32, entity[(hex ? 4 : 3):end-1]; base = hex ? 16 : 10)
@@ -283,7 +214,6 @@ end
 
 const _SCRIPT_END = Dict("script" => r"</script\s*>"i, "style" => r"</style\s*>"i)
 
-"An HTML string without its `<script>` and `<style>` elements; an unclosed one runs to the end."
 function _without_scripts(html::AbstractString)
     s = String(html)
     out = IOBuffer()
@@ -298,39 +228,21 @@ function _without_scripts(html::AbstractString)
     return String(take!(out))
 end
 
-"Readable text from an HTML string: rows and blocks on their own lines, table cells tab-separated."
 function _html_text(html::AbstractString)
     s = _without_scripts(html)
     s = replace(s, r"</t[dh]>\s*"i => "\t", r"<br\s*/?>"i => "\n", r"</(tr|p|div|li|h[1-6]|pre|table|thead|tbody)>"i => "\n")
-    # `[^<>]`, so a stray `<` costs a scan to the next tag, not to the end. The cost: a tag
-    # whose attribute value holds a `<` (`title="a<b"`) leaves its start in the text. Rare.
     s = replace(s, r"<[^<>]*>" => "")
-    # One pass, so `&amp;#123;` stays `&#123;`. Pluto's Markdown writes `{`, `+` and `=` in
-    # math as `&#123;`, `&#43;` and `&#61;`.
     s = replace(s, _HTML_ENTITIES..., r"&#[0-9]{1,7};|&#[xX][0-9a-fA-F]{1,6};" => _numeric_entity)
     s = join((rstrip(line, (' ', '\t')) for line in split(s, '\n')), '\n')
     s = replace(s, r"\n{3,}" => "\n\n")
     return strip(s)
 end
 
-"""Whether the notebook's worker is running cells or has cells queued to run, which it would
-finish before answering. Cells held for the user's OK to a new package (`_asking`) are
-queued, but wait without running (#506)."""
 function _cells_running(nb)
     held = _asking(nb)
     any(c -> c.running || (c.queued && (held === nothing || c ∉ held.cells)), values(nb.cells_dict))
 end
 
-"""
-    _cell_text(session, nb, cell) -> Union{String, Nothing}
-
-Text form of a cell's output when Pluto shows it as something other than text
-(HTML, tables, trees, images): the value's `text/plain` display, rendered by the
-notebook's worker. `nothing` when the output already is text, or is empty or an error.
-While cells are running or queued to run the worker isn't asked, since it would wait for
-them; stored HTML is stripped to text instead. Cells held for the user's OK to a new
-package (`_asking`) don't count: they wait without running.
-"""
 function _cell_text(session, nb, cell)
     cell.errored && return nothing
     body = cell.output.body
@@ -340,11 +252,9 @@ function _cell_text(session, nb, cell)
     if workspace !== nothing
         cell_id = cell.cell_id
         html = cell.output.mime == MIME("text/html")
-        # A value that shows as HTML but has only the generic text/plain `show`
-        # (`HTML(...)`, most widgets) prints as a struct dump; its stripped HTML reads better.
         text = Pluto.WorkspaceManager.Malt.remote_eval_fetch(workspace.worker, quote
             let value = get(PlutoRunner.cell_results, $cell_id, nothing)
-                value isa PlutoRunner.Bond && (value = value.element)   # as in `_cell_png`
+                value isa PlutoRunner.Bond && (value = value.element)
                 generic = $html && which(show, Tuple{IO, MIME"text/plain", typeof(value)}).module === Base.Multimedia
                 value === nothing || generic ? nothing : sprint(show, MIME"text/plain"(), value;
                     context = (:limit => true, :displaysize => (60, 160)))
@@ -362,20 +272,12 @@ function _cell_output_error(cell)
     return _structure_error(cell.output.body)
 end
 
-# ---------------------------------------------------------------------------
-# What a cell printed and logged (read_cell's `notes`, a run's `warnings`)
-# ---------------------------------------------------------------------------
-
-# Pluto keeps a cell's `println` and `@info`/`@warn`/`@error` in its logs, shown under
-# the cell, apart from its output. A `@warn` such as "rows dropped" the agent never sees
-# lets it report a result as clean (#257). Debug and progress-bar logs are left out.
 const _LOG_KINDS = ("Error" => "logged_error", "Warn" => "logged_warning", "Info" => "logged_info")
-const _STDOUT_LEVEL = "LogLevel(-555)" # PlutoRunner's `stdout_log_level`
-const _LOG_NOTE_MAX = 300   # bytes of one logged message
-const _LOG_NOTES_MAX = 5    # logged messages, errors and warnings first
-const _PRINTED_MAX = 1_000  # bytes of the end of what the cell printed
+const _PLUTO_STDOUT_LOG_LEVEL = "LogLevel(-555)"
+const _LOG_NOTE_MAX_BYTES = 300
+const _LOG_NOTES_MAX = 5
+const _PRINTED_TAIL_BYTES = 1_000
 
-# Without colour codes, and of a line a progress counter rewrote with `\r`, only what it shows last.
 function _no_ansi(s)
     s = replace(s, r"\e\[[0-9;]*[A-Za-z]" => "", "\r\n" => "\n")
     shown(line) = (parts = filter(!isempty, split(line, '\r')); isempty(parts) ? "" : String(last(parts)))
@@ -388,7 +290,6 @@ function _cut_note(s::AbstractString, max::Int)
     return s[1:prevind(s, max + 1)] * " … (cut at $max bytes of $(sizeof(s)))"
 end
 
-# A log's message or a keyword's value as text: Pluto renders them like outputs, `(body, mime)`.
 function _log_text(m)
     m isa Tuple && length(m) == 2 || return nothing
     body, mime = m
@@ -410,14 +311,6 @@ function _log_message(log)
     isempty(kwargs) ? text : "$(strip(text)) ($(join(kwargs, ", ")))"
 end
 
-"""
-    _cell_notes(cell) -> Vector{String}
-
-What the cell's last run printed and logged, each "kind::text": `logged_error`,
-`logged_warning` and `logged_info` (at most `_LOG_NOTES_MAX`, in that order, a message
-repeated given once with its count), then `printed`, the end of its `println` and
-`show` output. Reads Pluto's internals, so a Pluto release that changes them gives none.
-"""
 function _cell_notes(cell)
     try
         __cell_notes(cell)
@@ -433,7 +326,7 @@ function __cell_notes(cell)
     counted = Pair{String,Int}[]
     for (level, kind) in _LOG_KINDS, log in logs
         get(log, "level", nothing) == level || continue
-        note = "$kind::" * _cut_note(_log_message(log), _LOG_NOTE_MAX)
+        note = "$kind::" * _cut_note(_log_message(log), _LOG_NOTE_MAX_BYTES)
         i = findfirst(p -> p.first == note, counted)
         i === nothing ? push!(counted, note => 1) : (counted[i] = note => counted[i].second + 1)
     end
@@ -441,12 +334,12 @@ function __cell_notes(cell)
         push!(notes, n == 1 ? note : "$note (logged $n times)")
     end
     length(counted) > _LOG_NOTES_MAX && (notes[end] *= " ($(length(counted) - _LOG_NOTES_MAX) more messages not shown)")
-    printed = join((something(_log_text(get(log, "msg", nothing)), "") for log in logs if get(log, "level", nothing) == _STDOUT_LEVEL))
+    printed = join((something(_log_text(get(log, "msg", nothing)), "") for log in logs if get(log, "level", nothing) == _PLUTO_STDOUT_LOG_LEVEL))
     printed = strip(_no_ansi(printed))
     if !isempty(printed)
-        if sizeof(printed) > _PRINTED_MAX
-            start = nextind(printed, sizeof(printed) - _PRINTED_MAX)
-            printed = "(the last $(_PRINTED_MAX) bytes of $(sizeof(printed))) …" * printed[start:end]
+        if sizeof(printed) > _PRINTED_TAIL_BYTES
+            start = nextind(printed, sizeof(printed) - _PRINTED_TAIL_BYTES)
+            printed = "(the last $(_PRINTED_TAIL_BYTES) bytes of $(sizeof(printed))) …" * printed[start:end]
         end
         push!(notes, "printed::" * printed)
     end

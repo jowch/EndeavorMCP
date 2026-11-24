@@ -17,7 +17,7 @@ the engine's language and running in the engine's process:
 
 | Engine | Language | Adapter |
 | --- | --- | --- |
-| Pluto | Julia | `runtime/` (`EndeavorRuntime`), built |
+| Pluto | Julia | `runtime/` (`EndeavorRuntime`, [pluto-adapter.md](pluto-adapter.md)), built |
 | marimo | Python | `runtime-py/` ([marimo.md](https://github.com/jowch/Endeavor/blob/main/docs/marimo.md)), not built |
 | Ember (https://github.com/jowch/Ember) | R | `runtime-r/`, not built |
 
@@ -378,7 +378,8 @@ hand out the same port twice).
 ### R
 
 R's adapter (`runtime/r/adapter.R`, with Ember) starts the first time an R
-notebook is opened.
+notebook is opened. How it and Ember's install work is in
+[ember-adapter.md](ember-adapter.md).
 
 - **Ember** comes from its r-universe repository, which builds Ember's latest
   main, into a folder of Endeavor's own (one for Endeavor's own R, kept apart
@@ -439,7 +440,8 @@ notebook is opened.
 ### Python
 
 Python notebooks' adapter (`runtime/marimo/adapter.py`, which runs marimo)
-starts the first time a Python notebook is opened or made. uv runs it, with
+starts the first time a Python notebook is opened or made. How it works is in
+[marimo-adapter.md](marimo-adapter.md). uv runs it, with
 the packages in `requirements.txt`, and each notebook gets its own uv
 environment from its header. uv is found on the PATH, where its installer
 puts it, or in Homebrew's folder.

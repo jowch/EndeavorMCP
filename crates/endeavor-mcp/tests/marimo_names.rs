@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 const ADAPTER: &str = include_str!("../../../runtime/marimo/adapter.py");
 
 fn near_misses(names: &[&str]) -> Option<Vec<String>> {
-    let start = ADAPTER.find("# Import names of widely used packages").unwrap();
+    let start = ADAPTER.find("COMMON_MODULES = ").unwrap();
     let end = ADAPTER.find("def pypi_name(").unwrap();
     let script = format!(
         "import re, sys\n{}\nfor n in sys.stdin.read().split():\n    print(near_miss(n) or '-')\n",

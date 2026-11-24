@@ -1,11 +1,3 @@
-# The Ember adapter end to end: starts runtime/r/adapter.R as the core does,
-# then drives it over HTTP. Run from anywhere:
-#
-#   Rscript runtime/r/test/test.R
-#
-# Needs ember, processx and curl. Uses a temp folder, cache and data dir, so
-# it never touches the user's own; every notebook sticks to base R, so nothing
-# is installed.
 
 suppressPackageStartupMessages({
   library(processx)
@@ -80,7 +72,6 @@ notes <- function(after, timeout = 30) {
   stopifnot(r$status == 200)
   fromJSON(r$body, simplifyVector = FALSE)
 }
-# Notifications after `after` until `done(all so far)` holds or 20 s pass.
 collect <- function(after, done) {
   got <- list()
   end <- Sys.time() + 20
@@ -95,13 +86,9 @@ collect <- function(after, done) {
 cell_of <- function(snap, id) Find(function(c) identical(c$cell_id, id), snap$cells)
 methods_of <- function(ns) vapply(ns, function(n) n$method, character(1))
 
-# ---- Auth ----
-
 check("401 without the token", http("POST", "/adapter", '{"method":"status"}', auth = FALSE)$status == 401)
 check("401 for notifications without the token", http("GET", "/notifications", auth = FALSE)$status == 401)
 check("400 for a body that isn't JSON", http("POST", "/adapter", "{nope")$status == 400)
-
-# ---- status, new, open ----
 
 s <- result("status")
 check("status: running, no notebooks, seq", identical(s$ember, "running") && length(s$notebooks) == 0 && is.numeric(s$seq))
@@ -115,7 +102,6 @@ named <- result("new", list(folder = dir))
 check("new in a folder: notebook.R", identical(basename(named$path), "notebook.R"))
 check("new over an existing file: file_exists", startsWith(call("new", list(path = made$path))$error, "ArgumentError: file_exists::"))
 
-# An existing Ember notebook, written as Ember writes them.
 existing <- file.path(dir, "existing.R")
 writeLines(c(
   "### An Ember notebook ###", "# /// environment", '# ember_version = "0.0.0.9000"',
@@ -135,8 +121,6 @@ check("notebook_opened for each, with its path",
       sum(methods_of(opened_notes) == "notebook_opened") == 3 &&
       any(vapply(opened_notes, function(n) identical(n$params$path, existing), logical(1))))
 
-# ---- snapshot ----
-
 all <- result("snapshot")
 check("snapshot of all: three notebooks and seq", length(all$notebooks) == 3 && is.numeric(all$seq))
 snap <- result("snapshot", list(notebook_id = nid))
@@ -151,8 +135,6 @@ check("snapshot of an unknown notebook: notebook_not_found KeyError",
       startsWith(call("snapshot", list(notebook_id = "00000000-0000-4000-8000-000000000000"))$error, "KeyError: key \"notebook_not_found::"))
 check("an invalid notebook id: invalid_notebook_id",
       startsWith(call("graph", list(notebook_id = "nope"))$error, "ArgumentError: invalid_notebook_id::"))
-
-# ---- run before allowing, allow_execution, run with wait ----
 
 blocked <- result("run", list(notebook_id = nid, cells = list(ids[3]), wait = TRUE, timeout = 30))
 check("run in safe preview: not accepted", identical(blocked$accepted, FALSE) && identical(blocked$process_status, "waiting_for_permission"))
@@ -169,8 +151,6 @@ check("the cell ran (and its ancestors): output [1] 110", grepl("110", c3$output
 check("last_run is when the run ended, runtime in ns", abs(c3$last_run - as.numeric(Sys.time())) < 120 && c3$runtime < 120e9)
 check("process ready", identical(snap$process_status, "ready") && isTRUE(snap$execution_allowed))
 
-# Code a notebook runs (in Ember's worker, which inherits the adapter's environment) can't read the
-# core's token, Ember's secret or the state file's path.
 peek <- result("apply", list(notebook_id = nid, ops = list(list(op = "insert", index = 3,
   code = "cat(sprintf('token=[%s] secret=[%s] state=[%s]', Sys.getenv('ENDEAVOR_TOKEN'), Sys.getenv('ENDEAVOR_EMBER_SECRET'), Sys.getenv('ENDEAVOR_R_STATE')))", folded = FALSE))))
 peek_id <- peek$inserted[[1]]
@@ -179,16 +159,12 @@ peeked <- Find(function(c) identical(c$cell_id, peek_id), result("snapshot", lis
 check("a notebook's code sees no token, secret or state file", grepl("token=[] secret=[] state=[]", peeked, fixed = TRUE))
 result("apply", list(notebook_id = nid, ops = list(list(op = "delete", cell_id = peek_id))))
 
-# ---- graph ----
-
 g <- result("graph", list(notebook_id = nid, edges = TRUE, packages = TRUE))
 node <- function(g, id) Find(function(n) identical(n$cell_id, id), g$cells)
 check("graph: definitions, references, edges", identical(unlist(node(g, ids[2])$definitions), "y") &&
       "x" %in% unlist(node(g, ids[2])$references) && identical(unlist(node(g, ids[2])$upstream), ids[1]) &&
       identical(unlist(node(g, ids[2])$downstream), ids[3]))
 check("graph: order and errable", identical(unlist(g$order), ids) && length(g$errable) == 0)
-
-# ---- apply: set code, insert, delete, move ----
 
 before <- result("status")$seq
 applied <- result("apply", list(notebook_id = nid, ops = list(
@@ -225,7 +201,6 @@ check("cell_state from the edit is numbered below apply's seq",
                  function(n) n$seq < applied$seq, logical(1))))
 check("topology_changed and file_saved", all(c("topology_changed", "file_saved") %in% methods_of(ns)))
 
-# edit_cell with `folded`: set_code and fold in one batch, a code cell and a text one.
 invisible(result("apply", list(notebook_id = nid, ops = list(
   list(op = "set_code", cell_id = ids[3], code = "#' # Title", expected = "y * 3"),
   list(op = "fold", cell_id = ids[3], folded = FALSE)))))
@@ -237,8 +212,6 @@ invisible(result("apply", list(notebook_id = nid, ops = list(
 cell <- cell_of(result("snapshot", list(notebook_id = nid)), ids[3])
 check("apply: set_code and fold a code cell", identical(cell$code, "y * 3") && isTRUE(cell$folded))
 invisible(result("apply", list(notebook_id = nid, ops = list(list(op = "fold", cell_id = ids[3], folded = FALSE)))))
-
-# ---- run without waiting: execution_done, run_finished ----
 
 after_edit <- result("status")$seq
 going <- result("run", list(notebook_id = nid, cells = list(new_id), wait = FALSE, timeout = 30))
@@ -254,8 +227,6 @@ check("the new cell's output", grepl("56", cell_of(snap, new_id)$output))
 check("run without wait: the run is named", is.character(going$run) && nzchar(going$run))
 check("run_finished names the run", !is.null(fin) && identical(fin$params$run, going$run))
 
-# ---- an autorun run goes on through its dependents (#151) ----
-
 auto <- file.path(dir, "auto.R")
 writeLines(c(
   "### An Ember notebook ###", "# /// environment", '# on_cell_change = "autorun"', "# ///", "",
@@ -269,13 +240,10 @@ down <- "55555555-5555-4555-8555-555555555555"
 r <- result("run", list(notebook_id = aid, cells = list(up, down), wait = TRUE, timeout = 60))
 last_run <- function() cell_of(result("snapshot", list(notebook_id = aid)), down)$last_run
 before_run <- last_run()
-# A waited run of the upstream cell returns once its dependent has run too, as Pluto's does.
 r <- result("run", list(notebook_id = aid, cells = list(up), wait = TRUE, timeout = 60))
 check("a waited run covers the dependent Ember queues", length(r$timed_out) == 0 && last_run() > before_run &&
       !isTRUE(cell_of(result("snapshot", list(notebook_id = aid)), down)$running))
-# Nothing left running from before, so the run below is timed alone.
 idle <- function() !any(vapply(result("snapshot", list(notebook_id = aid))$cells, function(c) isTRUE(c$running) || isTRUE(c$queued), logical(1)))
-# The deadline only keeps a broken run from hanging the test.
 deadline <- Sys.time() + 60
 while (!idle() && Sys.time() < deadline) Sys.sleep(0.1)
 before_run <- last_run()
@@ -289,8 +257,6 @@ check("an unwaited run ends after its dependent, which sleeps 2 s", !is.null(goi
 check("run_finished lists the run's own cells", identical(unlist(fin$params$cells), up))
 invisible(result("shutdown", list(notebook_id = aid)))
 
-# ---- allow_execution names the run of the notebook it starts (#170) ----
-
 aid <- result("open", list(path = auto, run = FALSE))$notebook_id
 seq_before <- result("status")$seq
 allowed <- result("allow_execution", list(notebook_id = aid, run = TRUE, timeout = 30))
@@ -298,8 +264,6 @@ ns <- collect(seq_before, function(ns) any(vapply(ns, function(n) identical(n$me
 check("allow_execution with a run names it, and its run_finished comes once the cells ran",
       isTRUE(allowed$ran) && is.character(allowed$run) && idle())
 invisible(result("shutdown", list(notebook_id = aid)))
-
-# ---- errors, render_text, render_png, validate ----
 
 err <- result("apply", list(notebook_id = nid, ops = list(list(op = "insert", index = 4, code = "stop(\"boom\")", folded = FALSE),
                                                           list(op = "insert", index = 5, code = "plot(1:3)", folded = FALSE))))
@@ -310,7 +274,6 @@ check("an error: errored, structured, message as output", isTRUE(ec$errored) && 
       identical(ec$error$msg, "boom") && identical(ec$output, "boom"))
 pc <- cell_of(snap, err$inserted[[2]])
 check("a plot: placeholder output", grepl("^\\[image/png output, [0-9]+ bytes; call view_cell_output", pc$output))
-# An error names what failed (#288): a code cell's call, or a text cell's inline span.
 calls <- result("apply", list(notebook_id = nid, ops = list(
   list(op = "insert", index = 6, code = "#' see `r stop(\"boom\")`", folded = FALSE),
   list(op = "insert", index = 7, code = "fails <- function() stop(\"x\")\nfails()", folded = FALSE))))
@@ -320,7 +283,6 @@ span_err <- cell_of(snap, calls$inserted[[1]])$error
 code_err <- cell_of(snap, calls$inserted[[2]])$error
 check("a text cell's failed inline span: its call is the span", identical(span_err$call, "`r stop(\"boom\")`") && identical(span_err$line, 1L))
 check("a code cell's error: its call is R's", identical(code_err$call, "fails()"))
-# One delete per edit: two in one edit fail in Ember once the cells have run (Ember #637).
 for (id in calls$inserted) invisible(result("apply", list(notebook_id = nid, ops = list(list(op = "delete", cell_id = id)))))
 png <- result("render_png", list(notebook_id = nid, cell_id = err$inserted[[2]]))
 check("render_png: base64 PNG", identical(png$mime, "image/png") && identical(as.integer(base64_dec(png$png)[2:4]), c(0x50L, 0x4eL, 0x47L)))
@@ -334,7 +296,6 @@ check("validate: a syntax error", length(v$errors) == 1 && identical(v$errors[[1
 check("validate: fine code", length(result("validate", list(notebook_id = nid, cell_id = ids[3], code = "x + 1"))$errors) == 0)
 check("validate: an unknown cell", startsWith(call("validate", list(notebook_id = nid, cell_id = "x", code = "1"))$error, "KeyError: key \"cell_not_found::"))
 check("unknown method", startsWith(call("frobnicate", list(notebook_id = nid))$error, "ArgumentError: unknown_method::"))
-# The notebook view's page: Ember's view_page(), or, from an Ember before it, a plain "update" error.
 page <- call("page_bundle", list(notebook_id = nid))
 if (is.null(get0("view_page", envir = asNamespace("ember"), mode = "function"))) {
   check("page_bundle from an old Ember: update_ember", startsWith(page$error, "ArgumentError: update_ember::"))
@@ -350,10 +311,7 @@ check("a warning reads as one, before the value", grepl("^Warning: careful\n\\[1
 r <- result("run", list(notebook_id = nid, cells = list(ids[3]), wait = TRUE, timeout = 60))
 r <- result("run", list(notebook_id = nid, cells = list(ids[2]), wait = TRUE, timeout = 60))
 snap <- result("snapshot", list(notebook_id = nid))
-# existing.R is lazy, so the stale result stays stale (in autorun Ember would rerun it on its own).
 check("a result made before its ancestor last ran: stale", isTRUE(cell_of(snap, ids[3])$stale) && identical(cell_of(snap, ids[2])$stale, FALSE))
-
-# ---- a long run: timeout, interrupt ----
 
 slow <- result("apply", list(notebook_id = nid, ops = list(list(op = "insert", index = 6, code = "Sys.sleep(30)", folded = FALSE))))
 t0 <- Sys.time()
@@ -363,8 +321,6 @@ check("run with a short timeout: timed out, returns", length(r$completed) == 0 &
 check("interrupt: something was running", isTRUE(result("interrupt", list(notebook_id = nid))$interrupted))
 ns <- collect(result("status")$seq - 5, function(ns) "run_finished" %in% methods_of(ns))
 check("run_finished once the interrupted run ends", "run_finished" %in% methods_of(ns))
-
-# ---- the notebook's R ending by itself ----
 
 killer <- result("apply", list(notebook_id = nid, ops = list(list(op = "insert", index = 0, code = "tools::pskill(Sys.getpid())", folded = FALSE))))
 before <- result("status")$seq
@@ -378,8 +334,6 @@ check("snapshot: exited, no_process", identical(unlist(snap$exited), killer$inse
 invisible(result("apply", list(notebook_id = nid, ops = list(list(op = "delete", cell_id = killer$inserted[[1]])))))
 r <- result("run", list(notebook_id = nid, cells = list(ids[3]), wait = TRUE, timeout = 60))
 check("a run after that starts a new R", identical(unlist(r$completed), ids[3]) && is.null(result("snapshot", list(notebook_id = nid))$exited))
-
-# ---- move, restart, shutdown ----
 
 target <- file.path(dir, "moved.R")
 check("move", identical(result("move", list(notebook_id = nid, path = target))$path, target) && file.exists(target) && !file.exists(existing))
@@ -395,8 +349,6 @@ ns <- collect(before, function(ns) "notebook_shut_down" %in% methods_of(ns))
 check("notebook_shut_down", any(vapply(ns, function(n) n$method == "notebook_shut_down" && identical(n$params$notebook_id, nid), logical(1))))
 check("gone after shutdown", startsWith(call("snapshot", list(notebook_id = nid))$error, "KeyError: key \"notebook_not_found::"))
 check("status: two left", length(result("status")$notebooks) == 2)
-
-# ---- the long poll waits ----
 
 now <- result("status")$seq
 t0 <- Sys.time()
