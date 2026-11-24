@@ -1472,7 +1472,7 @@ const UV_OFFER: (&str, &str) = (
 
 const UV_OFFER_IN_APP: (&str, &str) = (
     "python_not_found::Python notebooks need uv, which isn't installed on this computer. Endeavor can download its own uv if the user agrees: ",
-    ". Tell the user to click Install uv in the notebook pane, or to install uv themselves (https://docs.astral.sh/uv/getting-started/installation/). Once it's installed, open the notebook again.",
+    ". Tell the user to start a new Python session in Endeavor and click Install uv in its notebook pane, or to install uv themselves (https://docs.astral.sh/uv/getting-started/installation/). Once it's installed, open the notebook again.",
 );
 
 fn uv_offer(item: &wire::Item) -> String {
@@ -2588,7 +2588,7 @@ mod tests {
         assert_eq!(offer_for(&offer, false), offer);
         let app = offer_for(&offer, true);
         assert!(app.starts_with("python_not_found::") && !app.contains("use_machine"), "{app}");
-        assert!(app.contains("click Install uv in the notebook pane") && app.contains(&item.to_string()) && app.contains("docs.astral.sh/uv"), "{app}");
+        assert!(app.contains("start a new Python session in Endeavor and click Install uv in its notebook pane") && app.contains(&item.to_string()) && app.contains("docs.astral.sh/uv"), "{app}");
         assert_eq!(offer_for(NO_UV, true), NO_UV);
     }
 
