@@ -915,9 +915,17 @@ fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
         assert!(failed && text.contains("not yet in the Endeavor app"), "{text}");
     });
     let notebook = step("the plugin's session opens it there", || {
-        let (failed, text) = call("plugin", "open_notebook", json!({ "path": path }));
-        assert!(!failed, "{text}");
-        let opened: Value = serde_json::from_str(&text).unwrap();
+        let began = Instant::now();
+        let opened = loop {
+            let (failed, text) = call("plugin", "open_notebook", json!({ "path": path }));
+            assert!(!failed, "{text}");
+            let opened: Value = serde_json::from_str(&text).unwrap();
+            if opened["error"] != "python_installing" {
+                break opened;
+            }
+            assert!(began.elapsed() < Duration::from_secs(300), "marimo didn't start: {opened}");
+            std::thread::sleep(Duration::from_millis(500));
+        };
         assert!(opened["notebook_id"].is_string(), "{opened}");
         let (failed, text) = call("plugin", "get_cell_order", json!({ "notebook_id": opened["notebook_id"] }));
         assert!(!failed && text.contains("cell_ids"), "marimo answers through the app's core: {text}");
