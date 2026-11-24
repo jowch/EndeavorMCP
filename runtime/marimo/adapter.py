@@ -35,6 +35,35 @@ POLL_HOLD = 25
 NOTES_KEPT = 500
 TEXT_MAX = 20_000
 
+MARIMO_ON_LOOPBACK = """
+import functools, inspect, os, sys
+from marimo._environments import backends
+from marimo._server import lsp
+from marimo._utils import net
+
+def moved(what):
+    sys.exit(f"Endeavor: marimo's {what} moved, so Endeavor can't keep marimo on 127.0.0.1")
+
+if lsp.find_free_port is not net.find_free_port or "addr" not in inspect.signature(net.find_free_port).parameters:
+    moved("language-server port search")
+if next(iter(inspect.signature(backends.launch_server).parameters), None) != "args":
+    moved("server relaunch")
+lsp.find_free_port = functools.partial(net.find_free_port, addr="127.0.0.1")
+launch_server = backends.launch_server
+
+def relaunch_on_loopback(args, **options):
+    if list(args[:2]) != ["-m", "marimo"]:
+        moved("server relaunch")
+    return launch_server(["-c", os.environ["ENDEAVOR_MARIMO_CLI"], *args[2:]], **options)
+
+backends.launch_server = relaunch_on_loopback
+"""
+
+MARIMO_CLI = MARIMO_ON_LOOPBACK + """
+from marimo._cli.cli import main
+main(prog_name="marimo")
+"""
+
 MARIMO_CONFIG = """[runtime]
 on_cell_change = "lazy"
 auto_instantiate = false
@@ -142,11 +171,11 @@ class Marimo:
         token_file = self.config / "token"
         token_file.write_text(self.token)
         token_file.chmod(0o600)
-        env = {**os.environ, "XDG_CONFIG_HOME": str(self.config), "MARIMO_SKIP_UPDATE_CHECK": "1"}
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.config), "MARIMO_SKIP_UPDATE_CHECK": "1", "ENDEAVOR_MARIMO_CLI": MARIMO_CLI}
         env.pop("ENDEAVOR_TOKEN", None)
         env.pop("ENDEAVOR_MARIMO_TOKEN", None)
         self.child = asyncio.subprocess.create_subprocess_exec(
-            sys.executable, "-m", "marimo", "-q", "edit", ROOT, "--headless", "--sandbox", "--watch",
+            sys.executable, "-c", MARIMO_CLI, "-q", "edit", ROOT, "--headless", "--sandbox", "--watch",
             "--skip-update-check", "--host", "127.0.0.1", "--port", str(self.port), "--base-url", BASE_URL,
             "--token-password-file", str(token_file), env=env, stdin=asyncio.subprocess.DEVNULL)
 

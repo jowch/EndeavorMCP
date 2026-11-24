@@ -238,3 +238,61 @@ fn a_python_notebook_runs_on_windows_and_stop_ends_marimo() {
     assert!(!running(adapter), "the adapter outlived the runtime");
     assert!(!listening(page) && !listening(bridge), "marimo's server outlived the runtime");
 }
+
+const ADAPTER: &str = include_str!("../../../runtime/marimo/adapter.py");
+
+fn marimo_python(script: &str) -> String {
+    let start = ADAPTER.find("MARIMO_ON_LOOPBACK = \"\"\"").unwrap() + "MARIMO_ON_LOOPBACK = \"\"\"".len();
+    let shim = &ADAPTER[start..start + ADAPTER[start..].find("\"\"\"").unwrap()];
+    let requirements = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/marimo/requirements.txt");
+    let out = Command::new("uv")
+        .args(["run", "--quiet", "--no-project", "--python", "3.12", "--with-requirements"])
+        .arg(requirements)
+        .args(["python", "-I", "-c", script])
+        .env("ENDEAVOR_SHIM", shim)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+const BINDS: &str = r#"
+import os, socket
+binds = set()
+bind = socket.socket.bind
+def recorded(self, address):
+    binds.add(address[0])
+    return bind(self, address)
+socket.socket.bind = recorded
+if os.environ.get("SHIMMED"):
+    exec(os.environ["ENDEAVOR_SHIM"], {})
+from marimo._server import lsp
+lsp.CompositeLspServer(None, 47100)
+print(",".join(sorted(binds)))
+"#;
+
+#[test]
+#[ignore = "installs marimo: cargo test -p endeavor-mcp --test e2e_marimo_windows -- --ignored"]
+fn marimos_language_servers_look_for_ports_on_loopback_only() {
+    if !has_uv() {
+        eprintln!("SKIPPED: no uv.");
+        return;
+    }
+    let unshimmed = marimo_python(BINDS);
+    assert!(unshimmed.split(',').any(|addr| addr != "127.0.0.1"), "marimo now looks on loopback itself ({unshimmed}); the shim can go");
+    let shimmed = marimo_python(&format!("import os\nos.environ['SHIMMED'] = '1'\n{BINDS}"));
+    assert_eq!(shimmed, "127.0.0.1");
+}
+
+#[test]
+#[ignore = "installs marimo: cargo test -p endeavor-mcp --test e2e_marimo_windows -- --ignored"]
+fn marimos_sandboxed_server_is_relaunched_with_the_loopback_shim() {
+    if !has_uv() {
+        eprintln!("SKIPPED: no uv.");
+        return;
+    }
+    let relaunched = marimo_python(
+        "import os\nos.environ['ENDEAVOR_MARIMO_CLI'] = 'cli'\nshimmed = {}\nexec(os.environ['ENDEAVOR_SHIM'], shimmed)\nshimmed['launch_server'] = lambda args, **options: args\nfrom marimo._environments import backends\nprint(' '.join(backends.launch_server(['-m', 'marimo', '-q', 'edit'], backend='uv')))\n",
+    );
+    assert_eq!(relaunched, "-c cli -q edit");
+}
