@@ -530,8 +530,8 @@ Next:
   ones do; marimo's page is reached through the same forwarded port. On a
   server with no uv the offer names that machine, and `use_machine` with
   `install: true` there passes the user's yes to download uv along with
-  Julia's. In the app, the offer names the computer the notebook runs on by its
-  host name. In a Slurm job Endeavor doesn't download uv: the core itself tells
+  Julia's. In the app, the offer says uv is missing on the computer the notebook
+  runs on, not on "this computer", since that may be a server. In a Slurm job Endeavor doesn't download uv: the core itself tells
   the agent to ask the user to install uv on the cluster, in the app too, and the
   plugin names the machine (`tests/e2e_machines.rs` covers a server with no uv,
   #589). A uv that is found but won't start is `python_failed`.

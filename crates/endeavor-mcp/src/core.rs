@@ -1507,13 +1507,9 @@ const UV_OFFER: (&str, &str) = (
 const NO_UV_IN_JOB: &str = "python_not_found::Python notebooks need uv, which isn't installed on this cluster, and Endeavor can't download its own into a Slurm job. Ask the user to install uv on this cluster (https://docs.astral.sh/uv/getting-started/installation/), then make this call again.";
 
 const UV_OFFER_IN_APP: (&str, &str) = (
-    "python_not_found::Python notebooks need uv, which isn't installed on {host}, the computer this notebook runs on. Endeavor can download its own uv there if the user agrees: ",
+    "python_not_found::Python notebooks need uv, which isn't installed on the computer this notebook runs on. Endeavor can download its own uv there if the user agrees: ",
     ". Tell the user to start a new Python session in Endeavor and click Install uv in its notebook pane, or to install uv themselves (https://docs.astral.sh/uv/getting-started/installation/). Once it's installed, open the notebook again.",
 );
-
-fn uv_offer_in_app(item: &str, host: &str) -> String {
-    format!("{}{item}{}", UV_OFFER_IN_APP.0.replace("{host}", host), UV_OFFER_IN_APP.1)
-}
 
 fn uv_offer(item: &wire::Item) -> String {
     format!("{}{item}{}", UV_OFFER.0, UV_OFFER.1)
@@ -1535,7 +1531,7 @@ pub(crate) fn uv_offer_on(message: &str, machine: &str) -> Option<String> {
 
 pub(crate) fn offer_for(error: &str, app: bool) -> std::borrow::Cow<'_, str> {
     if let Some(item) = error.strip_prefix(UV_OFFER.0).and_then(|rest| rest.strip_suffix(UV_OFFER.1)).filter(|_| app) {
-        return uv_offer_in_app(item, &crate::hostname()).into();
+        return format!("{}{item}{}", UV_OFFER_IN_APP.0, UV_OFFER_IN_APP.1).into();
     }
     own_r_offer_for(error, app)
 }
@@ -2680,9 +2676,7 @@ mod tests {
         let app = offer_for(&offer, true);
         assert!(app.starts_with("python_not_found::") && !app.contains("use_machine"), "{app}");
         assert!(app.contains("start a new Python session in Endeavor and click Install uv in its notebook pane") && app.contains(&item.to_string()) && app.contains("docs.astral.sh/uv"), "{app}");
-        assert!(app.contains(&format!("isn't installed on {}, the computer this notebook runs on", crate::hostname())) && !app.contains("this computer."), "{app}");
-        let named = uv_offer_in_app("uv", "lab");
-        assert!(named.contains("isn't installed on lab, the computer") && !named.contains("{host}"), "{named}");
+        assert!(app.contains("isn't installed on the computer this notebook runs on") && !app.contains("this computer."), "a server's offer doesn't say it's the user's computer: {app}");
         assert_eq!(offer_for(NO_UV, true), NO_UV);
         assert_eq!(offer_for(NO_UV_IN_JOB, true), NO_UV_IN_JOB, "a job never offers Install uv");
     }
