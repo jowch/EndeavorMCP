@@ -1696,4 +1696,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(), loop_factory=asyncio.ProactorEventLoop if sys.platform == "win32" else None)
