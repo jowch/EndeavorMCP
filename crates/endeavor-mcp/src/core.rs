@@ -1219,6 +1219,8 @@ const INSTALL_FAILED: &str = "r_failed::Couldn't install Ember for R notebooks; 
 
 const NO_COMPILER: &str = "r_failed::Couldn't install Ember for R notebooks: it has to be built on this computer, and there is no compiler here to build it. The runtime's log has the details.";
 
+const MARIMO_PYTHON: &str = "3.12";
+
 struct MarimoStarter {
     adapter: PathBuf,
     requirements: PathBuf,
@@ -1376,7 +1378,7 @@ impl MarimoStarter {
         let _ = std::fs::remove_file(&self.state);
         let secret = ember_secret().map_err(|e| format!("python_failed::{e}"))?;
         let mut command = Command::new(uv);
-        command.args(["run", "--quiet", "--no-project", "--with-requirements"]).arg(&self.requirements).arg("python").arg(&self.adapter);
+        command.args(["run", "--quiet", "--no-project", "--python", MARIMO_PYTHON, "--with-requirements"]).arg(&self.requirements).arg("python").arg(&self.adapter);
         command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_MARIMO_TOKEN", &secret).env("ENDEAVOR_MARIMO_STATE", &self.state).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
         if !cfg!(debug_assertions) {
             command.env_remove("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS");
@@ -2523,6 +2525,13 @@ mod tests {
         assert!(standalone.starts_with("r_not_found::") && standalone.contains("`use_machine`") && standalone.contains("R 4.6.1 (about 165 MB"), "{standalone}");
         let app = own_r_offer(&item, true);
         assert!(app.starts_with("r_not_found::") && app.contains("Install R in the notebook pane") && app.contains("Settings under Notebooks, then R") && !app.contains("use_machine"), "{app}");
+    }
+
+    #[test]
+    fn marimo_runs_on_the_python_its_requirements_were_compiled_for_not_whatever_python_uv_finds_first() {
+        let requirements = include_str!("../../../runtime/marimo/requirements.txt");
+        let compiled_for = requirements.lines().next().and_then(|header| header.split("--python-version ").nth(1)).and_then(|rest| rest.split_whitespace().next());
+        assert_eq!(compiled_for, Some(MARIMO_PYTHON), "a Mac with only its own Python 3.9 can't install requirements compiled for a newer one");
     }
 
     #[test]
