@@ -13,8 +13,8 @@ and where Endeavor keeps its files.
   plugin) are embedded in the binary, so `serve` and `mcp` work from the one
   file, and the app takes both from this crate. Each one's version names the
   folder it is unpacked to: the package version and a hash of its files
-  (`wire::tree`). Python's caches (`__pycache__/`, `*.pyc`) are left out, so
-  running the marimo adapter locally doesn't change a build's versions (#584).
+  (`wire::tree`). Python's caches (`__pycache__/`, `*.pyc`) and Finder's `.DS_Store` are left
+  out, so a local run or a look in Finder doesn't change a build's versions (#584).
 - `BUILD_VERSION` names the whole build the same way, hashing the Rust source
   (this crate's and `wire`'s) with both folders, since the package version
   alone doesn't change between builds.
