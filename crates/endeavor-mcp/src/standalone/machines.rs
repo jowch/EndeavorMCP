@@ -941,6 +941,10 @@ impl Relay {
             parsed["result"] = tool_error(&text, false);
             changed = true;
         }
+        if let Some(text) = self.uv_offer_here(&parsed["result"]) {
+            parsed["result"]["content"][0]["text"] = text.into();
+            changed = true;
+        }
         if let Some(notice) = self.notice.lock().unwrap().take() {
             match parsed["result"]["content"].as_array_mut() {
                 Some(content) => content.push(json!({ "type": "text", "text": notice })),
@@ -949,6 +953,17 @@ impl Relay {
             changed = true;
         }
         if changed { to_json(&parsed) } else { reply }
+    }
+
+    fn uv_offer_here(&self, result: &Value) -> Option<String> {
+        let machine = self.current();
+        if machine.is_local() || result["isError"] != true {
+            return None;
+        }
+        let mut said: Value = serde_json::from_str(result["content"][0]["text"].as_str()?).ok()?;
+        let cluster = self.connections.get(&machine.id).is_some_and(|session| session.cluster());
+        said["message"] = crate::core::uv_offer_on(said["message"].as_str()?, &machine.id, cluster)?.into();
+        Some(to_json(&said))
     }
 
     fn no_r_text(&self) -> Option<String> {
@@ -1441,7 +1456,7 @@ impl Relay {
                     notes.push(note);
                 }
             } else {
-                let leaves: &[(&str, &str)] = if local { &[("endeavor/allow_r_install", "install R"), ("endeavor/allow_uv_install", "download uv")] } else { &[("endeavor/allow_julia_install", "download Julia")] };
+                let leaves: &[(&str, &str)] = if local { &[("endeavor/allow_r_install", "install R"), ("endeavor/allow_uv_install", "download uv")] } else { &[("endeavor/allow_julia_install", "download Julia"), ("endeavor/allow_uv_install", "download uv")] };
                 for (call, what) in leaves {
                     if let Err(e) = crate::bridge_rpc(runtime.port, &runtime.token, call, json!({})) {
                         notes.push(format!("Couldn't pass the user's leave to {what} on to {name} ({e}); calling use_machine again with `install: true` tries again."));

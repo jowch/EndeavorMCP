@@ -1231,7 +1231,6 @@ struct MarimoStarter {
     requirements: PathBuf,
     state: PathBuf,
     token: String,
-    this_computer: bool,
     #[cfg(unix)]
     mask: Option<libc::sigset_t>,
     spawn: Spawner,
@@ -1277,7 +1276,6 @@ impl MarimoStarter {
             requirements: folder.join("requirements.txt"),
             state: args.state_dir.join(MARIMO_STATE),
             token: token.to_owned(),
-            this_computer: args.own_r,
             #[cfg(unix)]
             mask: None,
             spawn: Spawner::new(),
@@ -1289,9 +1287,6 @@ impl MarimoStarter {
     }
 
     fn start(&self, served: &Served, first: Option<&Path>, until: std::time::Instant) -> Result<Arc<dyn crate::notebooks::Upstream>, String> {
-        if served.bridge.standalone.is_none() && !self.this_computer {
-            return Err("unsupported::Python notebooks work with the Endeavor plugin on this computer (`endeavor serve` or `endeavor mcp`), not yet on a server".into());
-        }
         let mut pending = self.pending.lock().unwrap();
         if pending.is_none() {
             let uv = self.uv(served, until)?;
@@ -1479,6 +1474,15 @@ const NO_UV_IN_APP: &str = "python_not_found::Python notebooks need uv, which is
 
 fn uv_offer(item: &wire::Item) -> String {
     format!("{}{item}{}", UV_OFFER.0, UV_OFFER.1)
+}
+
+pub(crate) fn uv_offer_on(message: &str, machine: &str, cluster: bool) -> Option<String> {
+    let before = UV_OFFER.0.split_once("::").map_or(UV_OFFER.0, |(_, said)| said);
+    let (item, tail) = message.strip_prefix(before)?.split_once(UV_OFFER.1)?;
+    if cluster {
+        return Some(format!("Python notebooks need uv, which isn't installed on {machine}, and Endeavor can't download its own into a Slurm job. Ask the user to install uv on {machine} (https://docs.astral.sh/uv/getting-started/installation/), then make this call again.{tail}"));
+    }
+    Some(format!("{before}{item}{}{tail}", UV_OFFER.1.replace("\"local\"", &format!("\"{machine}\""))))
 }
 
 pub(crate) fn offer_for(error: &str, app: bool) -> std::borrow::Cow<'_, str> {
@@ -2582,6 +2586,20 @@ mod tests {
         let app = offer_for(&offer, true);
         assert!(app.starts_with("python_not_found::") && !app.contains("use_machine") && app.contains("docs.astral.sh/uv"), "{app}");
         assert_eq!(offer_for(NO_UV, true), NO_UV);
+    }
+
+    #[test]
+    fn a_machines_uv_offer_names_that_machine_and_a_clusters_asks_the_user_to_install_uv() {
+        let item = wire::Item { kind: wire::KIND_RUNTIME.into(), name: "uv 0.11.32".into(), size_mb: Some(22), place: Some("/x/uv-0.11.32".into()) };
+        let raw = crate::mcp::tool_error(&uv_offer(&item), true);
+        let said: serde_json::Value = serde_json::from_str(raw["content"][0]["text"].as_str().unwrap()).unwrap();
+        let message = said["message"].as_str().unwrap();
+        let server = uv_offer_on(message, "lab", false).unwrap();
+        assert!(server.contains("`use_machine` with `machine` \"lab\" and `install: true`") && !server.contains("\"local\"") && server.contains("uv 0.11.32"), "{server}");
+        assert!(server.ends_with(&message[message.find(UV_OFFER.1).unwrap() + UV_OFFER.1.len()..]), "the help after the offer stays: {server}");
+        let cluster = uv_offer_on(message, "hpc", true).unwrap();
+        assert!(cluster.contains("install uv on hpc") && !cluster.contains("use_machine"), "{cluster}");
+        assert_eq!(uv_offer_on(NO_UV.split_once("::").unwrap().1, "lab", false), None);
     }
 
     #[test]
