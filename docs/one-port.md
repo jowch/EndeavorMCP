@@ -327,8 +327,7 @@ answers itself.
   anything after it (a pipelined request) stays for the next.
 - A relayed event stream gives up as soon as the client hangs up: it may
   write nothing for a long time, and the upstream end should close with it.
-  This isn't ported to Windows (it needs WSAPoll), so there a client that hangs
-  up is noticed only when a write to it fails.
+  On Windows the same watch uses `WSAPoll`.
 - `100 Continue` comes before the real response.
 - The loopback calls the core and helper make have a deadline for the whole
   exchange, each read waiting only for what is left.

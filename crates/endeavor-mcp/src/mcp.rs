@@ -801,8 +801,11 @@ fn closed(socket: &TcpStream) -> bool {
 }
 
 #[cfg(windows)]
-fn closed(_socket: &TcpStream) -> bool {
-    false
+fn closed(socket: &TcpStream) -> bool {
+    match http::winsock::wait(&[socket], 0) {
+        Ok(revents) => matches!(http::winsock::peek(socket, revents[0]), http::winsock::Peeked::Closed),
+        Err(_) => true,
+    }
 }
 
 pub(crate) fn post(

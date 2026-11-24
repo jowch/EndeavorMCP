@@ -423,7 +423,6 @@ pub fn tunnel(client: &mut BufReader<wire::Shared>, upstream: &mut BufReader<wir
     Ok(())
 }
 
-#[cfg_attr(windows, allow(dead_code))]
 enum Readable {
     Upstream,
     ClientClosed,
@@ -431,7 +430,53 @@ enum Readable {
 }
 
 #[cfg(windows)]
-fn wait_readable(_upstream: &TcpStream, _client: &TcpStream, _watch_client: bool) -> io::Result<Readable> {
+pub(crate) mod winsock {
+    use std::io;
+    use std::net::TcpStream;
+    use std::os::windows::io::AsRawSocket;
+
+    use windows_sys::Win32::Networking::WinSock::{MSG_PEEK, POLLERR, POLLHUP, POLLRDNORM, SOCKET, WSAPOLLFD, WSAPoll, recv};
+
+    pub(crate) enum Peeked {
+        Quiet,
+        Sent,
+        Closed,
+    }
+
+    pub(crate) fn wait(sockets: &[&TcpStream], timeout_ms: i32) -> io::Result<Vec<i16>> {
+        let mut fds: Vec<WSAPOLLFD> = sockets.iter().map(|socket| WSAPOLLFD { fd: socket.as_raw_socket() as SOCKET, events: POLLRDNORM, revents: 0 }).collect();
+        // SAFETY: `fds` holds one valid WSAPOLLFD per socket we own, and its length is passed with it.
+        if unsafe { WSAPoll(fds.as_mut_ptr(), fds.len() as u32, timeout_ms) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(fds.iter().map(|fd| fd.revents).collect())
+    }
+
+    pub(crate) fn peek(socket: &TcpStream, revents: i16) -> Peeked {
+        if revents == 0 {
+            return Peeked::Quiet;
+        }
+        if revents & POLLRDNORM == 0 {
+            return if revents & (POLLHUP | POLLERR) != 0 { Peeked::Closed } else { Peeked::Quiet };
+        }
+        let mut byte = 0u8;
+        // SAFETY: peeks at most one byte into `byte`; the poll said the socket is readable, so recv doesn't block.
+        let n = unsafe { recv(socket.as_raw_socket() as SOCKET, &raw mut byte, 1, MSG_PEEK) };
+        if n > 0 { Peeked::Sent } else { Peeked::Closed }
+    }
+}
+
+#[cfg(windows)]
+fn wait_readable(upstream: &TcpStream, client: &TcpStream, watch_client: bool) -> io::Result<Readable> {
+    let watched: &[&TcpStream] = if watch_client { &[upstream, client] } else { &[upstream] };
+    let revents = winsock::wait(watched, -1)?;
+    if watch_client {
+        match winsock::peek(client, revents[1]) {
+            winsock::Peeked::Sent => return Ok(Readable::ClientSent),
+            winsock::Peeked::Closed => return Ok(Readable::ClientClosed),
+            winsock::Peeked::Quiet => {}
+        }
+    }
     Ok(Readable::Upstream)
 }
 
