@@ -1119,14 +1119,35 @@ fn python_notebooks_are_refused_to_the_apps_sessions_and_not_to_the_plugins_on_o
     let plugin = [("X-Endeavor-Session", "8"), ("X-Endeavor-Client", "plugin")];
     for (id, tool) in [(1, "open_notebook"), (2, "new_notebook")] {
         let refused = text(&mcp(&core, &call(id, tool, "/w/fit.py"), &app).1);
-        assert!(refused.contains(r#""error":"unsupported""#) && refused.contains("not yet in the Endeavor app"), "{tool}: {refused}");
+        assert!(refused.contains(r#""error":"unsupported""#) && refused.contains("This version of the Endeavor app"), "{tool}: {refused}");
         let theirs = text(&mcp(&core, &call(id + 10, tool, "/w/fit.py"), &plugin).1);
-        assert!(!theirs.contains("not yet in the Endeavor app"), "the plugin's {tool} isn't refused for the app's sake: {theirs}");
+        assert!(!theirs.contains("This version of the Endeavor app"), "the plugin's {tool} isn't refused for the app's sake: {theirs}");
     }
-    assert!(!text(&mcp(&core, &call(3, "open_notebook", "/w/fit.jl"), &app).1).contains("not yet in the Endeavor app"));
+    assert!(!text(&mcp(&core, &call(3, "open_notebook", "/w/fit.jl"), &app).1).contains("This version of the Endeavor app"));
     app_call(&core, r#"{"jsonrpc":"2.0","id":4,"method":"endeavor/set_session_folder","params":{"owner":"7","folder":"/w","kind":"python"}}"#);
     let made = app_call(&core, r#"{"jsonrpc":"2.0","id":5,"method":"endeavor/new_notebook","params":{"owner":"7"}}"#);
-    assert!(made.contains("unsupported") && made.contains("not yet in the Endeavor app"), "{made}");
+    assert!(made.contains("unsupported") && made.contains("This version of the Endeavor app"), "{made}");
+}
+
+#[test]
+fn an_app_session_that_shows_python_opens_and_makes_python_notebooks() {
+    let dir = state_dir("core-python-shown");
+    let bridge = FakeBridge::start(&dir);
+    let core = Core::start(&dir, &bridge);
+    let call = |id: u32, name: &str, path: &str| format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{"path":"{path}"}}}}}}"#);
+    let refused = |reply: &str| reply.contains("This version of the Endeavor app");
+    let shows = [("X-Endeavor-Session", "7"), ("X-Endeavor-Client", "app")];
+    let older = [("X-Endeavor-Session", "9"), ("X-Endeavor-Client", "app")];
+    app_call(&core, r#"{"jsonrpc":"2.0","id":1,"method":"endeavor/set_session_folder","params":{"owner":"7","folder":"/w","kind":"python","shows_python":true}}"#);
+    app_call(&core, r#"{"jsonrpc":"2.0","id":2,"method":"endeavor/set_session_folder","params":{"owner":"9","folder":"/w","kind":"python"}}"#);
+    for (id, tool) in [(3, "open_notebook"), (4, "new_notebook")] {
+        assert!(!refused(&mcp(&core, &call(id, tool, "/w/fit.py"), &shows).1), "{tool}");
+        assert!(refused(&mcp(&core, &call(id + 10, tool, "/w/fit.py"), &older).1), "an app session that didn't say so is still refused: {tool}");
+    }
+    assert!(!refused(&app_call(&core, r#"{"jsonrpc":"2.0","id":5,"method":"endeavor/new_notebook","params":{"owner":"7"}}"#)));
+    assert!(!refused(&mcp(&core, &call(8, "open_notebook", "/w/fit.py"), &[("X-Endeavor-Client", "app")]).1), "the app's own open, of a file its user picked");
+    app_call(&core, r#"{"jsonrpc":"2.0","id":6,"method":"endeavor/set_session_folder","params":{"owner":"7","folder":"/w","shows_python":false}}"#);
+    assert!(refused(&mcp(&core, &call(7, "open_notebook", "/w/fit.py"), &shows).1), "said again, it holds");
 }
 
 #[test]

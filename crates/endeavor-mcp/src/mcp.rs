@@ -71,7 +71,7 @@ pub(crate) fn refuses_r_for_want_of_it(tool: &str, arguments: &Value, result: &V
         && result["content"].as_array().is_some_and(|content| content.iter().any(|c| c["text"].as_str().is_some_and(|text| text.contains("must end in .jl") && !text.contains("or .R"))))
 }
 
-pub(crate) const PYTHON_NOT_IN_APP: &str = "ArgumentError: unsupported::Python notebooks work with the Endeavor plugin on this computer (`endeavor serve` or `endeavor mcp`), not yet in the Endeavor app";
+pub(crate) const PYTHON_NOT_IN_APP: &str = "ArgumentError: unsupported::This version of the Endeavor app doesn't show Python notebooks yet. The Endeavor plugin on this computer does (`endeavor serve` or `endeavor mcp`)";
 
 fn opens_python(tool: &str, arguments: &Value, kind: Option<wire::backend::Backend>) -> bool {
     use wire::backend::Backend;
@@ -110,10 +110,6 @@ pub(crate) fn browser_link(port: u16, target: &str) -> String {
     format!("http://localhost:{port}{target}")
 }
 
-pub(crate) fn query_value(value: &str) -> String {
-    value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
-}
-
 pub(crate) fn entry_link(url: &str, token: &str) -> String {
     let join = if url.contains('?') { '&' } else { '?' };
     format!("{url}{join}token={token}")
@@ -133,6 +129,7 @@ pub struct Bridge {
     pub token: String,
     policies: Mutex<HashMap<String, Policy>>,
     folders: Mutex<HashMap<String, Option<String>>>,
+    sessions_showing_python: Mutex<std::collections::HashSet<String>>,
     results: Results,
     starting_calls: Mutex<HashMap<String, (String, Value, Instant)>>,
     shell_env: Vec<(&'static str, Option<String>)>,
@@ -259,6 +256,7 @@ impl Bridge {
             token,
             policies: Mutex::default(),
             folders: Mutex::default(),
+            sessions_showing_python: Mutex::default(),
             results: Results::default(),
             starting_calls: Mutex::default(),
             shell_env,
@@ -266,6 +264,10 @@ impl Bridge {
             on_folder: std::sync::OnceLock::new(),
             views: crate::views::Views::default(),
         }
+    }
+
+    fn shows_python(&self, owner: &str) -> bool {
+        self.sessions_showing_python.lock().unwrap().contains(owner)
     }
 
     fn folder(&self, owner: &str) -> Folder {
@@ -360,6 +362,10 @@ impl Bridge {
                     }
                     None => self.notebooks.kind(&owner),
                 };
+                if let Some(shows) = params["shows_python"].as_bool() {
+                    let mut showing = self.sessions_showing_python.lock().unwrap();
+                    if shows { showing.insert(owner.clone()) } else { showing.remove(&owner) };
+                }
                 let mut folders = self.folders.lock().unwrap();
                 if params["no_folder"] == true {
                     folders.insert(owner, None);
@@ -401,7 +407,7 @@ impl Bridge {
             "endeavor/file_info" => return Some(answer(notebooks::file_info(&text("path", "")))),
             "endeavor/new_notebook" => {
                 let owner = text("owner", "");
-                if opens_python("new_notebook", &json!({}), self.notebooks.kind(&owner)) {
+                if !self.shows_python(&owner) && opens_python("new_notebook", &json!({}), self.notebooks.kind(&owner)) {
                     return Some(answer(Err(PYTHON_NOT_IN_APP.to_owned())));
                 }
                 let folder = self.folder(&owner);
@@ -588,7 +594,7 @@ impl Bridge {
                     wire::backend::Backend::Pluto => format!("/edit?id={id}"),
                     wire::backend::Backend::Ember => format!("/ember/edit?id={id}"),
                     wire::backend::Backend::Marimo => match fields.get("path").and_then(Value::as_str) {
-                        Some(path) => format!("/marimo/?file={}", query_value(path)),
+                        Some(path) => format!("/marimo/?file={}", wire::backend::query_value(path)),
                         None => return,
                     },
                 },
@@ -659,7 +665,7 @@ impl Bridge {
         if host_tools::NAMES.contains(&tool) && caller.host.is_empty() {
             return Some(host_tool_refusal(tool));
         }
-        if caller.app && opens_python(tool, arguments, self.notebooks.kind(&caller.owner)) {
+        if caller.app && !caller.owner.is_empty() && !self.shows_python(&caller.owner) && opens_python(tool, arguments, self.notebooks.kind(&caller.owner)) {
             return Some(PYTHON_NOT_IN_APP.to_owned());
         }
         let plan = self.policies.lock().unwrap().get(&caller.owner).is_some_and(|p| p.policy == "plan");
@@ -1218,7 +1224,7 @@ mod tests {
 
     #[test]
     fn the_notebook_tools_names_and_arguments_are_those_of_the_cores_interface() {
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (48, "31806aaaff1c73b0"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (49, "31806aaaff1c73b0"), "see the comment in this test");
     }
 
     fn code(source: &str) -> &str {
@@ -1258,7 +1264,7 @@ mod tests {
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result", "use_julia",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (48, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (49, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]
