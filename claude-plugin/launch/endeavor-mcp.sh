@@ -1,44 +1,9 @@
 #!/bin/sh
-# The plugin's MCP command in every agent: runs `endeavor mcp` with the
-# arguments it is given, getting the binary first if this computer has none for
-# the plugin's build.
-#
-#   endeavor-mcp.sh --skills plugin --folder DIR   run the server
-#   endeavor-mcp.sh --fetch-only                   only get the binary
-#   endeavor-mcp.sh --hook                         Claude Code's PreToolUse hook
-#
-# The hook gives the binary the hook's input, so the server learns Claude
-# Code's permission mode. It runs only a binary that is already here, prints
-# nothing, and always exits 0: it never fetches, and never stops a tool call.
-#
-# The build is the first line of release-key, next to this file. Empty or
-# missing, it is the newest build: one that is already here is used without
-# asking the network, and --fetch-only looks for a newer one. Unpinned, a start
-# also asks for a newer one in the background, once a day, after starting the
-# server; the result applies from the next start.
-# The lines after the key, written by the Helpers pin job, are each
-# platform's SHA-256 in sha256sum's form; a pinned download is checked against
-# them rather than against the release's own checksum file.
-#
-# Binaries live in ${XDG_DATA_HOME:-~/.local/share}/endeavor/bin/<key>/, the
-# same for every agent (XDG_DATA_HOME counts only if it is an absolute path).
-# They are fetched by install.sh, next to this file, under a lock so that two
-# starts download once.
-#
-# ENDEAVOR_BIN names a binary to run instead, to try the plugin before a
-# release holds its build. ENDEAVOR_RELEASE_URL (tests and development) fetches
-# from another release, into bin-from/<its address>/ beside bin/, so that it
-# can't put a binary where a normal start would run it.
-#
-# stdout belongs to the MCP server: it is sent to stderr until the exec, which
-# gets it back.
 set -eu
 
 exec 3>&1 1>&2
 
 here=$(cd "$(dirname "$0")" && pwd)
-# A start runs only a binary in its own folder (or ENDEAVOR_BIN), so a copy
-# installed elsewhere wouldn't help: the advice is to fetch into that folder.
 manual="Run this in a terminal to download it, then reconnect the server: sh \"$here/endeavor-mcp.sh\" --fetch-only"
 
 hook=
@@ -53,7 +18,6 @@ fail() {
   exit 1
 }
 
-# A build's key is hexadecimal; it is used as a folder name.
 is_key() {
   case $1 in
     '' | *[!0-9a-fA-F]*) return 1 ;;
@@ -102,7 +66,6 @@ if [ -n "$key" ] && ! is_key "$key"; then
   fail "release-key in $here doesn't hold a build's key."
 fi
 
-# The binary to run, or nothing.
 have() {
   bin=
   if [ -n "$key" ]; then
@@ -114,14 +77,11 @@ have() {
   [ -n "$bin" ] && [ -x "$bin" ]
 }
 
-# A build from before the hook says it doesn't know `hook`: that is no failure either.
 if [ -n "$hook" ]; then
   ! have || "$bin" hook 3>&- || true
   exit 0
 fi
 
-# Once a day, unpinned: look for a newer build in a process of its own, which
-# neither holds the server's input and output nor delays its start.
 check_later() {
   [ -z "$key" ] && [ -d "$base" ] || return 0
   [ -z "$(find "$base/.checked" -mmin -1440 2>/dev/null)" ] || return 0
@@ -135,7 +95,6 @@ run() {
   exec "$bin" mcp "$@" 1>&3 3>&-
 }
 
-# A fetch-only start asks for a newer build when none is pinned.
 if have && { [ -n "$key" ] || [ -z "$fetch_only" ]; }; then
   run "$@"
 fi
@@ -143,8 +102,6 @@ fi
 mkdir -p "$base" || fail "couldn't create $base. $manual"
 lock=$base/.lock
 
-# Whether the lock, whose owner is $1 (empty when none is written yet), is stale. The lock folder is
-# made when the lock is taken, and its age is the lock's.
 stale() {
   if [ -z "$1" ]; then
     [ -n "$(find "$lock" -maxdepth 0 -mmin +2 2>/dev/null)" ]
@@ -156,14 +113,11 @@ stale() {
 waited=0
 until err=$(mkdir "$lock" 2>&1); do
   if [ ! -d "$lock" ]; then
-    # The owner may have just let go of it.
     err=$(mkdir "$lock" 2>&1) && break
     [ -d "$lock" ] || fail "can't make $lock, so $base can't be written ($err). $manual"
   fi
   owner=$(cat "$lock/pid" 2>/dev/null || true)
   if stale "$owner"; then
-    # One start at a time removes a stale lock, and looks at it again first: by then it may be
-    # another start's, just taken, with no pid in it yet. That one is never moved or removed.
     if mkdir "$lock.take" 2>/dev/null; then
       trap 'rmdir "$lock.take" 2>/dev/null; exit 1' INT TERM HUP
       if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$owner" ] && stale "$owner"; then
@@ -173,7 +127,6 @@ until err=$(mkdir "$lock" 2>&1); do
       trap - INT TERM HUP
       continue
     fi
-    # Left by a start that was killed while removing a lock.
     [ -z "$(find "$lock.take" -maxdepth 0 -mmin +1 2>/dev/null)" ] || rmdir "$lock.take" 2>/dev/null || true
   fi
   if [ "$waited" -ge 25 ]; then
@@ -181,13 +134,11 @@ until err=$(mkdir "$lock" 2>&1); do
   fi
   sleep 1
   waited=$((waited + 1))
-  # The other start may have finished.
   if have && { [ -n "$key" ] || [ -z "$fetch_only" ]; }; then
     run "$@"
   fi
 done
 
-# Only a lock this start made is removed.
 unlock() {
   if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$$" ]; then
     rm -rf "$lock"
@@ -197,7 +148,6 @@ trap unlock EXIT
 trap 'unlock; exit 1' INT TERM HUP
 echo $$ >"$lock/pid"
 
-# A download cut short leaves its temporary folder behind.
 find "$base" -maxdepth 1 -name '.endeavor-install.*' -mmin +60 -exec rm -rf {} + >/dev/null 2>&1 || true
 
 if [ ! -f "$here/install.sh" ]; then
@@ -216,9 +166,7 @@ if have; then
   unlock
   run "$@"
 fi
-# install.sh exits 3 when the release is reachable but doesn't hold the pinned build.
 if [ "$status" -eq 3 ]; then
-  # Each agent's copy of the plugin has its own manifest beside launch/.
   root=$(dirname "$here")
   if [ -d "$root/.claude-plugin" ]; then
     update="In Claude Code, run \`claude plugin marketplace update endeavor\` and then \`claude plugin update endeavor@endeavor\`."

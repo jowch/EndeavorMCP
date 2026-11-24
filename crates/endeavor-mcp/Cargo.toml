@@ -3,7 +3,6 @@ name = "endeavor-mcp"
 version.workspace = true
 edition = "2024"
 
-# The package can't be named `endeavor`: Endeavor's app package is, and it depends on this one.
 [[bin]]
 name = "endeavor"
 path = "src/main.rs"
@@ -13,13 +12,9 @@ wire = { path = "../wire" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
-# The name of the cookie that lets a browser in, from the token.
 sha2 = "0.10"
-# The notebook view's socket messages and Pluto's page, which come as base64.
 base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
-# Random bytes for the bridge token and MCP session ids (Unix reads /dev/urandom).
 getrandom = "0.3"
-# The runtime's processes: a Job Object, pids checked against start times, and the byte lock on starting.lock.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading"] }

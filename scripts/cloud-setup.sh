@@ -1,29 +1,12 @@
 #!/bin/bash
-# Provisions a Claude Code cloud VM (Ubuntu 24.04, x86_64, root) for work on
-# Endeavor and EndeavorMCP: the Linux libraries the app builds against, Xvfb
-# to run it without a display, Julia for the notebook runtime, R for R
-# notebooks, and marimo for the planned Python backend. How it is used, and the network hosts it
-# needs: https://github.com/jowch/Endeavor/blob/main/docs/cloud.md
-#
-# Safe to run more than once: each step checks first. It never fails the
-# session: a step that can't finish says why on stderr and the rest go on.
-# Keep it under about five minutes, or the environment's cache isn't kept.
-#
-# --no-gui skips the app's Linux libraries and Xvfb (EndeavorMCP needs only
-# Julia, R and marimo). EndeavorMCP keeps a copy of this file; change both.
 set -uo pipefail
 GUI=1
 [ "${1:-}" = --no-gui ] && GUI=0
 
-# Bump with JULIA_VERSION and TARBALLS in EndeavorMCP's
-# crates/endeavor-mcp/src/julia.rs (and the app's src/runtime.rs).
 JULIA_VERSION=1.12.6
 JULIA_URL=https://julialang-s3.julialang.org/bin/linux/x64/1.12/julia-1.12.6-linux-x86_64.tar.gz
 JULIA_SHA256=bbabf3bef19421a9dbd24a767d807606ab85e444323b5a1c73ffe293fa3d079a
-# The version docs/marimo.md is designed against. runtime-py's uv.lock will
-# pin it once that exists; until then this is the one agents try things with.
 MARIMO_VERSION=0.25.1
-# Bump with rust-toolchain.toml (both repositories pin the same one).
 RUST_TOOLCHAIN=1.98.1
 
 say() { echo "cloud-setup: $*" >&2; }
@@ -34,7 +17,6 @@ if [ "$(uname -s)-$(uname -m)" != Linux-x86_64 ]; then
 fi
 if [ "$(id -u)" = 0 ]; then SUDO=; else SUDO="sudo -n"; fi
 
-# The set docs/linux.md lists, plus Xvfb, Openbox and the screenshot tools.
 APT_PACKAGES=(
   build-essential clang cmake pkg-config libssl-dev
   libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev
@@ -43,8 +25,6 @@ APT_PACKAGES=(
   libjavascriptcoregtk-4.1-dev libxdo-dev mesa-vulkan-drivers
   xvfb openbox imagemagick xdotool jq
 )
-# R from Ubuntu's archive, with the packages Ember needs that Ubuntu has
-# (runtime/r/install.R in EndeavorMCP builds the rest, RcppMsgPack, from CRAN).
 R_PACKAGES=(
   r-base-core build-essential r-cran-bh r-cran-commonmark r-cran-curl r-cran-httpuv
   r-cran-jsonlite r-cran-later r-cran-processx r-cran-promises r-cran-renv
@@ -92,19 +72,16 @@ marimo_toolchain() {
     return 0
   fi
   say "installing marimo $MARIMO_VERSION"
-  # Into /usr/local/bin, so it is on every shell's PATH.
   UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --quiet --force "marimo==$MARIMO_VERSION" ||
     say "couldn't install marimo"
 }
 
-# The pinned toolchain (rust-toolchain.toml) comes without clippy and rustfmt.
 rust_components() {
   command -v rustup >/dev/null || return 0
   rustup toolchain install --profile minimal -c clippy -c rustfmt "$RUST_TOOLCHAIN" >/dev/null 2>&1 ||
     say "couldn't add clippy and rustfmt"
 }
 
-# Independent, so in parallel: the cache is only kept under about five minutes.
 apt_packages &
 julia_toolchain &
 marimo_toolchain &

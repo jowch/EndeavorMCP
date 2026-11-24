@@ -1,8 +1,3 @@
-# Runs scripts/prune-helpers.sh by hand: it lists the Helpers release's files
-# for builds nothing pins any more and, with "delete" ticked, removes them.
-# Read the list from a run without "delete" first; a deleted file can't be
-# brought back. The Helpers workflow also prunes, once the release passes 700
-# files, when the repository variable PRUNE_HELPERS_AUTO is true.
 name: Prune helpers
 
 on:
@@ -13,10 +8,6 @@ on:
         type: boolean
         default: false
 
-# Its own group: in Helpers' group, a run queued here would cancel a Helpers run
-# that is waiting (GitHub keeps one waiting run per group), and that build would
-# never be published. Pruning needs no lock: it deletes only files from its own
-# listing, which a build published meanwhile isn't in.
 concurrency:
   group: prune-helpers
   cancel-in-progress: false

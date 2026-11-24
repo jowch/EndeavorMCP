@@ -116,6 +116,9 @@ folder.
   Linux or macOS, so its paths follow `/` rules whatever the app's computer
   uses, and the app carries them as strings (`server_path`). On Windows a
   `PathBuf` would put `\` into them and read `C:` as a drive.
+- `files::real_path` is a canonical path as Julia's `realpath` gives it. On
+  Windows that is `dunce::canonicalize`, since std's adds a `\\?\` prefix
+  that Julia's paths never have, and the two must compare equal.
 - `Folder` makes a session's folder only when the folder it goes in is there.
   When that one is missing too, the path is more likely mistyped, or another
   computer's, than new.

@@ -1,44 +1,4 @@
 #!/bin/sh
-# Install endeavor from the Helpers release on GitHub, for Linux and macOS
-# (Windows: scripts/install.ps1).
-#
-#   curl -fsSL https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/install.sh | sh
-#   curl -fsSL .../install.sh | sh -s -- --dir /some/folder
-#
-# It reads LATEST from the release (or takes the build from --key, or from
-# main's pin, below), downloads
-# endeavor-<key>-<platform> and endeavor-<key>.sha256, checks the SHA-256, and
-# puts the binary in DIR as `endeavor` (`endeavor.exe` under Git Bash on
-# Windows), replacing one that is there. DIR is --dir, else
-# $ENDEAVOR_INSTALL_DIR, else ~/.local/bin. No sudo, and no shell file is
-# edited: if DIR isn't on your PATH, the line to add is printed.
-#
-# The plugin's launcher (endeavor-mcp.sh) calls it with --quiet --into BASE:
-# the binary goes to BASE/<key>/endeavor, only if that isn't there already,
-# and with no --key BASE/.newest is set to the key LATEST named. --quiet
-# writes everything to stderr, since stdout belongs to the MCP server.
-#
-# --sums FILE gives the checksums to check against, in sha256sum's form (other
-# lines are ignored). The launcher passes its release-key, where the Helpers
-# pin job writes each platform's SHA-256 under the key. Then the check doesn't
-# depend on the release, and catches a release changed after the pin as well as a damaged
-# download. A FILE with no checksums in it (a pin from before they were
-# written) counts as none.
-#
-# Run by hand (no --into) with no --sums, it reads release-key from main, the
-# same place this script comes from, and when that holds checksums it installs
-# the build it names (not LATEST's) and checks it against them: the build the
-# plugins run, checked the way they check it. With --key, main's checksums are
-# used when main pins that build; for another build it says so. If
-# release-key can't be read or holds no checksums, nothing is installed:
-# ENDEAVOR_PIN_URL=none skips the pin.
-#
-# ENDEAVOR_RELEASE_URL replaces the release's address (for tests and
-# development; file:// works), and ENDEAVOR_PIN_URL the address of main's
-# release-key (none or empty: no pin); with only the first set, no pin is
-# read. Without checksums from a pin, the checksum file comes from the same
-# release as the binary, so the check catches a damaged download and not a
-# tampered release.
 set -eu
 
 release=${ENDEAVOR_RELEASE_URL:-https://github.com/jowch/EndeavorMCP/releases/download/helpers}
@@ -62,7 +22,6 @@ fail() {
   exit 1
 }
 
-# A build's key is hexadecimal; it is used as a folder name.
 is_key() {
   case $1 in
     '' | *[!0-9a-fA-F]*) return 1 ;;
@@ -148,8 +107,6 @@ if [ "$os" = windows ]; then
   suffix=.exe
 fi
 
-# limited SECONDS COMMAND...: COMMAND, given up on after SECONDS. Without
-# `timeout`, a watchdog ends it and then ends itself and its sleep.
 limited() {
   secs=$1
   shift
@@ -174,12 +131,6 @@ limited() {
   return "$status"
 }
 
-# fetch URL [FILE]: the body to FILE, or to stdout. A connection that doesn't
-# open in 15 s is given up on, and so is a file that takes over 15 minutes
-# (a build is about 5 MB). From https, a redirect is followed only to https:
-# curl refuses any other; GNU Wget has no such switch, so it prints the
-# headers (-S) and a download that went through one is thrown away; Wget2
-# prints none under -q, and is told to keep to https instead.
 fetch() {
   if command -v curl >/dev/null 2>&1; then
     if [ $# -ge 2 ]; then
@@ -210,9 +161,6 @@ fetch() {
   fi
 }
 
-# redirect_not_https URL <HEADERS: prints the first redirect in wget's -S
-# headers for URL that went somewhere other than https, and fails if there is
-# none. A relative one keeps the scheme of the address it came from.
 redirect_not_https() {
   awk -v url="$1" '
     BEGIN { https = (tolower(substr(url, 1, 8)) == "https://"); found = 0 }
@@ -244,12 +192,10 @@ tmp=$(mktemp -d "$dir/.endeavor-install.XXXXXX") || fail "couldn't write in $dir
 trap 'rm -rf "$tmp"' EXIT
 trap 'rm -rf "$tmp"; exit 1' INT TERM HUP
 
-# The folder's .newest names the build the plugin runs when it isn't pinned.
 set_newest() {
   printf '%s\n' "$key" >"$into/.newest.$$" && mv -f "$into/.newest.$$" "$into/.newest" || fail "couldn't write $into/.newest."
 }
 
-# Who pins the checksums in $sums, and where they came from, for the errors.
 pinner="the plugin"
 sums_from=$sums
 if [ -z "$into" ] && [ -z "$sums" ] && [ -n "$pin_url" ]; then
@@ -286,18 +232,11 @@ if [ -n "$into" ]; then
   mkdir -p "$dir" || fail "couldn't create $dir."
 fi
 
-# Exit 3 tells the launcher that the release answered but doesn't hold this
-# build for this platform: either it is newer than the release (a build from
-# main is published a few minutes after the push) or it is old and was removed
-# (prune-helpers.sh removes the macOS and Windows files days before the rest).
 not_held() {
   echo "install.sh: the release doesn't hold build $key for $platform. A new build appears a few minutes after it is pushed; an old one may have been removed." >&2
   exit 3
 }
 
-# Whether fetch's exit status $1 means the server answered that the file isn't
-# there (curl: an HTTP error, or a file:// path that can't be read; wget: an
-# error response), rather than the network failing.
 is_missing() {
   if command -v curl >/dev/null 2>&1; then
     [ "$1" -eq 22 ] || [ "$1" -eq 37 ]
@@ -307,8 +246,6 @@ is_missing() {
 }
 
 name=endeavor-$key-$platform$suffix
-# sum_of FILE: the SHA-256 FILE lists for $name, if any. A Windows checkout
-# can give release-key CRLF line ends.
 sum_of() {
   awk -v n="$name" '{ sub(/\r$/, ""); f = $2; sub(/^\*/, "", f); if (f == n && $1 ~ /^[0-9a-fA-F]+$/ && length($1) == 64) { print tolower($1); exit } }' "$1"
 }

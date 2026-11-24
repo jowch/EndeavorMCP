@@ -6,6 +6,9 @@ and where Endeavor keeps its files.
 
 ## What a build carries (`build.rs`)
 
+- The binary is `endeavor`, in the package `endeavor-mcp`. The package can't
+  be named `endeavor`: that is Endeavor's app package, which depends on this
+  one.
 - `runtime/` (the Julia side) and `plugin/` (the skills as a Claude Code
   plugin) are embedded in the binary, so `serve` and `mcp` work from the one
   file, and the app takes both from this crate. Each one's version names the
