@@ -66,11 +66,11 @@ fn forwarded_file(dir: &Path, port: u16) -> PathBuf {
     dir.join("forwarded").join(format!("{port}.json"))
 }
 
-pub(crate) fn remember_forwarded(dir: &Path, port: u16, machine: &str, page_token: &str) -> Result<(), String> {
+pub(crate) fn remember_forwarded(dir: &Path, port: u16, machine: &str, page_token: &str) -> Result<PathBuf, String> {
     let file = forwarded_file(dir, port);
     let record = json!({ "machine": machine, "page_token": page_token, "pid": std::process::id(), "started": crate::own_start_time(), "boot": crate::own_boot(), "node": crate::hostname() });
     if std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).is_some_and(|known| known == record) {
-        return Ok(());
+        return Ok(file);
     }
     let folder = file.parent().unwrap_or(dir);
     std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't create {}: {e}", folder.display()))?;
@@ -79,7 +79,8 @@ pub(crate) fn remember_forwarded(dir: &Path, port: u16, machine: &str, page_toke
             let _ = std::fs::remove_file(stale);
         }
     }
-    crate::core::write_private(&file, serde_json::to_string(&record).unwrap_or_default().as_bytes())
+    crate::core::write_private(&file, serde_json::to_string(&record).unwrap_or_default().as_bytes())?;
+    Ok(file)
 }
 
 fn forwarder(file: &Path) -> Option<(String, String)> {

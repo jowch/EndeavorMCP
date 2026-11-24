@@ -1207,7 +1207,7 @@ impl Relay {
         let var = |name: &str| std::env::var(name).ok();
         if !in_view && (failed || !browser::shows(var)) {
             let dir = self.options.state_dir();
-            let forwarded = route.host.as_deref().map(|machine| browser::remember_forwarded(&dir, route.port, machine, &route.page_token).map(|()| route.port));
+            let forwarded = route.host.as_deref().map(|machine| self.connections.forward(route.port, || browser::remember_forwarded(&dir, route.port, machine, &route.page_token)).map(|()| route.port));
             if let Some(Err(e)) = &forwarded {
                 eprintln!("endeavor: {e}");
             }

@@ -2850,11 +2850,20 @@ fn a_front_over_ssh_tells_how_to_open_a_machines_notebook_through_its_own_port()
     assert_eq!(std::fs::read_to_string(&opened).unwrap().trim(), format!("http://localhost:{port}/?token={pages}"), "the machine's key, at this computer's port");
     let file = place.local_state.join(format!("forwarded/{port}.json"));
     assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
-    front.finish();
 
-    let out = open();
-    let said = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success() && said.contains(&format!("forwards port {port}")) && !said.contains(&pages), "once the session ends, the port could be anyone's: {said}");
+    front.ok("stop_machine", json!({ "machine": "lab" }));
+    place.machines().save(Server { id: "lab".into(), name: "lab".into(), ssh_host: "lab2".into(), julia: Some(place.julia.display().to_string()), ..Default::default() }).unwrap();
+    assert_eq!(front.ok("use_machine", json!({ "machine": "lab", "folder": place.project.display().to_string() }))["state"], "ready");
+    let moved = front.ok("open_notebook", json!({ "path": path }));
+    assert!(!moved["browser_url"].as_str().unwrap_or_default().contains(&format!(":{port}/")), "a new connection, on a new port: {moved}");
+    assert!(!file.exists(), "the old connection's port is let go, and its key with it");
+    let refused = |out: std::process::Output| {
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success() && said.contains(&format!("forwards port {port}")) && !said.contains(&pages), "the port could be anyone's now: {said}");
+    };
+    refused(open());
+    front.finish();
+    assert_eq!(std::fs::read_dir(place.local_state.join("forwarded")).unwrap().count(), 0, "no key is left once the session ends");
 }
 
 #[test]
