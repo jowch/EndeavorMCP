@@ -7,6 +7,6 @@
     { "check": "output_contains", "texts": ["4.57 t/ha, from 3 plots"] },
     { "check": "code_contains", "texts": ["value=2.5"] },
     { "check": "final_message_contains_any", "texts": ["4.57", "4.6 t"] },
-    { "check": "final_message_contains_any", "texts": ["3 plots", "three plots", "3 of", "**3**"] }
+    { "check": "final_message_contains_any", "texts": ["3 plots", "three plots", "3 of", "**3**", "plots: 3"] }
   ]
 }

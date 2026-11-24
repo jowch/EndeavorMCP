@@ -45,10 +45,20 @@ gets its own uv environment from its PEP 723 header.
   with marimo's language-server extras. If the marimo functions it changes
   move, marimo stops with a message rather than starting unwrapped;
   `tests/e2e_marimo_windows.rs` checks both against the pinned marimo.
-- Its workspace is the root of the drive the first Python notebook is on:
-  notebooks open by absolute path anywhere on that drive. On Unix that is the
-  whole filesystem. A notebook on another drive is refused until Endeavor
-  restarts (#574).
+- Its workspace is the root of a drive: notebooks open by absolute path
+  anywhere on it. On Unix that is the whole filesystem, so there is one
+  marimo. On Windows the adapter starts one marimo per drive, the first at
+  the root of the first Python notebook's drive (`ENDEAVOR_MARIMO_ROOT`) and
+  each other when a notebook on its drive first opens. If any of them ends,
+  the adapter ends, as it did with one.
+- The first marimo's pages are under `/marimo/`, and the drive started n-th
+  after it is under `/marimo/_n/`. `marimo.json` lists each server's root,
+  base and port under `servers`. The core reads it again when a page names a
+  server or a drive it hasn't seen, and it moves a page
+  (`/marimo/?file=<path>`) to its drive's server with a 301. Sockets and API
+  calls aren't moved: the page makes them under its own base.
+- An open notebook can't move to another drive, since its server can't reach
+  it there.
 - Its config is ours, not the user's: nothing runs by itself (an edit marks
   its readers stale), opening runs nothing, a file edited elsewhere marks
   cells stale, and marimo's own AI is off (there is one agent). A table shows

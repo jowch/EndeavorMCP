@@ -1224,9 +1224,37 @@ const NO_COMPILER: &str = "r_failed::Couldn't install Ember for R notebooks: it 
 
 const MARIMO_PYTHON: &str = "3.12";
 
+fn drive_of(path: &Path) -> Option<PathBuf> {
+    path.components().next().filter(|part| matches!(part, std::path::Component::Prefix(_))).map(|drive| Path::new(drive.as_os_str()).join(std::path::MAIN_SEPARATOR_STR))
+}
+
 fn marimo_root(first: Option<&Path>) -> PathBuf {
-    let drive_of = |path: &Path| path.components().next().filter(|part| matches!(part, std::path::Component::Prefix(_))).map(|drive| Path::new(drive.as_os_str()).join(std::path::MAIN_SEPARATOR_STR));
     first.and_then(drive_of).or_else(|| std::env::current_dir().ok().as_deref().and_then(drive_of)).unwrap_or_else(|| PathBuf::from(std::path::MAIN_SEPARATOR_STR))
+}
+
+#[derive(Clone)]
+struct MarimoPages {
+    secret: String,
+    servers: Vec<MarimoServer>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MarimoServer {
+    root: String,
+    port: u16,
+}
+
+impl MarimoPages {
+    fn home(&self, file: &str) -> Option<usize> {
+        let drive = |path: &str| drive_of(Path::new(path)).map(|drive| drive.to_string_lossy().to_lowercase());
+        self.servers.iter().position(|server| drive(&server.root) == drive(file))
+    }
+}
+
+fn marimo_servers(state: &Value) -> Option<Vec<MarimoServer>> {
+    let port = |value: &Value| value.as_u64().and_then(|p| u16::try_from(p).ok());
+    let servers: Vec<MarimoServer> = state["servers"].as_array()?.iter().map(|server| Some(MarimoServer { root: server["root"].as_str()?.to_owned(), port: port(&server["port"])? })).collect::<Option<_>>()?;
+    (!servers.is_empty()).then_some(servers)
 }
 
 struct MarimoStarter {
@@ -1320,15 +1348,15 @@ impl MarimoStarter {
             std::thread::sleep(Duration::from_millis(100));
         };
         let MarimoPending { mut child, last_words, secret, .. } = pending.take().unwrap();
-        let port = |key: &str| state[key].as_u64().and_then(|p| u16::try_from(p).ok()).ok_or_else(|| format!("python_failed::marimo's state has no {key}: {state}"));
-        let (bridge, page) = match (port("bridge_port"), port("marimo_port")) {
-            (Ok(bridge), Ok(page)) => (bridge, page),
-            (Err(why), _) | (_, Err(why)) => {
+        let bridge = state["bridge_port"].as_u64().and_then(|p| u16::try_from(p).ok());
+        let (bridge, servers) = match (bridge, marimo_servers(&state)) {
+            (Some(bridge), Some(servers)) => (bridge, servers),
+            _ => {
                 child.end();
-                return Err(why);
+                return Err(format!("python_failed::marimo's state has no bridge_port or servers: {state}"));
             }
         };
-        *served.marimo.lock().unwrap() = Some(Page { port: page, secret });
+        *served.marimo.lock().unwrap() = Some(MarimoPages { secret, servers });
         let (children, pid) = (self.child.clone(), child.process.id());
         if let Some(mut old) = self.child.lock().unwrap().replace(child) {
             old.end();
@@ -1906,7 +1934,7 @@ struct Served {
     app_folder: std::sync::Mutex<Option<String>>,
     stops: std::sync::mpsc::Sender<Stop>,
     ember: std::sync::Mutex<Option<Page>>,
-    marimo: std::sync::Mutex<Option<Page>>,
+    marimo: std::sync::Mutex<Option<MarimoPages>>,
     allow_r_install: Arc<std::sync::atomic::AtomicBool>,
     allow_uv_install: Arc<std::sync::atomic::AtomicBool>,
     r: OnceLock<Arc<RStarter>>,
@@ -1919,6 +1947,15 @@ struct Served {
 }
 
 impl Served {
+    fn marimo_from_state(&self) -> Option<MarimoPages> {
+        let mut marimo = self.marimo.lock().unwrap();
+        let state = std::fs::read(self.state_dir.join(MARIMO_STATE)).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        if let (Some(pages), Some(servers)) = (marimo.as_mut(), state.as_ref().and_then(marimo_servers)) {
+            pages.servers = servers;
+        }
+        marimo.clone()
+    }
+
     fn shutdown(&self) {
         let julia = &self.julia;
         julia.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2131,16 +2168,24 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
                 }
             }
             (Route::Marimo, _) => {
-                let marimo = served.marimo.lock().unwrap().clone();
-                let target = marimo_target(request.target(), |file| served.bridge.notebooks.open_and_allowed(file));
-                match (target, marimo) {
+                let route = |pages: &Option<MarimoPages>| {
+                    let count = pages.as_ref().map_or(1, |pages| pages.servers.len());
+                    marimo_target(request.target(), count, |file| served.bridge.notebooks.open_and_allowed(file), |file| pages.as_ref().map_or(Some(0), |pages| pages.home(file)))
+                };
+                let mut marimo = served.marimo.lock().unwrap().clone();
+                let (mut server, mut target) = route(&marimo);
+                if target == MarimoTarget::Unknown {
+                    marimo = served.marimo_from_state();
+                    (server, target) = route(&marimo);
+                }
+                match (target, marimo.and_then(|pages| Some((pages.servers.get(server)?.port, pages.secret)))) {
                     (MarimoTarget::Moved(location), _) => {
                         http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
                         let close = if request.keeps_alive() { "" } else { "Connection: close\r\n" };
                         write!(client, "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\n{close}\r\n")?;
                         request.keeps_alive()
                     }
-                    (MarimoTarget::Refused, _) => {
+                    (MarimoTarget::Refused | MarimoTarget::Unknown, _) => {
                         http::copy_body(&mut reader, &mut io::sink(), &mut request.request_body()?)?;
                         http::respond(&mut client, "404 Not Found", None, b"", request.keeps_alive())?;
                         request.keeps_alive()
@@ -2151,10 +2196,10 @@ fn serve_client(client: TcpStream, served: &Arc<Served>) -> io::Result<()> {
                         request.keeps_alive()
                     }
                     (MarimoTarget::Forward, None) => return refuse(&mut client, "503 Service Unavailable", "Python notebooks aren't running"),
-                    (MarimoTarget::Forward, Some(marimo)) => {
+                    (MarimoTarget::Forward, Some((port, secret))) => {
                         request.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Authorization") && !name.eq_ignore_ascii_case("Cookie"));
-                        request.headers.push(("Authorization".into(), format!("Bearer {}", marimo.secret)));
-                        forward(request, None, &mut reader, marimo.port, "Python", &|response| {
+                        request.headers.push(("Authorization".into(), format!("Bearer {secret}")));
+                        forward(request, None, &mut reader, port, "Python", &|response| {
                             response.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Set-Cookie"));
                         })?
                     }
@@ -2353,14 +2398,37 @@ enum MarimoTarget {
     Moved(String),
     Refused,
     NotAllowed,
+    Unknown,
 }
 
-fn marimo_target(target: &str, allowed: impl Fn(&str) -> bool) -> MarimoTarget {
+fn marimo_base(server: usize) -> String {
+    if server == 0 { "/marimo".into() } else { format!("/marimo/_{server}") }
+}
+
+fn marimo_target(target: &str, servers: usize, allowed: impl Fn(&str) -> bool, home: impl Fn(&str) -> Option<usize>) -> (usize, MarimoTarget) {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    let Some(path) = percent_decoded(path, false) else { return MarimoTarget::Refused };
+    let Some(path) = percent_decoded(path, false) else { return (0, MarimoTarget::Refused) };
     let rest = path.strip_prefix("/marimo").unwrap_or(&path);
+    let (server, rest) = match rest.strip_prefix("/_") {
+        Some(numbered) => {
+            let (number, rest) = numbered.split_at(numbered.find('/').unwrap_or(numbered.len()));
+            match number.parse::<usize>() {
+                Ok(server) if server > 0 && number == server.to_string() => (server, rest),
+                _ => return (0, MarimoTarget::Refused),
+            }
+        }
+        None => (0, rest),
+    };
+    if server >= servers {
+        return (server, MarimoTarget::Unknown);
+    }
+    (server, marimo_target_on(server, rest, query, allowed, home))
+}
+
+fn marimo_target_on(server: usize, rest: &str, query: &str, allowed: impl Fn(&str) -> bool, home: impl Fn(&str) -> Option<usize>) -> MarimoTarget {
+    let base = marimo_base(server);
     if rest.is_empty() {
-        return MarimoTarget::Moved(if query.is_empty() { "/marimo/".into() } else { format!("/marimo/?{query}") });
+        return MarimoTarget::Moved(if query.is_empty() { format!("{base}/") } else { format!("{base}/?{query}") });
     }
     if rest.contains(['%', '\\']) || rest.contains("//") || rest.split('/').any(|segment| segment == ".." || segment == ".") {
         return MarimoTarget::Refused;
@@ -2378,7 +2446,12 @@ fn marimo_target(target: &str, allowed: impl Fn(&str) -> bool) -> MarimoTarget {
         }
     }
     match files.as_slice() {
-        [file] if allowed(file) => MarimoTarget::Forward,
+        [file] if allowed(file) => match home(file) {
+            None => MarimoTarget::Unknown,
+            Some(home) if home == server => MarimoTarget::Forward,
+            Some(home) if rest == "/" => MarimoTarget::Moved(format!("{}/?{query}", marimo_base(home))),
+            Some(_) => MarimoTarget::NotAllowed,
+        },
         [_, ..] => MarimoTarget::NotAllowed,
         [] if ["/ws", "/ws_sync", "/sse"].iter().any(|socket| rest == *socket || rest.starts_with(&format!("{socket}/"))) => MarimoTarget::NotAllowed,
         [] => MarimoTarget::Forward,
@@ -2767,9 +2840,57 @@ mod tests {
     }
 
     #[test]
+    fn a_notebook_on_another_drive_is_served_by_that_drives_marimo_under_its_own_prefix() {
+        let open = |file: &str| ["C:/w/a.py", "D:/w/b.py", "E:/w/c.py"].contains(&file);
+        let home = |file: &str| match &file[..2] {
+            "C:" => Some(0),
+            "D:" => Some(1),
+            _ => None,
+        };
+        let target = |t: &str| marimo_target(t, 2, open, home);
+        assert_eq!(target("/marimo/?file=C:/w/a.py"), (0, MarimoTarget::Forward));
+        assert_eq!(target("/marimo/?file=D:/w/b.py&token=t"), (0, MarimoTarget::Moved("/marimo/_1/?file=D:/w/b.py&token=t".into())), "the page moves to its drive's server");
+        assert_eq!(target("/marimo/_1/?file=D:/w/b.py"), (1, MarimoTarget::Forward));
+        assert_eq!(target("/marimo/_1/?file=C:/w/a.py"), (1, MarimoTarget::Moved("/marimo/?file=C:/w/a.py".into())));
+        assert_eq!(target("/marimo/_1/ws?session_id=s&file=D:/w/b.py"), (1, MarimoTarget::Forward));
+        assert_eq!(target("/marimo/ws?session_id=s&file=D:/w/b.py"), (0, MarimoTarget::NotAllowed), "a socket isn't moved, only the page");
+        assert_eq!(target("/marimo/_1/api/kernel/run"), (1, MarimoTarget::Forward));
+        assert_eq!(target("/marimo/_1/assets/index.js"), (1, MarimoTarget::Forward));
+        assert_eq!(target("/marimo/_1"), (1, MarimoTarget::Moved("/marimo/_1/".into())));
+        assert_eq!(target("/marimo/_1/api/files/list_files"), (1, MarimoTarget::Refused));
+        assert_eq!(target("/marimo/_1/?file=D:/w/other.py"), (1, MarimoTarget::NotAllowed));
+        assert_eq!(target("/marimo/_2/assets/index.js"), (2, MarimoTarget::Unknown), "a server the core hasn't heard of yet sends it to the state file");
+        assert_eq!(target("/marimo/?file=E:/w/c.py"), (0, MarimoTarget::Unknown), "so does a drive it hasn't heard of");
+        for refused in ["/marimo/_0/x", "/marimo/_01/x", "/marimo/_/x", "/marimo/_x/x", "/marimo/_1x/x", "/marimo/_-1/x", "/marimo/_99999999999999999999999/x"] {
+            assert_eq!(target(refused).1, MarimoTarget::Refused, "{refused}");
+        }
+    }
+
+    #[test]
+    fn marimos_state_names_each_drives_server_and_a_drive_is_matched_without_case() {
+        let state = serde_json::json!({"bridge_port": 1, "marimo_port": 2, "servers": [{"root": "/", "base": "/marimo", "port": 2}, {"root": "/", "base": "/marimo/_1", "port": 3}]});
+        assert_eq!(marimo_servers(&state), Some(vec![MarimoServer { root: "/".into(), port: 2 }, MarimoServer { root: "/".into(), port: 3 }]));
+        assert_eq!(marimo_servers(&serde_json::json!({"marimo_port": 2})), None);
+        assert_eq!(marimo_servers(&serde_json::json!({"servers": []})), None);
+        assert_eq!(marimo_servers(&serde_json::json!({"servers": [{"root": "/", "port": 70000}]})), None);
+        #[cfg(windows)]
+        {
+            let pages = MarimoPages { secret: String::new(), servers: vec![MarimoServer { root: r"C:\".into(), port: 2 }, MarimoServer { root: r"\\server\share\".into(), port: 3 }] };
+            assert_eq!(pages.home(r"c:\w\a.py"), Some(0));
+            assert_eq!(pages.home(r"\\SERVER\Share\a.py"), Some(1));
+            assert_eq!(pages.home(r"D:\a.py"), None);
+        }
+        #[cfg(unix)]
+        {
+            let pages = MarimoPages { secret: String::new(), servers: vec![MarimoServer { root: "/".into(), port: 2 }] };
+            assert_eq!(pages.home("/w/a.py"), Some(0));
+        }
+    }
+
+    #[test]
     fn marimos_page_is_under_its_prefix_without_its_terminal_or_file_listings() {
         let open = |file: &str| file == "/w/a b.py";
-        let target = |t: &str| marimo_target(t, open);
+        let target = |t: &str| marimo_target(t, 1, open, |_| Some(0)).1;
         assert_eq!(Route::of("/marimo"), Route::Marimo);
         assert_eq!(Route::of("/marimo/ws"), Route::Marimo);
         assert_eq!(Route::of("/marimoz"), Route::Pluto);

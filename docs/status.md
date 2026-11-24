@@ -508,9 +508,11 @@ Next:
   cells are paired with the ones the agent knows by code, and keep their ids (#353). On
   Windows the core keeps uv, the adapter and marimo in a Job Object of their own, so stopping
   them ends all three; there the user installs uv themselves, since Endeavor has no uv of its
-  own for Windows yet. marimo is started at the root of the drive the first Python notebook resolves
-  to (a subst drive's own drive, a mapped drive's share), and until Endeavor restarts a notebook on another drive is refused
-  with a plain message (#574). `set_input` sets a `mo.ui`
+  own for Windows yet. marimo can only reach files under the folder it starts at, so the adapter starts one marimo
+  server per drive a Python notebook resolves to (a subst drive's own drive, a mapped drive's share),
+  the first at the root of the first notebook's drive and each other when a notebook on its drive first
+  opens. The core sends each page to its drive's server (#574). An open notebook can't move to another
+  drive. `set_input` sets a `mo.ui`
   slider, range_slider, number, checkbox, switch, text, text_area, dropdown, radio or
   multiselect through marimo's code mode, then runs its readers as `execute_cell` does; other
   widgets are refused. `view_cell_output` of HTML shows the largest PNG embedded in it, as

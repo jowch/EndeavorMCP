@@ -9,7 +9,7 @@ fn between<'a>(from: &str, to: &str) -> &'a str {
 }
 
 fn run(body: &str, lines: &[String]) -> Option<Vec<String>> {
-    let script = format!("import ntpath, os, sys\n{}\n{}\n{body}", between("def drive_root(", "\nROOT = "), between("def other_drive(", "def on_marimos_drive("));
+    let script = format!("import ntpath, os, sys\n{}\n{}\n{body}", between("def drive_root(", "\nROOT = "), between("def other_drive(", "def server_base("));
     let works = Command::new("python3").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     if !works {
         return None;
