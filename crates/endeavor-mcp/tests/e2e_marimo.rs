@@ -838,6 +838,7 @@ fn a_python_notebook_through_the_runtime() {
         let environment = || app_call(port, &app_token, "endeavor/environment", json!({ "notebook_id": id }))["result"].clone();
         let env = environment();
         assert!(env["python"].is_string() && env["install"].is_null() && env["failed"].is_null(), "{env}");
+        assert!(env["python_version"].as_str().is_some_and(|v| v.starts_with("3.")), "the Python uv runs it on: {env}");
         assert!(env["packages"].as_array().unwrap().iter().any(|p| p["name"] == "boto3" && p["version"] == version), "the app sees boto3 {version}: {env}");
         let absent = agent.ok("add_cell", json!({ "notebook_id": id, "code": "import endeavor_e2e_absent", "after_cell_id": user }))["cell_id"].as_str().unwrap().to_owned();
         agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": absent, "wait_for_completion": false }));
