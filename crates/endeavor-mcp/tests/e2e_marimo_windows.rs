@@ -191,6 +191,8 @@ fn a_python_notebook_runs_on_windows_and_stop_ends_marimo() {
     let order = agent.ok("get_cell_order", json!({ "notebook_id": notebook }))["cell_ids"].clone();
     let order: Vec<String> = order.as_array().unwrap().iter().map(|id| id.as_str().unwrap().to_owned()).collect();
     assert_eq!(order.len(), 2, "{order:?}");
+    let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order[0] }));
+    assert_eq!(read["code"], "x = 20", "{read}");
     agent.ok("edit_cell", json!({ "notebook_id": notebook, "cell_id": order[0], "code": "x = 41" }));
     agent.ok("allow_execution", json!({ "notebook_id": notebook, "run_notebook": false }));
     agent.ok("run_all_cells", json!({ "notebook_id": notebook, "wait_for_completion": true }));
