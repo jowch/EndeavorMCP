@@ -1349,7 +1349,11 @@ impl Notebooks {
             return Ok(json!({ "restored": [], "changed": changed }));
         }
         let mut ops: Vec<Value> = restores.iter().filter_map(|(cell, expected, code)| Some(json!({ "op": "set_code", "cell_id": cell, "code": code.as_ref()?, "expected": expected }))).collect();
-        ops.extend(restores.iter().filter(|(.., code)| code.is_none()).map(|(cell, ..)| json!({ "op": "delete", "cell_id": cell })));
+        let checks_deletes = matches!(backend, Backend::Pluto | Backend::Marimo);
+        ops.extend(restores.iter().filter(|(.., code)| code.is_none()).map(|(cell, expected, _)| match checks_deletes {
+            true => json!({ "op": "delete", "cell_id": cell, "expected": expected }),
+            false => json!({ "op": "delete", "cell_id": cell }),
+        }));
         let pending: Vec<String> = self.with_state(&nb.id, |state| {
             let pending = state.pending_run(&nb);
             let in_run = |cell: &String| nb.cells.get(cell).is_some_and(|c| c.running || c.queued) || state.started.iter().any(|run| run.cells.contains(cell));
