@@ -853,7 +853,7 @@ fn a_python_notebook_through_the_runtime() {
         };
         assert!(failed["packages"].to_string().contains("endeavor") && failed["log"].as_str().is_some_and(|log| !log.is_empty()), "a failed install is kept for the app: {failed}");
         let left = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": absent }));
-        assert!(left["errored"] == true && left["status"] != "queued", "a cell whose install failed shows its error, not a queue: {left}");
+        assert!(left["errored"] == true && left["queued"] != true, "a cell whose install failed shows its error, not a queue: {left}");
         agent.ok("delete_cell", json!({ "notebook_id": id, "cell_id": absent }));
         agent.ok("close_notebook", json!({ "notebook_id": id }));
         let opened = agent.ok("open_notebook", json!({ "path": name }));
