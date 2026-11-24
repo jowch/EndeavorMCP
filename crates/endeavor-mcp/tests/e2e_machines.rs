@@ -41,20 +41,29 @@ fn get(port: u16, target: &str, headers: &str) -> (String, String, String) {
     (head.lines().next().unwrap_or_default().to_owned(), head.to_owned(), body.to_owned())
 }
 
-#[test]
-#[ignore = "needs ENDEAVOR_TEST_SSH_HOST and starts real Julia, several minutes the first time: ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines -- --ignored"]
-fn the_machine_tools_over_real_ssh() {
+struct Connected {
+    front: Front,
+    started: Instant,
+    work: PathBuf,
+    state: PathBuf,
+    notebooks: PathBuf,
+    page: String,
+    port: u16,
+    _ends: Ends,
+}
+
+fn connected(dir: &str, name: &str) -> Option<Connected> {
     common::require_debug_build();
     let Ok(host) = std::env::var("ENDEAVOR_TEST_SSH_HOST") else {
         eprintln!("SKIPPED: ENDEAVOR_TEST_SSH_HOST isn't set. Name a host this user can ssh to with a key, such as localhost.");
-        return;
+        return None;
     };
     let Some((julia, app)) = find_julia() else {
         eprintln!("SKIPPED: no Julia. Set ENDEAVOR_E2E_JULIA, install Endeavor's own, or put julia on the PATH.");
-        return;
+        return None;
     };
     let started = Instant::now();
-    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-machines");
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(dir);
     let depot = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("e2e-client/depot");
     drop(Ends { state: work.join("state") });
     let _ = std::fs::remove_dir_all(&work);
@@ -69,7 +78,7 @@ fn the_machine_tools_over_real_ssh() {
         Some(app) => format!("{}:{}:", depot.display(), app.join("depot").display()),
         None => format!("{}:", depot.display()),
     };
-    let _ends = Ends { state: state.clone() };
+    let ends = Ends { state: state.clone() };
     eprintln!("host: {host}, julia: {}", julia.display());
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
@@ -97,23 +106,23 @@ fn the_machine_tools_over_real_ssh() {
     assert!(listed["ssh_hosts_not_added"].is_array());
     assert!(helpers(&state).is_empty(), "listing connects to nothing");
 
-    let looked = front.ok("add_machine", json!({ "host": host, "name": "e2e-machines", "julia": julia.display().to_string(), "slurm": false }));
+    let looked = front.ok("add_machine", json!({ "host": host, "name": name, "julia": julia.display().to_string(), "slurm": false }));
     assert_eq!(looked["state"], "needs_install", "{looked}");
     assert!(!root.join(endeavor_mcp::embedded::BUILD_VERSION).exists(), "a look installs nothing");
-    let added = front.ok("add_machine", json!({ "host": host, "name": "e2e-machines", "julia": julia.display().to_string(), "slurm": false, "install": true }));
+    let added = front.ok("add_machine", json!({ "host": host, "name": name, "julia": julia.display().to_string(), "slurm": false, "install": true }));
     eprintln!("[{:?}] add_machine: {}", started.elapsed(), added["message"]);
     assert_eq!((added["state"].as_str(), added["saved"].clone()), (Some("connected"), json!(true)), "{added}");
     assert!(added["node"].as_str().is_some_and(|n| !n.is_empty()) && added["home"].as_str().is_some_and(|h| h.starts_with('/')), "{added}");
     assert_eq!((added["cluster"].clone(), added["runs_in"].clone()), (json!(false), json!("directly")), "{added}");
     let machines_file = MachinesFile::at(work.join("config/endeavor/machines.json"));
-    let record = machines_file.find_by_name("e2e-machines").unwrap().expect("the machine is saved");
+    let record = machines_file.find_by_name(name).unwrap().expect("the machine is saved");
     assert!(record.cluster.is_none(), "saved as a plain server, whether or not Slurm is there: {added}");
     let installed = root.join(endeavor_mcp::embedded::BUILD_VERSION);
     assert!(installed.join("endeavor").is_file(), "the helper is installed in {}", installed.display());
 
     let folder = notebooks.display().to_string();
     let used = loop {
-        let used = front.ok("use_machine", json!({ "machine": "e2e-machines", "folder": folder }));
+        let used = front.ok("use_machine", json!({ "machine": name, "folder": folder }));
         if used["ready"] == true {
             break used;
         }
@@ -132,8 +141,23 @@ fn the_machine_tools_over_real_ssh() {
     let via = ssh_port.map(|p| format!(" -p {p}")).unwrap_or_default();
     assert!(used["message"].as_str().unwrap().contains(&format!("`ssh -L {remote_port}:127.0.0.1:{remote_port}{via} {ssh_host}`")), "{used}");
 
-    let created = front.ok("new_notebook", json!({ "path": "analysis.jl" }));
-    let notebook = created["notebook_id"].as_str().expect("a notebook").to_owned();
+    Some(Connected { front, started, work, state, notebooks, page, port, _ends: ends })
+}
+
+#[test]
+#[ignore = "needs ENDEAVOR_TEST_SSH_HOST and starts real Julia, several minutes the first time: ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines -- --ignored"]
+fn the_machine_tools_over_real_ssh() {
+    let Some(Connected { mut front, started, work, state, notebooks, page, port, _ends }) = connected("e2e-machines", "e2e-machines") else { return };
+    let folder = notebooks.display().to_string();
+    let created = loop {
+        let created = front.ok("new_notebook", json!({ "path": "analysis.jl" }));
+        if created["error"] != "julia_starting" {
+            break created;
+        }
+        assert!(started.elapsed() < Duration::from_secs(1500), "{created}");
+        eprintln!("[{:?}] new_notebook: {}", started.elapsed(), created["message"]);
+    };
+    let notebook = created["notebook_id"].as_str().unwrap_or_else(|| panic!("a notebook: {created}")).to_owned();
     assert_eq!(created["path"], notebooks.join("analysis.jl").display().to_string(), "the notebook is in the session's folder on the machine: {created}");
     assert_eq!((&created["browser_url"], &created["opened_in_browser"]), (&json!(format!("http://localhost:{port}/edit?id={notebook}")), &json!(true)), "{created}");
     let opened = std::fs::read_to_string(work.join("opened.txt")).unwrap();
@@ -201,4 +225,86 @@ fn the_machine_tools_over_real_ssh() {
     wait_for("the helper to go", || helpers(&state).is_empty());
     assert!(!state.join("runtime.json").exists());
     eprintln!("[{:?}] stopped; nothing left", started.elapsed());
+}
+
+const GROWTH: &str = r#"# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "marimo==0.25.1",
+# ]
+# ///
+
+import marimo
+
+__generated_with = "0.25.1"
+app = marimo.App()
+
+
+@app.cell
+def _():
+    x = 41
+    return (x,)
+
+
+@app.cell
+def _(x):
+    y = x + 1
+    y
+    return
+
+
+if __name__ == "__main__":
+    app.run()
+"#;
+
+#[test]
+#[ignore = "needs ENDEAVOR_TEST_SSH_HOST, starts real Julia and marimo and may download uv: ENDEAVOR_TEST_SSH_HOST=localhost cargo test -p endeavor-mcp --test e2e_machines -- --ignored --test-threads 1"]
+fn a_python_notebook_runs_on_a_machine() {
+    let Some(Connected { mut front, started, work, state: _, notebooks, page: _, port, _ends }) = connected("e2e-machines-python", "e2e-python") else { return };
+    std::fs::write(notebooks.join("growth.py"), GROWTH).unwrap();
+    let began = Instant::now();
+    let opened = loop {
+        let (failed, said) = front.call("open_notebook", json!({ "path": "growth.py" }));
+        let said: Value = said.as_str().and_then(|text| serde_json::from_str(text).ok()).unwrap_or(said);
+        match said["error"].as_str() {
+            Some("python_installing") => {}
+            Some("python_not_found") => {
+                let offer = said["message"].as_str().unwrap_or_default();
+                assert!(offer.contains("`use_machine` with `machine` \"e2e-python\" and `install: true`"), "the offer names this machine: {offer}");
+                eprintln!("[{:?}] no uv on the machine; saying yes to Endeavor's own", started.elapsed());
+                let folder = notebooks.display().to_string();
+                let again = front.ok("use_machine", json!({ "machine": "e2e-python", "folder": folder, "install": true }));
+                assert!(!again["message"].as_str().unwrap_or_default().contains("Couldn't pass"), "{again}");
+            }
+            _ if !failed => break said,
+            _ => panic!("{said}"),
+        }
+        assert!(began.elapsed() < Duration::from_secs(900), "marimo didn't start: {said}");
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    let notebook = opened["notebook_id"].as_str().unwrap_or_else(|| panic!("{opened}")).to_owned();
+    assert_eq!(opened["path"], notebooks.join("growth.py").display().to_string(), "{opened}");
+    let link = opened["browser_url"].as_str().unwrap_or_else(|| panic!("{opened}"));
+    assert!(link.starts_with(&format!("http://localhost:{port}/marimo/?file=")), "{opened}");
+    eprintln!("[{:?}] the Python notebook is open on the machine", started.elapsed());
+    let order = front.ok("get_cell_order", json!({ "notebook_id": notebook }));
+    let cells: Vec<String> = order["cell_ids"].as_array().unwrap().iter().map(|id| id.as_str().unwrap().to_owned()).collect();
+    front.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": cells[0] }));
+    front.ok("allow_execution", json!({ "notebook_id": notebook, "run_notebook": false }));
+    front.ok("run_all_cells", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+    let opened_links = std::fs::read_to_string(work.join("opened.txt")).unwrap();
+    let with_token = opened_links.lines().last().filter(|line| line.starts_with(link) && line.contains("token=")).unwrap_or_else(|| panic!("the browser got the link with the token: {opened_links}"));
+    let target = with_token.strip_prefix(&format!("http://localhost:{port}")).unwrap();
+    let (line, head, _) = get(port, target, "");
+    assert_eq!(line, "HTTP/1.1 303 See Other", "{head}");
+    let cookie = head.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap_or_else(|| panic!("no cookie: {head}")).split(';').next().unwrap().to_owned();
+    let (line, head, body) = get(port, link.strip_prefix(&format!("http://localhost:{port}")).unwrap(), &format!("Cookie: {cookie}\r\nSec-Fetch-Site: none\r\n"));
+    assert_eq!(line, "HTTP/1.1 200 OK", "{head}");
+    assert!(body.contains("marimo"), "{}", &body[..body.len().min(300)]);
+    eprintln!("[{:?}] marimo's page answers through this computer's port", started.elapsed());
+    let read = front.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": cells[1] }));
+    assert!(read["errored"] == false && read["output"].as_str().unwrap_or_default().contains("42"), "{read}");
+    eprintln!("[{:?}] a Python cell ran on the machine", started.elapsed());
+    front.ok("stop_machine", json!({ "machine": "e2e-python" }));
+    front.finish();
 }

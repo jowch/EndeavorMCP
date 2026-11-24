@@ -507,6 +507,13 @@ Next:
   checked against its SHA-256, into `~/.cache/endeavor/uv-0.11.32`) if the user
   agrees; their yes comes as `use_machine` with `install: true` on this computer,
   which asks them first and passes `endeavor/allow_uv_install` (interface 48).
+  Python notebooks also run on servers, through `use_machine`, as Julia and R
+  ones do; marimo's page is reached through the same forwarded port. On a
+  server with no uv the offer names that machine, and `use_machine` with
+  `install: true` there passes the user's yes to download uv along with
+  Julia's. In a Slurm job Endeavor doesn't download uv: the agent is told to
+  ask the user to install uv on the cluster (`tests/e2e_machines.rs` covers a
+  server with no uv).
 - In R and Python notebooks, as in Julia ones (#393), `view_cell_output` tells the
   agent when an output is interactive, so it doesn't describe controls it hasn't
   seen work. In R that is HTML with a script, canvas or control, or with a

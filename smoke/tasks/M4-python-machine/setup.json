@@ -1,0 +1,1 @@
+{ "ssh": true, "dialog": "accept", "server_without_uv": true }

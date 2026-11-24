@@ -1,0 +1,11 @@
+{
+  "about": "M1 with a Python notebook, on a server with no uv (its HOME and PATH have none). The agent adds smoke-host and makes a Python notebook there. The core's offer names smoke-host, so the agent asks the user and, after the yes, calls `use_machine` for smoke-host with `install: true`; Endeavor's own dialog names uv for Python notebooks on smoke-host, and the harness says yes. uv is downloaded there and the notebook runs (#354). Tags: machines, python, install consent.",
+  "checks": [
+    { "check": "called", "tool": "add_machine" },
+    { "check": "called", "tool": "use_machine", "args": { "machine": "smoke-host", "install": true } },
+    { "check": "asked_user", "texts": ["on smoke-host", "uv for Python notebooks"] },
+    { "check": "server_file", "suffix": ".py" },
+    { "check": "reply_contains", "texts": ["1024"] },
+    { "check": "final_message_contains_any", "texts": ["1024"] }
+  ]
+}

@@ -437,12 +437,14 @@ fn install_question(name: &str, items: &[wire::Item], tool: &str) -> String {
     format!("{what}{later} Install it now?")
 }
 
-fn leave_question(machine: &str) -> String {
+fn leave_question(machine: &str, cluster: bool) -> String {
     if machine == LOCAL || machine.is_empty() {
         let what = if cfg!(target_os = "macos") { "R, or uv for Python notebooks," } else { "uv for Python notebooks" };
         format!("If a notebook needs {what} and none is found on this computer, may Endeavor install its own copy?")
-    } else {
+    } else if cluster {
         format!("If a notebook on {machine} needs Julia and none is found there, may Endeavor download its own copy of Julia?")
+    } else {
+        format!("If a notebook on {machine} needs Julia, or uv for Python notebooks, and none is found there, may Endeavor download its own copy?")
     }
 }
 
@@ -941,6 +943,10 @@ impl Relay {
             parsed["result"] = tool_error(&text, false);
             changed = true;
         }
+        if let Some(text) = self.uv_offer_here(&parsed["result"]) {
+            parsed["result"]["content"][0]["text"] = text.into();
+            changed = true;
+        }
         if let Some(notice) = self.notice.lock().unwrap().take() {
             match parsed["result"]["content"].as_array_mut() {
                 Some(content) => content.push(json!({ "type": "text", "text": notice })),
@@ -949,6 +955,17 @@ impl Relay {
             changed = true;
         }
         if changed { to_json(&parsed) } else { reply }
+    }
+
+    fn uv_offer_here(&self, result: &Value) -> Option<String> {
+        let machine = self.current();
+        if machine.is_local() || result["isError"] != true {
+            return None;
+        }
+        let mut said: Value = serde_json::from_str(result["content"][0]["text"].as_str()?).ok()?;
+        let cluster = self.connections.get(&machine.id).is_some_and(|session| session.cluster());
+        said["message"] = crate::core::uv_offer_on(said["message"].as_str()?, &machine.id, cluster)?.into();
+        Some(to_json(&said))
     }
 
     fn no_r_text(&self) -> Option<String> {
@@ -1065,7 +1082,7 @@ impl Relay {
                 let items: Vec<wire::Item> = serde_json::from_value(result["install"]["items"].clone()).unwrap_or_default();
                 Some(install_question(&name, &items, tool))
             }
-            Ok(result) if tool == "use_machine" && wants_install && result["ready"] == true => Some(leave_question(&machine)),
+            Ok(result) if tool == "use_machine" && wants_install && result["ready"] == true => Some(leave_question(&machine, result["cluster"] == true)),
             _ => None,
         };
         let question = question.filter(|_| self.consent.can_ask() || wants_install);
@@ -1441,7 +1458,7 @@ impl Relay {
                     notes.push(note);
                 }
             } else {
-                let leaves: &[(&str, &str)] = if local { &[("endeavor/allow_r_install", "install R"), ("endeavor/allow_uv_install", "download uv")] } else { &[("endeavor/allow_julia_install", "download Julia")] };
+                let leaves: &[(&str, &str)] = if local { &[("endeavor/allow_r_install", "install R"), ("endeavor/allow_uv_install", "download uv")] } else { &[("endeavor/allow_julia_install", "download Julia"), ("endeavor/allow_uv_install", "download uv")] };
                 for (call, what) in leaves {
                     if let Err(e) = crate::bridge_rpc(runtime.port, &runtime.token, call, json!({})) {
                         notes.push(format!("Couldn't pass the user's leave to {what} on to {name} ({e}); calling use_machine again with `install: true` tries again."));
@@ -1518,6 +1535,7 @@ impl Relay {
             return Ok(result);
         }
         result["node"] = runtime.node.clone().into();
+        result["cluster"] = server.cluster.is_some().into();
         result["remote_port"] = runtime.remote_port.into();
         result["already_running"] = (runtime.reattached || was_ready).into();
         if let Some(job) = job_json(&reached.status) {

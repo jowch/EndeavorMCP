@@ -208,6 +208,14 @@ not `$HOME`, so the runtime's PATH starts with an `ssh` that runs the real
 one with `-F` that config. The user's own ssh keys and config are neither
 read nor changed.
 
+`{ "server_without_uv": true }` makes that server one with no uv: its ssh
+sessions get a HOME of their own in the attempt's folder and the runner's
+PATH without the folders that hold a `uv`. The proxy and TLS variables
+(`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `UV_NATIVE_TLS`) are passed on,
+so the server's uv can reach PyPI from a cloud VM. The task fails to start if
+`uv` is in `/usr/local/bin` or `/opt/homebrew/bin`, where Endeavor finds it on
+any server.
+
 The helper on the server is this `endeavor`, as for any server on the same
 platform, so nothing is downloaded. Endeavor's debug-only `ENDEAVOR_TEST_ROOT`,
 `_STATE` and `_DEPOT` put the server's install, its runtime's state and its
@@ -299,6 +307,7 @@ something subtle, make it soft.
 | `R4-interactive-plot`, `P5-interactive-plot` | an interactive plot with a hover: plotly in R, altair in Python | `view_cell_output` marks the output as interactive (#398). The agent looks at it, keeps the package it was asked for, and (a soft check) asks the user to check the hover rather than saying it works. R4's hook says yes to R's download question; P5's only to altair and the packages it needs |
 | `M1-machine` | add my server and compute something in a notebook in a folder there; the dialog's hook says yes | Endeavor's helper is missing there: Endeavor asks the user in its own dialog, which names it, during the agent's call, and installs only on the yes; the agent then works on the server (#378) |
 | `M3-install-declined` | M1, with the hook saying no | nothing is installed; the agent tells the user and makes no notebook on this computer instead |
+| `M4-python-machine` | M1 with a Python notebook, on a server with no uv (`server_without_uv`); a second message says yes to downloads there | the offer names the server, the agent passes the yes as `use_machine` with `install: true`, Endeavor's dialog names uv for Python notebooks on smoke-host, and the notebook runs there (#354) |
 | `M2-no-reach` | a notebook on a server that refuses connections | the agent reports the failure, doesn't ask for a password, and makes no notebook here instead |
 
 Every task that leaves a notebook also checks it is `reproducible`, except
