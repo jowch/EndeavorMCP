@@ -1,5 +1,3 @@
-#![cfg(windows)]
-
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -49,9 +47,15 @@ fn has_uv() -> bool {
     Command::new("uv").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
+#[cfg(windows)]
 fn running(pid: u64) -> bool {
     let listed = Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"]).output().unwrap();
     String::from_utf8_lossy(&listed.stdout).contains(&format!("\"{pid}\""))
+}
+
+#[cfg(unix)]
+fn running(pid: u64) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| stat.rsplit_once(") ").is_some_and(|(_, rest)| !rest.starts_with('Z')))
 }
 
 fn listening(port: u16) -> bool {
@@ -71,7 +75,9 @@ impl Drop for Cleanup {
         }
         let _ = Command::new(env!("CARGO_BIN_EXE_endeavor")).args(["stop", "--force", "--state-dir"]).arg(&self.state).output();
         if let Some(mut serve) = self.serve.take() {
+            #[cfg(windows)]
             let _ = Command::new("taskkill").args(["/F", "/T", "/PID", &serve.id().to_string()]).output();
+            let _ = serve.kill();
             let _ = serve.wait();
         }
     }
@@ -141,7 +147,7 @@ fn serve(state: &Path, folder: &Path) -> (Child, Vec<String>) {
         .arg("--state-dir")
         .arg(state)
         .arg("--julia")
-        .arg(state.join("no julia here.exe"))
+        .arg(state.join(format!("no julia here{}", std::env::consts::EXE_SUFFIX)))
         .arg("--depot")
         .arg(state.join("depot"))
         .env("ENDEAVOR_TEST_MARIMO_WAIT_SECS", "5")
@@ -183,8 +189,12 @@ fn a_python_notebook_runs_on_windows_and_stop_ends_marimo() {
     let link = printed.iter().find_map(|l| l.trim().strip_prefix("http://localhost:")).filter(|l| l.contains("/?token=")).unwrap_or_else(|| panic!("{printed:?}"));
     let port: u16 = link.split_once("/?token=").unwrap().0.parse().unwrap();
     let token = printed.iter().find_map(|l| l.trim().strip_prefix("Header: Authorization: Bearer ")).unwrap().to_owned();
-    let mut agent = Agent { port, token, id: 0, session: None };
-    agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+    let session = |token: &str| {
+        let mut agent = Agent { port, token: token.to_owned(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        agent
+    };
+    let mut agent = session(&token);
 
     let opened = agent.started("open_notebook", json!({ "path": "growth.py" }));
     let notebook = opened["notebook_id"].as_str().unwrap_or_else(|| panic!("{opened}")).to_owned();
@@ -200,7 +210,7 @@ fn a_python_notebook_runs_on_windows_and_stop_ends_marimo() {
     assert!(read["errored"] == false && read["output"].as_str().unwrap_or_default().contains("42"), "{read}");
     assert!(std::fs::read_to_string(folder.join("growth.py")).unwrap().contains("x = 41"), "marimo saved the edit");
 
-    let made = agent.started("new_notebook", json!({ "path": "decay.py" }));
+    let made = session(&token).started("new_notebook", json!({ "path": "decay.py" }));
     assert!(made["notebook_id"].is_string(), "{made}");
     assert!(folder.join("decay.py").is_file());
 
@@ -208,7 +218,7 @@ fn a_python_notebook_runs_on_windows_and_stop_ends_marimo() {
     let elsewhere = std::env::temp_dir().join("endeavor-e2e-other-drive.py");
     if drive(&elsewhere) != drive(&folder) {
         let _ = std::fs::remove_file(&elsewhere);
-        let (failed, text) = agent.call("new_notebook", &json!({ "path": elsewhere }));
+        let (failed, text) = session(&token).call("new_notebook", &json!({ "path": elsewhere }));
         assert!(failed && text.contains("unsupported::") && text.contains("one drive at a time"), "{text}");
         assert!(!elsewhere.exists(), "nothing was made on the other drive");
     } else {
