@@ -1261,7 +1261,7 @@ mod tests {
 
     #[test]
     fn the_notebook_tools_names_and_arguments_are_those_of_the_cores_interface() {
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (49, "31806aaaff1c73b0"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (50, "31806aaaff1c73b0"), "see the comment in this test");
     }
 
     fn code(source: &str) -> &str {
