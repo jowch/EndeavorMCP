@@ -220,6 +220,7 @@ fn a_python_notebook_through_the_runtime() {
         .env("XDG_CACHE_HOME", work.join("cache"))
         .env("XDG_STATE_HOME", work.join("state-home"))
         .env("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS", "3")
+        .env("ENDEAVOR_TEST_MARIMO_SLOW_SAVE_FILE", "busy.py")
         .env("ENDEAVOR_TEST_MARIMO_WAIT_SECS", "0")
         .env("XDG_CONFIG_HOME", work.join("config"))
         .stdout(Stdio::piped())
@@ -618,6 +619,44 @@ fn a_python_notebook_through_the_runtime() {
             let read = agent.ok("read_cell", json!({ "notebook_id": nb, "cell_id": heading, "include_code": true }));
             assert!(read["code"].as_str().unwrap_or_default().contains(&format!("## {title}\n")), "{title}: {read}");
             assert_eq!(read["output_text"].as_str().or(read["output"].as_str()).unwrap_or_default().trim(), title, "{read}");
+        }
+        agent.ok("close_notebook", json!({ "notebook_id": nb }));
+    });
+
+    step("cells the agent adds stay while the file keeps changing under marimo", || {
+        let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
+        agent.mcp("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "0" } }));
+        let made = agent.ok("new_notebook", json!({ "path": "busy.py" }));
+        let nb = made["notebook_id"].clone();
+        let mut last = made["cell_ids"][0].as_str().unwrap().to_owned();
+        let file = folder.join("busy.py");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let toucher = {
+            let (file, stop) = (file.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut n = 0;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    n += 1;
+                    let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+                    writeln!(f, "# touched by the test {n}").unwrap();
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+            })
+        };
+        let mut added = Vec::new();
+        for i in 0..4 {
+            last = agent.ok("add_cell", json!({ "notebook_id": nb, "after_cell_id": last, "code": format!("busy{i} = {i}") }))["cell_id"].as_str().unwrap().to_owned();
+            agent.ok("submit_changes", json!({ "notebook_id": nb, "wait_for_completion": false }));
+            added.push(last.clone());
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        toucher.join().unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        let order = agent.ok("get_cell_order", json!({ "notebook_id": nb }));
+        let text = std::fs::read_to_string(&file).unwrap();
+        for (i, cell) in added.iter().enumerate() {
+            assert!(order["cell_ids"].as_array().unwrap().iter().any(|c| c == cell.as_str()), "{cell} is still in the notebook: {order}");
+            assert!(text.contains(&format!("busy{i} = {i}")), "the file keeps busy{i}: {text}");
         }
         agent.ok("close_notebook", json!({ "notebook_id": nb }));
     });

@@ -607,8 +607,8 @@ impl Call<'_> {
         Ok(rendered["text"].as_str().map(str::to_owned))
     }
 
-    fn cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
-        let cell = &nb.cells[id];
+    fn cell_json(&self, nb: &Snapshot, id: &str) -> Result<Map<String, Value>, String> {
+        let Some(cell) = nb.cells.get(id) else { return Err(key_error(&format!("cell_not_found::No cell with id '{id}' in notebook"))) };
         let stale = cell.stale || self.pending_run(nb).iter().any(|p| p == id);
         let mut out = json!({
             "cell_id": id, "code": cell.code, "output": cut_middle(&cell.output, OUTPUT_MAX, OUTPUT_END, OUTPUT_REST), "errored": cell.errored,
@@ -630,11 +630,11 @@ impl Call<'_> {
             out["waiting_for_input"] = waiting_json(nb, id);
         }
         let Value::Object(out) = out else { unreachable!() };
-        out
+        Ok(out)
     }
 
-    fn changed_cell_json(&self, nb: &Snapshot, id: &str) -> Map<String, Value> {
-        let mut out = self.cell_json(nb, id);
+    fn changed_cell_json(&self, nb: &Snapshot, id: &str) -> Result<Map<String, Value>, String> {
+        let mut out = self.cell_json(nb, id)?;
         out.remove("code");
         if out["running"] == true || out["queued"] == true || self.pending_run(nb).iter().any(|p| p == id) {
             for key in ["output", "errored", "error", "notes"] {
@@ -652,7 +652,7 @@ impl Call<'_> {
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     fn list_notebooks(&self) -> Result<Value, String> {
@@ -721,7 +721,7 @@ impl Call<'_> {
         let was = self.changed_since_read(&nb, &cell);
         let other = self.edited_by_other_session(&nb.id, &cell);
         self.record_read_of(&nb.id, &cell, &code, !left_out);
-        let mut out = self.cell_json(&nb, &cell);
+        let mut out = self.cell_json(&nb, &cell)?;
         if left_out {
             out.remove("code");
             out.insert("code_unchanged".into(), json!(true));
@@ -846,7 +846,7 @@ impl Call<'_> {
         self.edited(&nb.id, &applied, &cell, &before, &stored);
         let ran = self.run_or_stage(&nb, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "edit_cell", "cell_id": cell }), ran, None)?;
-        receipt.extend(self.changed_cell_json(&after, &cell));
+        receipt.extend(self.changed_cell_json(&after, &cell)?);
         if stored != code {
             receipt.insert("code".to_owned(), json!(stored));
         }
@@ -939,7 +939,7 @@ impl Call<'_> {
         self.edited(&nb.id, &applied, &cell, "", &code);
         let ran = self.run_or_stage(&added, &cell, run_after)?;
         let (mut receipt, after) = self.receipt_of_run(&nb.id, json!({ "type": "add_cell", "cell_id": cell }), ran, None)?;
-        let mut added = self.cell_json(&after, &cell);
+        let mut added = self.cell_json(&after, &cell)?;
         if self.args.get("code").and_then(Value::as_str) == Some(code.as_str()) {
             added.remove("code");
         }
