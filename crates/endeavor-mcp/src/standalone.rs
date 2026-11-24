@@ -339,6 +339,7 @@ fn runtime_args(options: &Options, exit_idle: bool) -> Args {
         own_r: true,
         runtime: PathBuf::new(),
         depot: options.depot.clone(),
+        ember: None,
         launcher: Launcher::Process,
         quit_with_client: false,
         own_with_client: false.into(),

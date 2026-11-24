@@ -85,6 +85,7 @@ struct Args {
     own_r: bool,
     runtime: PathBuf,
     depot: String,
+    ember: Option<PathBuf>,
     launcher: Launcher,
     quit_with_client: bool,
     own_with_client: AtomicBool,
@@ -298,6 +299,14 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
+    let runtime: PathBuf = runtime.ok_or("--runtime is required")?;
+    let (depot, ember) = match depot.ok_or("--depot is required")? {
+        depot if depot.is_empty() => {
+            let folders = paths::server_folders(wire::slurm::scratch().as_deref(), runtime.parent().and_then(Path::parent).unwrap_or(&runtime));
+            (folders.depot, Some(folders.ember))
+        }
+        depot => (depot, None),
+    };
     let env = paths::Env::here();
     let unnamed = (state_dir.is_none() && launcher == Launcher::Process).then(|| (env.state_dir(), env.apps_old_state_dir()));
     Ok(Args {
@@ -309,8 +318,9 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         julia: julia.ok_or("--julia or --julia-shell is required")?,
         julia_when_needed,
         r: r.unwrap_or_default(),
-        runtime: runtime.ok_or("--runtime is required")?,
-        depot: depot.ok_or("--depot is required")?,
+        runtime,
+        depot,
+        ember,
         launcher,
         quit_with_client,
         own_with_client: own_with_client.into(),
@@ -1303,7 +1313,7 @@ fn julia_flags(args: &Args, found: Option<&str>, install: bool) -> Vec<String> {
     flags
 }
 
-fn runtime_command(julia: &[String], runtime: &Path, depot: &str, token: &str, state_dir: &Path, launcher: &str, build: Option<&str>) -> Result<Command, String> {
+fn runtime_command(julia: &[String], runtime: &Path, depot: &str, ember: Option<&Path>, token: &str, state_dir: &Path, launcher: &str, build: Option<&str>) -> Result<Command, String> {
     let _ = std::fs::remove_file(state_dir.join("runtime.json"));
     let mut command = Command::new(this_program()?);
     #[cfg(unix)]
@@ -1317,6 +1327,7 @@ fn runtime_command(julia: &[String], runtime: &Path, depot: &str, token: &str, s
         .arg("--runtime")
         .arg(runtime)
         .args(["--depot", depot])
+        .args(ember.map(|ember| [Path::new("--ember"), ember]).into_iter().flatten())
         .env("ENDEAVOR_TOKEN", token)
         .env("ENDEAVOR_LAUNCHER", launcher)
         .stdin(Stdio::null());
@@ -1369,7 +1380,7 @@ fn open_log(path: &Path) -> Result<(File, File), String> {
 fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<Child, String> {
     let dir = &args.state_dir;
     let (log, stderr) = open_log(&dir.join("runtime.log"))?;
-    let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
+    let mut command = runtime_command(julia, runtime, &args.depot, args.ember.as_deref(), token, dir, "process", args.build.as_deref())?;
     command.args(args.r.args()).args(args.own_r.then_some("--own-r")).stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
     let lifeline = match args.own_with_client.load(Ordering::SeqCst) {
@@ -1408,7 +1419,7 @@ fn start(args: &Args, runtime: &Path, julia: &[String], token: &str) -> Result<C
     use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
     let dir = &args.state_dir;
     let (log, stderr) = open_log(&dir.join("runtime.log"))?;
-    let mut command = runtime_command(julia, runtime, &args.depot, token, dir, "process", args.build.as_deref())?;
+    let mut command = runtime_command(julia, runtime, &args.depot, args.ember.as_deref(), token, dir, "process", args.build.as_deref())?;
     command.args(args.r.args()).args(args.own_r.then_some("--own-r")).stdout(log).stderr(stderr);
     set_core_env(&mut command, &args.core_env);
     not_inherited_std_handles();
@@ -1727,6 +1738,10 @@ mod tests {
         assert_eq!(shell.unwrap().julia, julia::Source::Shell("module load julia".into()));
         assert!(args("connect --state-dir /s --julia /j --julia-shell x --runtime /r --depot /d").is_err());
         assert!(args("connect --state-dir /s").is_err());
+        let defaulted = parse_args(["connect", "--state-dir", "/s", "--julia", "auto", "--runtime", "/c/v1/runtime", "--depot", ""].map(String::from).to_vec()).unwrap();
+        let folders = paths::server_folders(wire::slurm::scratch().as_deref(), Path::new("/c"));
+        assert_eq!((defaulted.depot, defaulted.ember), (folders.depot, Some(folders.ember)), "an empty depot takes the server's rule, and Ember goes beside it");
+        assert_eq!(args("connect --state-dir /s --julia auto --runtime /r --depot /d").unwrap().ember, None, "a depot the client names leaves Ember where it was");
         assert!(args("serve --state-dir /s --julia /j --runtime /r --depot /d").is_err());
         assert!(args("connect --state-dir /s --julia /j --runtime /r --depot /d --bogus").is_err());
     }

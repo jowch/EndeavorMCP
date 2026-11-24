@@ -121,10 +121,7 @@ impl Env {
         if cfg!(windows) {
             return self.local.join("r").join("ember");
         }
-        match &self.scratch {
-            Some(scratch) => Path::new(scratch).join("endeavor/r/ember"),
-            None => self.server_root().join("r").join("ember"),
-        }
+        server_folders(self.scratch.as_deref(), &self.server_root()).ember
     }
 
     pub fn server_root(&self) -> PathBuf {
@@ -140,6 +137,18 @@ pub(crate) fn plugin_bin_from(plugin_bin: &Path) -> PathBuf {
 
 pub(crate) fn scratch_depot(scratch: &str) -> String {
     format!("{scratch}/endeavor/depot:")
+}
+
+pub(crate) struct ServerFolders {
+    pub depot: String,
+    pub ember: PathBuf,
+}
+
+pub(crate) fn server_folders(scratch: Option<&str>, cache: &Path) -> ServerFolders {
+    match scratch {
+        Some(scratch) => ServerFolders { depot: scratch_depot(scratch), ember: Path::new(scratch).join("endeavor/r/ember") },
+        None => ServerFolders { depot: format!("{}/depot:", cache.display()), ember: cache.join("r").join("ember") },
+    }
 }
 
 pub fn with_user_depot(depot: &str) -> String {
@@ -215,6 +224,13 @@ mod tests {
     fn the_depot_is_never_relative() {
         assert_eq!(Env::default().depot(), "/.cache/endeavor/depot:", "no home at all");
         assert_eq!(Env { home: "/home/ada".into(), ..Env::default() }.depot(), "/home/ada/.cache/endeavor/depot:");
+        let cache = Path::new("/srv/endeavor");
+        let home = server_folders(None, cache);
+        assert_eq!((home.depot.as_str(), home.ember.as_path()), ("/srv/endeavor/depot:", Path::new("/srv/endeavor/r/ember")), "a server without $SCRATCH keeps both in its install folder");
+        let scratch = server_folders(Some("/scratch/ada"), cache);
+        assert_eq!((scratch.depot.as_str(), scratch.ember.as_path()), ("/scratch/ada/endeavor/depot:", Path::new("/scratch/ada/endeavor/r/ember")), "with $SCRATCH, Julia's packages and Ember sit side by side");
+        let env = Env { home: "/home/ada".into(), scratch: Some("/scratch/ada".into()), ..Env::default() };
+        assert_eq!((env.depot(), env.ember_folder()), (scratch.depot.clone(), scratch.ember.clone()), "serve follows the same rule");
     }
 
     #[test]

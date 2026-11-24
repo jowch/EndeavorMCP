@@ -1779,7 +1779,7 @@ impl FakeSlurm {
         let path = format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap());
         let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
         command
-            .args(["connect", "--runtime", "/nonexistent", "--depot", "/nonexistent"])
+            .args(["connect", "--runtime", "/nonexistent", "--depot", ""])
             .args(["--launcher", "slurm", "--julia", julia.to_str().unwrap(), "--build", "1.0.0-abc"])
             .env("PATH", path)
             .env("FAKE_SLURM", &self.dir)
@@ -1886,7 +1886,7 @@ fn a_cluster_job_is_submitted_waits_runs_relays_and_ends() {
     assert!(sbatch.contains("--account=lab --partition=short --cpus-per-task=2 --mem=8G --time=30"), "{sbatch}");
     assert!(sbatch.contains(&format!("--output={}", dir.join("runtime.log").display())), "{sbatch}");
     let script = slurm.read("job.sh");
-    assert!(script.contains("node-start") && script.contains("--depot '/scratch/jc/endeavor/depot:' --build '1.0.0-abc'"), "{script}");
+    assert!(script.contains("node-start") && script.contains("--depot '/scratch/jc/endeavor/depot:' --ember '/scratch/jc/endeavor/r/ember' --build '1.0.0-abc'"), "Julia's packages and Ember sit side by side in scratch: {script}");
     assert!(script.contains(" --r 'auto' --runtime "), "R is the node's login shell's: {script}");
     assert!(dir.join("job.json").exists());
 

@@ -234,18 +234,16 @@ fn submit_job(args: &Args, mux: &Arc<Mux>, request: &JobRequest, flags: Vec<Stri
     token(dir)?;
     let depot = match request.depot.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
         Some(d) => format!("{}:", wire::files::expand(d).display()),
-        None => match s::scratch() {
-            Some(scratch) => crate::paths::scratch_depot(&scratch),
-            None => args.depot.clone(),
-        },
+        None => args.depot.clone(),
     };
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
     let build = args.build.as_deref().map_or(String::new(), |build| format!(" --build {}", quote(build)));
     let exit_idle = if args.exit_idle { " --exit-idle" } else { "" };
     let [r_flag, r] = args.r.args();
     let when_needed = if args.julia_when_needed { " --julia-when-needed" } else { "" };
+    let ember = args.ember.as_ref().map_or(String::new(), |ember| format!(" --ember {}", quote(&ember.display().to_string())));
     let script = format!(
-        "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor.\nexec {} node-start --state-dir {} --julia {}{when_needed} {r_flag} {} --runtime {} --depot {}{build}{exit_idle}\n",
+        "#!/bin/sh\n# Endeavor's Julia for this cluster, submitted by endeavor.\nexec {} node-start --state-dir {} --julia {}{when_needed} {r_flag} {} --runtime {} --depot {}{ember}{build}{exit_idle}\n",
         quote(&exe.display().to_string()),
         quote(&dir.display().to_string()),
         quote(julia),
@@ -698,7 +696,8 @@ pub fn node_start_main(argv: &[String]) -> ! {
     if argv.iter().any(|a| a == "--julia-when-needed") {
         julia.push("--julia-when-needed".into());
     }
-    let mut command = runtime_command(&julia, &runtime, &depot, token.trim(), &dir, "slurm", flag(argv, "--build").as_deref()).unwrap_or_else(|e| fail(e));
+    let ember = flag(argv, "--ember").map(PathBuf::from);
+    let mut command = runtime_command(&julia, &runtime, &depot, ember.as_deref(), token.trim(), &dir, "slurm", flag(argv, "--build").as_deref()).unwrap_or_else(|e| fail(e));
     command.args(r.args());
     if argv.iter().any(|a| a == "--exit-idle") {
         command.env("ENDEAVOR_EXIT_IDLE", "1");
