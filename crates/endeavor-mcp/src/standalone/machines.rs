@@ -437,12 +437,14 @@ fn install_question(name: &str, items: &[wire::Item], tool: &str) -> String {
     format!("{what}{later} Install it now?")
 }
 
-fn leave_question(machine: &str) -> String {
+fn leave_question(machine: &str, cluster: bool) -> String {
     if machine == LOCAL || machine.is_empty() {
         let what = if cfg!(target_os = "macos") { "R, or uv for Python notebooks," } else { "uv for Python notebooks" };
         format!("If a notebook needs {what} and none is found on this computer, may Endeavor install its own copy?")
-    } else {
+    } else if cluster {
         format!("If a notebook on {machine} needs Julia and none is found there, may Endeavor download its own copy of Julia?")
+    } else {
+        format!("If a notebook on {machine} needs Julia, or uv for Python notebooks, and none is found there, may Endeavor download its own copy?")
     }
 }
 
@@ -1080,7 +1082,7 @@ impl Relay {
                 let items: Vec<wire::Item> = serde_json::from_value(result["install"]["items"].clone()).unwrap_or_default();
                 Some(install_question(&name, &items, tool))
             }
-            Ok(result) if tool == "use_machine" && wants_install && result["ready"] == true => Some(leave_question(&machine)),
+            Ok(result) if tool == "use_machine" && wants_install && result["ready"] == true => Some(leave_question(&machine, result["cluster"] == true)),
             _ => None,
         };
         let question = question.filter(|_| self.consent.can_ask() || wants_install);
@@ -1533,6 +1535,7 @@ impl Relay {
             return Ok(result);
         }
         result["node"] = runtime.node.clone().into();
+        result["cluster"] = server.cluster.is_some().into();
         result["remote_port"] = runtime.remote_port.into();
         result["already_running"] = (runtime.reattached || was_ready).into();
         if let Some(job) = job_json(&reached.status) {

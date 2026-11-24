@@ -640,10 +640,13 @@ fn only_an_answered_sign_in_keeps_the_user_counted_as_there() {
 }
 
 #[test]
-fn the_leave_asked_on_this_computer_names_uv_and_on_a_mac_r_too() {
-    let asked = leave_question(LOCAL);
+fn the_leave_asked_names_what_it_lets_endeavor_download_where() {
+    let asked = leave_question(LOCAL, false);
     assert!(asked.contains("uv for Python notebooks") && asked.contains("this computer"), "{asked}");
     assert_eq!(asked.contains("R, or uv"), cfg!(target_os = "macos"), "{asked}");
-    assert_eq!(leave_question(""), asked);
-    assert!(leave_question("lab").contains("Julia") && !leave_question("lab").contains("uv"));
+    assert_eq!(leave_question("", false), asked);
+    let server = leave_question("lab", false);
+    assert!(server.contains("on lab") && server.contains("Julia") && server.contains("uv for Python notebooks") && !server.contains(" R"), "the yes passes Julia's and uv's leave to a server: {server}");
+    let cluster = leave_question("hpc", true);
+    assert!(cluster.contains("on hpc") && cluster.contains("Julia") && !cluster.contains("uv"), "a Slurm job gets no uv of Endeavor's: {cluster}");
 }
