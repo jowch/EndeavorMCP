@@ -1,6 +1,6 @@
 # marimo notebooks (Python)
 
-Read this when the notebook is a marimo notebook (a `.py` file with `app = marimo.App()`). It covers what marimo adds to the general rules. Python notebooks run on macOS, Linux and Windows, and need uv. If a tool fails with `python_not_found`, its message says whether Endeavor can download its own uv: ask the user, and only if they agree do what the message says; otherwise, and in the Endeavor app, tell the user to install uv and try again. They don't need Julia.
+Read this when the notebook is a marimo notebook (a `.py` file with `app = marimo.App()`). It covers what marimo adds to the general rules. Python notebooks run on macOS, Linux and Windows, and need uv. If a tool fails with `python_not_found`, its message says whether Endeavor can download its own uv: ask the user, and only if they agree do what the message says. In the Endeavor app, tell the user what the message says: they start a new Python session and click Install uv in its notebook pane. Otherwise, tell the user to install uv and try again. They don't need Julia.
 
 ## What a cell may hold
 
