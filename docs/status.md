@@ -506,7 +506,9 @@ Next:
   is told Endeavor can download its own uv 0.11.32 (from uv's GitHub release,
   checked against its SHA-256, into `~/.cache/endeavor/uv-0.11.32`) if the user
   agrees; their yes comes as `use_machine` with `install: true` on this computer,
-  which asks them first and passes `endeavor/allow_uv_install` (interface 48).
+  which asks them first and passes `endeavor/allow_uv_install` (interface 48). In the
+  Endeavor app the agent is told instead that the user clicks Install uv in the
+  notebook pane, which sends the same call.
   Python notebooks also run on servers, through `use_machine`, as Julia and R
   ones do; marimo's page is reached through the same forwarded port. On a
   server with no uv the offer names that machine, and `use_machine` with
