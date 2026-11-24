@@ -219,7 +219,8 @@ fn a_python_notebook_runs_on_windows_and_stop_ends_marimo() {
     if drive(&elsewhere) != drive(&folder) {
         let _ = std::fs::remove_file(&elsewhere);
         let (failed, text) = session(&token).call("new_notebook", &json!({ "path": elsewhere }));
-        assert!(failed && text.contains("unsupported::") && text.contains("one drive at a time"), "{text}");
+        let refused: Value = serde_json::from_str(&text).unwrap_or_else(|_| panic!("{text}"));
+        assert!(failed && refused["error"] == "unsupported" && refused["message"].as_str().unwrap_or_default().contains("one drive at a time"), "{text}");
         assert!(!elsewhere.exists(), "nothing was made on the other drive");
     } else {
         eprintln!("NOTE: the temporary folder is on the notebooks' drive, so the other-drive refusal isn't checked here.");
