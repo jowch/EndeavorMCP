@@ -62,6 +62,17 @@ fn listening(port: u16) -> bool {
     TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_secs(2)).is_ok()
 }
 
+fn get(port: u16, target: &str, headers: &str) -> (String, String, String) {
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    write!(socket, "GET {target} HTTP/1.0\r\nHost: localhost:{port}\r\n{headers}\r\n").unwrap();
+    let mut reply = Vec::new();
+    socket.read_to_end(&mut reply).unwrap();
+    let reply = String::from_utf8_lossy(&reply).into_owned();
+    let (head, body) = reply.split_once("\r\n\r\n").unwrap_or((&reply, ""));
+    (head.lines().next().unwrap_or_default().to_owned(), head.to_owned(), body.to_owned())
+}
+
 struct Cleanup {
     state: PathBuf,
     serve: Option<Child>,
@@ -215,28 +226,54 @@ fn a_python_notebook_runs_on_windows_and_stop_ends_marimo() {
     assert!(folder.join("decay.py").is_file());
 
     let drive = |path: &Path| path.components().next().map(|part| part.as_os_str().to_ascii_lowercase());
-    let elsewhere = std::env::temp_dir().join("endeavor-e2e-other-drive.py");
-    if drive(&elsewhere) != drive(&folder) {
-        let _ = std::fs::remove_file(&elsewhere);
-        let (failed, text) = session(&token).call("new_notebook", &json!({ "path": elsewhere }));
-        let refused: Value = serde_json::from_str(&text).unwrap_or_else(|_| panic!("{text}"));
-        assert!(failed && refused["error"] == "unsupported" && refused["message"].as_str().unwrap_or_default().contains("one drive at a time"), "{text}");
-        assert!(!elsewhere.exists(), "nothing was made on the other drive");
+    let other = fresh(std::env::temp_dir().join("endeavor-e2e-other-drive"));
+    let elsewhere = other.join("elsewhere.py");
+    let second = drive(&elsewhere) != drive(&folder);
+    if second {
+        std::fs::write(&elsewhere, GROWTH).unwrap();
+        let opened = session(&token).started("open_notebook", json!({ "path": elsewhere }));
+        let notebook = opened["notebook_id"].as_str().unwrap_or_else(|| panic!("{opened}")).to_owned();
+        agent.ok("allow_execution", json!({ "notebook_id": notebook, "run_notebook": false }));
+        agent.ok("run_all_cells", json!({ "notebook_id": notebook, "wait_for_completion": true }));
+        let order = agent.ok("get_cell_order", json!({ "notebook_id": notebook }))["cell_ids"][1].as_str().unwrap().to_owned();
+        let read = agent.ok("read_cell", json!({ "notebook_id": notebook, "cell_id": order }));
+        assert!(read["errored"] == false && read["output"].as_str().unwrap_or_default().contains("21"), "a notebook on another drive runs: {read}");
+
+        let path = opened["path"].as_str().unwrap_or_else(|| panic!("{opened}"));
+        let file: String = path.chars().map(|c| match c {
+            ' ' => "%20".into(),
+            '\\' => "%5C".into(),
+            ':' => "%3A".into(),
+            '%' => "%25".into(),
+            c => c.to_string(),
+        }).collect();
+        let pages = link.split_once("/?token=").unwrap().1;
+        let (_, head, _) = get(port, &format!("/marimo/?file={file}&token={pages}"), "");
+        let cookie = head.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap_or_else(|| panic!("no cookie: {head}")).split(';').next().unwrap().to_owned();
+        let cookie = format!("Cookie: {cookie}\r\nSec-Fetch-Site: none\r\n");
+        let (status, head, _) = get(port, &format!("/marimo/?file={file}"), &cookie);
+        assert!(status.starts_with("HTTP/1.1 301") && head.contains(&format!("Location: /marimo/_1/?file={file}")), "the page moves to its drive's server: {head}");
+        let (status, head, page) = get(port, &format!("/marimo/_1/?file={file}"), &cookie);
+        assert_eq!(status, "HTTP/1.1 200 OK", "{head}\n{page}");
+        assert!(page.contains("serverToken"), "the other drive's marimo serves its page: {}", &page[..page.len().min(400)]);
     } else {
-        eprintln!("NOTE: the temporary folder is on the notebooks' drive, so the other-drive refusal isn't checked here.");
+        eprintln!("NOTE: the temporary folder is on the notebooks' drive, so a second drive isn't checked here.");
     }
 
     let marimo: Value = serde_json::from_str(&std::fs::read_to_string(state.join("marimo.json")).unwrap()).unwrap();
-    let (adapter, page, bridge) = (marimo["pid"].as_u64().unwrap(), marimo["marimo_port"].as_u64().unwrap() as u16, marimo["bridge_port"].as_u64().unwrap() as u16);
-    assert!(running(adapter) && listening(page) && listening(bridge), "{marimo}");
+    let ports: Vec<u16> = marimo["servers"].as_array().unwrap_or_else(|| panic!("{marimo}")).iter().map(|server| server["port"].as_u64().unwrap() as u16).collect();
+    assert_eq!(ports.len(), if second { 2 } else { 1 }, "one marimo per drive: {marimo}");
+    let (adapter, bridge) = (marimo["pid"].as_u64().unwrap(), marimo["bridge_port"].as_u64().unwrap() as u16);
+    assert!(running(adapter) && listening(bridge) && ports.iter().all(|&page| listening(page)), "{marimo}");
     let stopped = Command::new(env!("CARGO_BIN_EXE_endeavor")).args(["stop", "--state-dir"]).arg(&state).output().unwrap();
     assert!(stopped.status.success(), "{}", String::from_utf8_lossy(&stopped.stderr));
     let by = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < by && (running(adapter) || listening(page) || listening(bridge)) {
+    let pages_up = || ports.iter().any(|&page| listening(page));
+    while Instant::now() < by && (running(adapter) || pages_up() || listening(bridge)) {
         std::thread::sleep(Duration::from_millis(250));
     }
     assert!(!running(adapter), "the adapter outlived the runtime");
-    assert!(!listening(page) && !listening(bridge), "marimo's server outlived the runtime");
+    assert!(!pages_up() && !listening(bridge), "a marimo server outlived the runtime");
 }
 
 const ADAPTER: &str = include_str!("../../../runtime/marimo/adapter.py");

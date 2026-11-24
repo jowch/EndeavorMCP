@@ -151,18 +151,16 @@ def other_drive(path, root, splitdrive=os.path.splitdrive):
     return None if drive.lower() == splitdrive(root)[0].lower() else drive
 
 
-def on_marimos_drive(path):
-    drive = other_drive(real(path), ROOT)
-    if drive is not None:
-        root = os.path.splitdrive(ROOT)[0]
-        raise argument_error("unsupported", f"'{path}' is on {drive}, but Python notebooks run from one drive at a time, and since Endeavor started that is {root}. Don't change the path. Tell the user exactly this: Python notebooks can use one drive at a time, this one is on {drive}, and after Endeavor restarts the first Python notebook opened or made can be on {drive}.")
+def server_base(index):
+    return BASE_URL if index == 0 else f"{BASE_URL}/_{index}"
 
 
 class Marimo:
-    def __init__(self):
+    def __init__(self, root, index):
+        self.root, self.base_url = root, server_base(index)
         self.port = free_port()
         self.token = os.environ.get("ENDEAVOR_MARIMO_TOKEN") or secrets.token_hex(32)
-        self.base = f"http://127.0.0.1:{self.port}{BASE_URL}"
+        self.base = f"http://127.0.0.1:{self.port}{self.base_url}"
         self.config = Path(tempfile.mkdtemp(prefix="endeavor-marimo-"))
         self.server_token = None
 
@@ -176,8 +174,8 @@ class Marimo:
         env.pop("ENDEAVOR_TOKEN", None)
         env.pop("ENDEAVOR_MARIMO_TOKEN", None)
         self.child = asyncio.subprocess.create_subprocess_exec(
-            sys.executable, "-c", MARIMO_CLI, "-q", "edit", ROOT, "--headless", "--sandbox", "--watch",
-            "--skip-update-check", "--host", "127.0.0.1", "--port", str(self.port), "--base-url", BASE_URL,
+            sys.executable, "-c", MARIMO_CLI, "-q", "edit", self.root, "--headless", "--sandbox", "--watch",
+            "--skip-update-check", "--host", "127.0.0.1", "--port", str(self.port), "--base-url", self.base_url,
             "--token-password-file", str(token_file), env=env, stdin=asyncio.subprocess.DEVNULL)
 
     async def wait_ready(self, timeout=120):
@@ -326,8 +324,8 @@ def new_cell(code, name=""):
 
 
 class Notebook:
-    def __init__(self, adapter, path, allowed):
-        self.adapter, self.m = adapter, adapter.marimo
+    def __init__(self, adapter, server, path, allowed):
+        self.adapter, self.m = adapter, server
         self.id = str(uuid.uuid4())
         self.path = path
         self.allowed = allowed
@@ -391,7 +389,7 @@ class Notebook:
 
     async def go_live(self):
         await asyncio.to_thread(pin_marimo, self.path)
-        url = f"ws://127.0.0.1:{self.m.port}{BASE_URL}/ws"
+        url = f"ws://127.0.0.1:{self.m.port}{self.m.base_url}/ws"
         query = urllib.parse.urlencode({"file": self.path, "access_token": self.m.token})
         maker = await websockets.connect(f"{url}?session_id=endeavor-{secrets.token_hex(6)}&{query}", max_size=None)
         try:
@@ -1297,7 +1295,11 @@ SET_INPUT_MARK = "ENDEAVOR-SET-INPUT "
 
 class Adapter:
     def __init__(self):
-        self.marimo = Marimo()
+        self.servers = [Marimo(ROOT, 0)]
+        self.starting = asyncio.Lock()
+        self.pending = None
+        self.server_ended = asyncio.Event()
+        self.bridge_port = None
         self.notebooks = {}
         self.seq = 0
         self.notes = []
@@ -1323,14 +1325,38 @@ class Adapter:
     def by_path(self, path):
         return next((nb for nb in self.notebooks.values() if nb.path == path), None)
 
+    def serving(self, path):
+        return next((s for s in self.servers if other_drive(path, s.root) is None), None)
+
+    async def server_for(self, path):
+        async with self.starting:
+            if (server := self.serving(path)) is not None:
+                return server
+            server = self.pending = Marimo(drive_root(path), len(self.servers))
+            try:
+                server.start()
+                await server.wait_ready()
+            except Exception as e:
+                await stop_server(server)
+                raise argument_error("python_failed", f"marimo couldn't start for {server.root}: {e}") from e
+            finally:
+                self.pending = None
+            self.servers.append(server)
+            asyncio.create_task(self.watch_server(server))
+            write_state(self.bridge_port, self.servers)
+            return server
+
+    async def watch_server(self, server):
+        await server.child.wait()
+        self.server_ended.set()
+
     async def open(self, path, run):
         path = real(path)
         if not os.path.isfile(path):
             raise argument_error("file_not_found", f"No file at '{path}'")
-        on_marimos_drive(path)
         if (nb := self.by_path(path)) is not None:
             raise argument_error("notebook_already_open", f"'{path}' is already open as notebook_id {nb.id}; use that id")
-        nb = Notebook(self, path, allowed=bool(run))
+        nb = Notebook(self, await self.server_for(path), path, allowed=bool(run))
         nb.load_file()
         self.notebooks[nb.id] = nb
         if nb.allowed:
@@ -1346,10 +1372,10 @@ class Adapter:
                 n += 1
                 path = os.path.join(folder, f"notebook {n}.py")
         path = os.path.abspath(os.path.expanduser(path))
-        on_marimos_drive(path)
         if os.path.exists(path):
             raise argument_error("file_exists", f"'{path}' already exists; use open_notebook to load it")
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        await self.server_for(real(path))
         date = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         Path(path).write_text(NEW_HEADER.format(python=f"{sys.version_info[0]}.{sys.version_info[1]}", version=marimo.__version__, date=date) + NEW_NOTEBOOK)
         try:
@@ -1439,7 +1465,7 @@ class Adapter:
             nb.write_file()
         elif changes:
             sid = nb.watcher
-            await self.marimo.post("/api/document/transaction", sid, {"changes": changes})
+            await nb.m.post("/api/document/transaction", sid, {"changes": changes})
             deleted = [ch["cellId"] for ch in changes if ch["type"] == "delete-cell"]
             if deleted:
                 if any(nb.cells[c]["ran_code"] is not None for c in deleted):
@@ -1463,7 +1489,7 @@ class Adapter:
         code = CODE_MODE + "from marimo._runtime.commands import DeleteCellCommand\n" + \
             "".join(f"await ctx._kernel.delete_cell(DeleteCellCommand(cell_id={c!r}))\n" for c in cells)
         try:
-            ok, out = await self.marimo.execute(await nb.session_id(), code)
+            ok, out = await nb.m.execute(await nb.session_id(), code)
         except Exception as e:  # noqa: BLE001
             ok, out = False, str(e)
         if not ok:
@@ -1471,7 +1497,7 @@ class Adapter:
 
     async def save(self, nb, sid):
         cells = [nb.cells[c] for c in nb.order]
-        await self.marimo.post("/api/kernel/save", sid, {
+        await nb.m.post("/api/kernel/save", sid, {
             "cellIds": list(nb.order), "codes": [c["code"] for c in cells], "names": [c["name"] or "_" for c in cells],
             "configs": [{"column": (c.get("config") or {}).get("column"), "disabled": bool((c.get("config") or {}).get("disabled")),
                          "hide_code": c["hide_code"], "expand_output": bool((c.get("config") or {}).get("expand_output"))} for c in cells],
@@ -1497,7 +1523,7 @@ class Adapter:
 
     async def background(self, nb, code, cells):
         try:
-            ok, out = await self.marimo.execute(await nb.session_id(), code)
+            ok, out = await nb.m.execute(await nb.session_id(), code)
             if not ok and "Traceback" in out and not any(nb.cells[c]["errored"] for c in cells if c in nb.cells):
                 print(f"endeavor marimo: a run failed in code mode: {out[-500:]}", file=sys.stderr)
         except Exception as e:  # noqa: BLE001
@@ -1558,7 +1584,7 @@ class Adapter:
             raise argument_error("input_refused", f"Cell {cell}, which makes `{name}`, {unready}")
         code = SET_INPUT + f"print({SET_INPUT_MARK!r} + _json.dumps(await _endeavor_set_input({name!r}, _json.loads({json.dumps(value)!r}))))\n"
         try:
-            ok, out = await self.marimo.execute(await nb.session_id(), code)
+            ok, out = await nb.m.execute(await nb.session_id(), code)
         except Exception as e:  # noqa: BLE001
             ok, out = False, str(e)
         said = next((json.loads(line[len(SET_INPUT_MARK):]) for line in out.splitlines() if line.startswith(SET_INPUT_MARK)), None)
@@ -1616,14 +1642,14 @@ class Adapter:
         busy = bool(self.unfinished(nb, list(nb.order))) or bool(nb.asking)
         nb.asking = None
         if nb.live:
-            await self.marimo.post("/api/kernel/interrupt", await nb.session_id(), {})
+            await nb.m.post("/api/kernel/interrupt", await nb.session_id(), {})
         return {"interrupted": busy}
 
     async def restart(self, nb):
         if not nb.allowed:
             raise argument_error("execution_blocked", "The notebook is in safe preview; Run notebook starts it")
         nb.closing = True
-        await self.marimo.post("/api/kernel/restart_session", await nb.session_id(), {}, timeout=300)
+        await nb.m.post("/api/kernel/restart_session", await nb.session_id(), {}, timeout=300)
         if nb.ws:
             await nb.ws.close()
         if nb.watch:
@@ -1716,19 +1742,21 @@ class Adapter:
         path = os.path.abspath(os.path.expanduser(path))
         if os.path.exists(path):
             raise argument_error("invalid_path", f"'{path}' already exists")
+        if (drive := other_drive(real(path), nb.m.root)) is not None:
+            raise argument_error("unsupported", f"'{path}' is on {drive}, and an open Python notebook can't move to another drive. Move it on its own drive, or tell the user to close it and move the file themselves.")
         if nb.live:
-            await self.marimo.post("/api/kernel/rename", await nb.session_id(), {"filename": path})
+            await nb.m.post("/api/kernel/rename", await nb.session_id(), {"filename": path})
         else:
             raise argument_error("execution_blocked", "The notebook is in safe preview; it can move once it may run")
         nb.path = real(path)
         return {"path": nb.path}
 
-    async def virtual_png(self, src):
+    async def virtual_png(self, server, src):
         if not src or not VIRTUAL_FILE.match(src):
             return src
         try:
             async with httpx.AsyncClient(timeout=10) as c:
-                r = await c.get(self.marimo.base + "/" + src.removeprefix("./"), headers=self.marimo.headers())
+                r = await c.get(server.base + "/" + src.removeprefix("./"), headers=server.headers())
         except httpx.HTTPError:
             return None
         return base64.b64encode(r.content).decode() if r.status_code == 200 and r.content.startswith(PNG_MAGIC) else None
@@ -1737,7 +1765,7 @@ class Adapter:
         out = nb.cells[cid]["output"] or {}
         bundle = bundle_of(out)
         png = bundle.get("image/png")
-        embedded = None if png else await self.virtual_png(embedded_png(str(bundle.get("text/html") or "")))
+        embedded = None if png else await self.virtual_png(nb.m, embedded_png(str(bundle.get("text/html") or "")))
         if png:
             rendered = {"png": str(png).split(",", 1)[-1].replace("\n", ""), "mime": "image/png"}
         elif embedded:
@@ -1757,7 +1785,7 @@ class Adapter:
         return {"errors": errors}
 
     def status(self):
-        return {"marimo": marimo.__version__, "marimo_port": self.marimo.port, "seq": self.seq,
+        return {"marimo": marimo.__version__, "marimo_port": self.servers[0].port, "seq": self.seq,
                 "notebooks": [{"notebook_id": nb.id, "path": nb.path, "cell_count": len(nb.order)} for nb in self.notebooks.values()]}
 
     async def call(self, method, p):
@@ -1856,43 +1884,58 @@ def make_app(adapter):
     return Starlette(routes=[Route("/adapter", call, methods=["POST"]), Route("/notifications", notifications), Route("/health", health)])
 
 
-def write_state(bridge_port, server):
+def write_state(bridge_port, servers):
     if not STATE_FILE:
         return
     tmp = f"{STATE_FILE}.tmp{os.getpid()}"
-    Path(tmp).write_text(json.dumps({"pid": os.getpid(), "bridge_port": bridge_port, "marimo_port": server.port, "marimo": marimo.__version__}))
+    Path(tmp).write_text(json.dumps({"pid": os.getpid(), "bridge_port": bridge_port, "marimo_port": servers[0].port, "marimo": marimo.__version__,
+                                     "servers": [{"root": s.root, "base": s.base_url, "port": s.port} for s in servers]}))
     os.replace(tmp, STATE_FILE)
+
+
+def process_of(server):
+    return server.child if isinstance(getattr(server, "child", None), asyncio.subprocess.Process) else None
+
+
+async def stop_server(server):
+    child = process_of(server)
+    if child is not None and child.returncode is None:
+        child.terminate()
+        try:
+            await asyncio.wait_for(child.wait(), 10)
+        except asyncio.TimeoutError:
+            child.kill()
+    shutil.rmtree(server.config, ignore_errors=True)
 
 
 async def main():
     if not TOKEN:
         sys.exit("ENDEAVOR_TOKEN is not set")
     adapter = Adapter()
-    adapter.marimo.start()
-    await adapter.marimo.wait_ready()
-    port = free_port()
-    server = uvicorn.Server(uvicorn.Config(make_app(adapter), host="127.0.0.1", port=port, log_level="warning", lifespan="off"))
+    first = adapter.servers[0]
+    first.start()
+    await first.wait_ready()
+    asyncio.create_task(adapter.watch_server(first))
+    adapter.bridge_port = free_port()
+    server = uvicorn.Server(uvicorn.Config(make_app(adapter), host="127.0.0.1", port=adapter.bridge_port, log_level="warning", lifespan="off"))
     serving = asyncio.create_task(server.serve())
     while not server.started:
         await asyncio.sleep(0.05)
-    write_state(port, adapter.marimo)
+    write_state(adapter.bridge_port, adapter.servers)
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     if sys.platform != "win32":
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop.set)
-    ended = asyncio.create_task(adapter.marimo.child.wait())
+    ended = asyncio.create_task(adapter.server_ended.wait())
     await asyncio.wait([serving, ended, asyncio.create_task(stop.wait())], return_when=asyncio.FIRST_COMPLETED)
     server.should_exit = True
-    if adapter.marimo.child.returncode is None:
-        adapter.marimo.child.terminate()
-        try:
-            await asyncio.wait_for(adapter.marimo.child.wait(), 10)
-        except asyncio.TimeoutError:
-            adapter.marimo.child.kill()
-    shutil.rmtree(adapter.marimo.config, ignore_errors=True)
+    gone = [s for s in adapter.servers if process_of(s).returncode is not None]
+    for s in [*adapter.servers, adapter.pending]:
+        if s is not None:
+            await stop_server(s)
     if ended.done():
-        sys.exit(f"marimo's server ended ({adapter.marimo.child.returncode})")
+        sys.exit("; ".join(f"marimo's server for {s.root} ended ({process_of(s).returncode})" for s in gone))
 
 
 if __name__ == "__main__":

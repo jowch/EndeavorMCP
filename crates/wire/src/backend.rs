@@ -73,7 +73,9 @@ impl Backend {
     pub fn notebook_path(self, url: &str) -> Option<String> {
         let (address, query) = url.split_once('?')?;
         let path = address.split_once("://").map_or(address, |(_, rest)| rest.find('/').map_or("", |slash| &rest[slash..]));
-        if self != Backend::Marimo || path != format!("{}/", self.prefix()) {
+        let server = path.strip_prefix(self.prefix()).and_then(|rest| rest.strip_suffix('/'));
+        let numbered = |server: &str| server.strip_prefix("/_").is_some_and(|n| n.parse::<usize>().is_ok_and(|n| n > 0 && n.to_string() == server[2..]));
+        if self != Backend::Marimo || !server.is_some_and(|server| server.is_empty() || numbered(server)) {
             return None;
         }
         let mut files = query.split('&').filter_map(|kv| kv.strip_prefix("file="));
@@ -183,6 +185,10 @@ mod tests {
         assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=%zz"), None);
         assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/?file=%+f"), None, "a sign isn't a hex digit");
         assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/api/x?file=/w/a.py"), None, "only the page");
+        assert_eq!(Backend::Marimo.notebook_path("http://127.0.0.1:1234/marimo/_2/?file=D:/w/a.py").as_deref(), Some("D:/w/a.py"), "a notebook on another drive's server");
+        for other in ["/marimo/_0/", "/marimo/_02/", "/marimo/_x/", "/marimo/_/", "/marimo/_2/api/", "/marimo/x/"] {
+            assert_eq!(Backend::Marimo.notebook_path(&format!("http://127.0.0.1:1234{other}?file=/w/a.py")), None, "{other}");
+        }
         assert_eq!(Backend::Pluto.notebook_path(&url), None);
         assert_eq!(Backend::Marimo.notebook_id("http://127.0.0.1:1234/marimo/edit?id=abc"), None);
     }
