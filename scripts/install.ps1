@@ -1,33 +1,3 @@
-# Install endeavor from the Helpers release on GitHub, for Windows
-# (PowerShell 5.1 or newer; macOS and Linux: scripts/install.sh).
-#
-#   irm https://raw.githubusercontent.com/jowch/EndeavorMCP/main/scripts/install.ps1 | iex
-#
-# It reads release-key from main, the same place this script comes from. When
-# that holds checksums, it installs the build it names and checks it against
-# them: the build the plugins run, checked the way they check it. If main
-# can't be read or pins no checksums, nothing is installed. With
-# $env:ENDEAVOR_PIN_URL = 'none' it reads LATEST from the release instead and
-# checks against endeavor-<key>.sha256 from there. It downloads
-# endeavor-<key>-windows-x86_64.exe and puts it in $Dir as
-# endeavor.exe, replacing one that is there (a copy that is running is renamed
-# to endeavor.exe.old-<pid>, which the next install or `endeavor update` removes
-# once nothing runs from it).
-# $Dir is -Dir, else $env:ENDEAVOR_INSTALL_DIR, else %LOCALAPPDATA%\Endeavor\bin,
-# and it is added to your user PATH if it isn't there. No administrator rights.
-#
-# With `irm | iex` there is no way to pass -Dir; set ENDEAVOR_INSTALL_DIR first.
-# Everything runs in a script block, so `irm | iex` leaves no variables,
-# functions or preferences in your session.
-# $env:ENDEAVOR_RELEASE_URL replaces the release's address (for tests; a
-# file:// address or a folder works), and $env:ENDEAVOR_PIN_URL the address of
-# main's release-key ('none': no pin); with only the first set, no pin is read. The release's
-# checksum file comes from the same release as the binary, so a check against
-# it catches a damaged download and not a tampered release.
-# From an https address, a redirect is followed only to https. PowerShell 7
-# (.NET's HttpClient) refuses any other itself; Windows PowerShell 5.1's
-# Invoke-WebRequest has no such switch, so there each redirect is followed by
-# hand and one away from https is refused.
 & {
     param([string]$Dir = $env:ENDEAVOR_INSTALL_DIR)
 
@@ -56,9 +26,6 @@
     }
     $Dir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Dir)
 
-    # Download URL to FILE under Windows PowerShell 5.1, following up to 10
-    # redirects by hand, none of them from https to anything else, and giving
-    # up after SECS seconds in all.
     function Save-Url([string]$Url, [string]$File, [int]$Secs) {
         $clock = [Diagnostics.Stopwatch]::StartNew()
         $at = [Uri]$Url
@@ -71,7 +38,6 @@
             $req.AllowAutoRedirect = $false
             $req.Timeout = $left * 1000
             $req.ReadWriteTimeout = [Math]::Min($left, 60) * 1000
-            # An error status comes as a WebException (inside PowerShell's own) holding the response.
             try { $resp = $req.GetResponse() } catch {
                 $e = $_.Exception
                 while ($e -and -not ($e -is [Net.WebException])) { $e = $e.InnerException }
@@ -101,7 +67,6 @@
         }
     }
 
-    # Fetch URL (an address, or a file's path) to FILE, giving up after SECS seconds.
     function Get-Url([string]$Url, [string]$File, [int]$Secs = 60) {
         try {
             if ($Url -match '^file:') {
@@ -118,13 +83,11 @@
         }
     }
 
-    # Fetch NAME from the release to FILE, giving up after SECS seconds (a build is about 5 MB).
     function Get-Release([string]$Name, [string]$File, [int]$Secs = 60) {
         $url = if ($release -match '^[A-Za-z]:\\|^\\\\') { Join-Path $release $Name } else { "$release/$Name" }
         Get-Url $url $File $Secs
     }
 
-    # The SHA-256 the sha256sum-style LINES give for NAME, if any.
     function Find-Sum($Lines, [string]$Name) {
         foreach ($line in $Lines) {
             $parts = $line.Trim() -split '\s+', 2
@@ -137,7 +100,6 @@
     $tmp = Join-Path $Dir (".endeavor-install-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
-        # Main's pin, when it can be read and holds checksums.
         $key = $null
         $pinned = $false
         if ($pinUrl) {
@@ -167,8 +129,6 @@
 
         $new = Join-Path $tmp 'endeavor.exe'
         Get-Release $name $new 900
-        # .NET's SHA256 rather than Get-FileHash, which Windows PowerShell 5.1 defines in a script module that
-        # doesn't load when PSModulePath names PowerShell 7's modules (a 5.1 started from pwsh).
         $stream = [IO.File]::OpenRead($new)
         try { $have = (-join ([Security.Cryptography.SHA256]::Create().ComputeHash($stream) | ForEach-Object { $_.ToString('x2') })) } finally { $stream.Close() }
         if ($have -ne $want -and $pinned) {
@@ -179,7 +139,6 @@
         }
 
         $exe = Join-Path $Dir 'endeavor.exe'
-        # Earlier installs and updates left their old binaries aside; a copy still running can't be removed, and is left.
         Get-ChildItem -LiteralPath $Dir -Force | Where-Object { $_.Name -match '^endeavor\.exe\.old(-\d+)?$' } | Remove-Item -Force -ErrorAction SilentlyContinue
         $old = "$exe.old-$PID"
         $aside = Test-Path -LiteralPath $exe
@@ -198,13 +157,11 @@
     Write-Host "Installed endeavor (build $key, $platform) in $exe"
     try { Write-Host (& $exe --version | Select-Object -First 1) } catch { Write-Warning "$exe didn't run with --version." }
 
-    # The user's Path as stored, with its %VARIABLES% unexpanded, so writing it back keeps them.
     $user = [string](Get-Item -LiteralPath 'HKCU:\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
     $entries = @($user -split ';' | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\').ToLower() })
     if ($entries -notcontains $Dir.TrimEnd('\').ToLower()) {
         $joined = if ($user) { $user.TrimEnd(';') + ';' + $Dir } else { $Dir }
         Set-ItemProperty -LiteralPath 'HKCU:\Environment' -Name 'Path' -Value $joined -Type ExpandString
-        # Setting and clearing a variable makes Windows tell running programs that the environment changed.
         try { [Environment]::SetEnvironmentVariable('ENDEAVOR_PATH_CHANGED', '1', 'User'); [Environment]::SetEnvironmentVariable('ENDEAVOR_PATH_CHANGED', $null, 'User') } catch { }
         $env:Path = $env:Path.TrimEnd(';') + ';' + $Dir
         Write-Host ""

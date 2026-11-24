@@ -9,7 +9,7 @@ These come back the same way, but nothing failed and the call is not marked an e
 | `error` | Meaning | Do |
 |---|---|---|
 | `julia_starting` | Julia is starting, for the first Julia notebook opened or made, or ahead of it when the session will use Julia notebooks. The first start can take 10 minutes; the message says how long so far | Make the same call again |
-| `python_installing` | The first Python notebook on this computer: uv is getting Python and marimo, which can take a few minutes | Make the same call again |
+| `python_installing` | The first Python notebook on this computer: Endeavor is downloading its own uv (after the user agreed), or uv is getting Python and marimo, which can take a few minutes | Make the same call again |
 | `r_installing` | The first R notebook on this computer or machine: Endeavor is installing its own R (on the user's own Mac, after they agreed) or Ember, which takes a few minutes | Make the same call again |
 | `no_preview` | `apply_package_update` without a ready `preview_package_update` for that date, or the notebook's packages changed since | Preview that date again, tell the user what changes, then apply |
 | `not_updatable` | `preview_package_update` with a `package` that isn't in the notebook's packages, or doesn't come from CRAN | Only a CRAN package in the notebook has release dates to move to. Tell the user; a package from elsewhere changes with its install call |
@@ -54,6 +54,7 @@ On a machine, a call made while Endeavor starts there, or while its Slurm job is
 | `not_a_file`, `not_a_folder` | `read_file` was given a folder, or `list_folder` a file | Use the other tool |
 | `unsupported` | `run_shell` on a Windows server | Don't use it there |
 | `unsupported` | An R notebook (`.R`) on Windows, or in a runtime without R notebooks | Tell the user R notebooks don't run there yet; offer a Julia notebook |
+| `python_not_found` | No uv was found on this computer. Where Endeavor has a uv for it (macOS and Linux), the message offers Endeavor's own | If it offers Endeavor's own uv, do what the message says: through `use_machine`, ask the user and don't pass `install: true` without their yes. In the Endeavor app, and otherwise, tell the user to install uv, as the message says |
 | `r_not_found` | No R was found: `Rscript` isn't on the PATH, or the R set for this machine isn't there. On the user's own Mac, the message offers Endeavor's own R | If it offers Endeavor's own R, do what the message says: through `use_machine`, ask the user and don't pass `install: true` without their yes; in the Endeavor app, tell the user where to install it, as the message says. Otherwise tell the user how to get R, as the message says |
 | `r_failed` | R started but Ember didn't: it couldn't install, or it stopped | Tell the user what the message says; the runtime's log has the rest |
 | `risky_source` | The notebook came from a remote source, so only the user can allow it to run | Ask the user to run it from the notebook |

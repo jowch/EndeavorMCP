@@ -1,31 +1,8 @@
-# The Pluto adapter's side of the engine interface (docs/runtime-core.md). The
-# core (`endeavor core`) calls `POST /adapter` with {"method", "params"}
-# and reads the reply's "result" or "error". The methods (see `adapter_call`):
-# status, open, new, and for a notebook_id snapshot, graph, shutdown, apply,
-# run, interrupt, restart, allow_execution, move, render_png and validate. What happens in
-# Pluto reaches the core as notifications on `GET /notifications`, one
-# `data: {"method", "params"}` line each: notebook_opened, notebook_shut_down
-# (it left the session), file_saved, execution_done, cell_state (every cell's
-# code and run state: Pluto's hook doesn't say which cell changed),
-# topology_changed, run_finished (an unwaited run ended: its `run` id and the
-# cells it finished), and process_exited (its own process ended by itself; the
-# cells that were running).
-#
-# Each notification carries `seq`, a counter that `apply` also advances; its
-# reply and `snapshot`'s carry it too. A snapshot or notification numbered
-# below an `apply`'s `seq` may show the notebook from before that change.
 
 const _NOTIFY_LOCK = ReentrantLock()
 const _NOTIFY_SUBSCRIBERS = Set{Channel{String}}()
 const _SEQ = Ref(0)
-# Each notebook's dependency graph as last announced.
 const _TOPOLOGY_SENT = Dict{UUID,Any}()
-# Cells the tools edited or added and that haven't run since, per notebook, and
-# the topology with their new code (`current_topology`). Pluto's own topology
-# stays as of the last run: a run compares it with the new one to know what the
-# edits changed, as a run from Pluto's page does. Analysing a staged edit into
-# `nb.topology` left that comparison empty, so a run after it didn't run the
-# other cell of a conflict it fixed, nor drop a name it removed (L1 on Haiku, 11-20).
 const _STAGED = Dict{UUID,Any}()
 
 function notify!(method::AbstractString, params::AbstractDict)::Nothing
@@ -64,7 +41,6 @@ function forget_topology!(notebook_id::UUID)
     return nothing
 end
 
-# Stage cells whose code the tools changed, for `current_topology`.
 function _stage!(nb, cells)
     lock(_NOTIFY_LOCK) do
         staged = get!(() -> (cells = Set{Pluto.Cell}(), base = nothing, topology = nothing), _STAGED, nb.notebook_id)
@@ -73,9 +49,6 @@ function _stage!(nb, cells)
     return nothing
 end
 
-# The notebook's topology with the staged edits analysed: Pluto's own (as of
-# the last run) when none is left. A staged cell drops out once a run (ours or
-# the page's) has analysed its current code, or once it is deleted.
 function current_topology(nb)
     lock(_NOTIFY_LOCK) do
         staged = get(_STAGED, nb.notebook_id, nothing)
@@ -93,7 +66,6 @@ function current_topology(nb)
     end
 end
 
-"End every open notification stream (e.g. when the bridge stops)."
 function close_notification_streams!()::Nothing
     lock(_NOTIFY_LOCK) do
         foreach(close, _NOTIFY_SUBSCRIBERS)
@@ -138,37 +110,24 @@ function _notify_browser(session, notebook)
     try
         Pluto.send_notebook_changes!(Pluto.ClientRequest(; session, notebook))
     catch
-        # No page open is fine.
     end
 end
 
-# Whether a run is over: its Pluto task has ended, or its notebook's own
-# process is gone or the notebook has left the session, which no task ending
-# would say.
 function _run_over(session, nb, run)
     istaskdone(run) || nb.process_status === Pluto.ProcessStatus.no_process ||
         get(session.notebooks, nb.notebook_id, nothing) !== nb
 end
 
-# Whether `over()` became true within `timeout` seconds.
 _wait_over(over, timeout) = timedwait(over, timeout; pollint=0.05) === :ok
 
 _unfinished(cell) = cell.running || cell.queued
 
-# Pluto marks the cells it runs queued itself; a run task that failed leaves
-# the cells marked by hand in `run_cells!` queued.
 function _release_cells!(nb, cells)
     foreach(c -> c.queued = false, cells)
     notify_state!(nb)
     return nothing
 end
 
-# What happens when a run ends that no caller is waiting for: a failed task
-# releases the cells, and `run_finished` says which run (`id`, the `run` that
-# `run_cells!` answered) ended and which of its cells finished. A cell can end
-# the run unfinished, queued again by a later run (a restart's). Waits as long
-# as the run takes, which only the notebook's process ending or leaving the
-# session cuts short.
 function _watch_run!(session, nb, cells, run, id)
     _wait_over(() -> _run_over(session, nb, run), Inf)
     istaskfailed(run) && _release_cells!(nb, cells)
@@ -176,7 +135,6 @@ function _watch_run!(session, nb, cells, run, id)
     return nothing
 end
 
-# Watch a run that goes on (`_watch_run!`); its id goes in the reply as `run`.
 function _watch!(result, session, nb, cells, run)
     id = string(uuid4())
     result["run"] = id
@@ -203,8 +161,6 @@ function _parse_validation_errors(nb::Pluto.Notebook, cell::Pluto.Cell, code::St
     return errors
 end
 
-# `inputs` are the cell's controls as `read_cell` lists them, and `moved` the notes on a cell
-# whose result used a control moved away from its default (Controls.jl).
 function _snapshot_cell(cell; inputs = nothing, moved = String[])
     d = Dict{String,Any}(
         "cell_id"  => string(cell.cell_id),
@@ -216,11 +172,8 @@ function _snapshot_cell(cell; inputs = nothing, moved = String[])
         "last_run" => cell.output.last_run_timestamp,
         "runtime"  => cell.runtime,
         "output"   => _serialize_output(cell),
-        # Boilerplate the tools hide: Pluto's package cells, the `@bind` shim,
-        # and cells Pluto comments out in the file.
         "hidden"   => _is_manifest_cell(cell.cell_id) || _is_fake_bind_shim(cell) || Pluto.must_be_commented_in_file(cell),
         "markdown" => _is_markdown_cell(cell),
-        # A running cell's logs are its current run's so far, not its last run's.
         "notes"    => cell.running ? String[] : vcat(_cell_notes(cell), moved),
     )
     inputs === nothing || (d["inputs"] = [c["line"] for c in inputs])
@@ -229,15 +182,6 @@ function _snapshot_cell(cell; inputs = nothing, moved = String[])
     return d
 end
 
-# Pluto's package step as it goes, or nothing when none is under way. Pluto
-# adds, installs and precompiles a notebook's packages inside its run task,
-# before any cell runs, with the cells queued; the first time a package is used
-# that takes minutes. `step` is the part under way, `packages` the ones it is
-# busy with (none until Pluto says), `seconds` how long Pluto's package work
-# has taken so far, and `last_line` the last line of its package log, with any
-# user name or token in a URL taken out (a private registry's URL may carry
-# one). It reads Pluto's internals, so if a Pluto release changes them it
-# reports nothing rather than failing the snapshot.
 const _PKG_STEPS = Dict(
     :analysis => "checking", :registry_update => "updating the package registry",
     :waiting_for_others => "waiting for another notebook's packages",
@@ -256,7 +200,6 @@ function package_step(nb)
     end
 end
 
-# A URL's `user:token@` taken out of a line of text.
 _without_userinfo(line) = replace(line, r"(\w+://)[^/\s@]+@" => s"\1")
 
 function _package_step(nb)
@@ -269,28 +212,15 @@ function _package_step(nb)
     lines = filter(l -> !isempty(l) && !all(==('='), l), strip.(split(log, '\n')))
     Dict{String,Any}(
         "step"      => step,
-        # Pluto lists its own log, `nbpkg_sync`, with the packages.
         "packages"  => filter(!=("nbpkg_sync"), nb.nbpkg_busy_packages),
         "seconds"   => round(Int, time() - pkg.started_at),
         "last_line" => isempty(lines) ? nothing : first(_without_userinfo(String(last(lines))), 300),
     )
 end
 
-# Asking before a new package (#397): a run whose cells would make Pluto add a
-# package the notebook doesn't have yet (not in its Project.toml, not a
-# standard library) waits for the user's OK instead of running, when the
-# caller says new packages ask (`ask_new`). Its cells stay queued, and the
-# snapshot's `packages` says `asking`, with the packages, as an R notebook's
-# large download does; `approve_install` is the OK, and the cells run. A yes
-# holds for those packages in this notebook while it is open. A notebook that
-# manages its own environment (`Pkg.activate`) adds nothing, so asks nothing.
-const _ASKING = Dict{UUID,Any}()        # notebook => (cells = the held cells, packages)
-const _APPROVED = Dict{UUID,Set{String}}()  # notebook => packages the user said yes to
+const _ASKING = Dict{UUID,Any}()
+const _APPROVED = Dict{UUID,Set{String}}()
 const _ASKING_LOCK = ReentrantLock()
-# Cells that waited for an OK no longer needed (an edit dropped the package, or it came another
-# way): released, they run with the notebook's next run, which is what was asked of them (#523).
-# Each with its last run's time then: one that has run since (the user's run, or as a dependent)
-# isn't run again.
 const _LEFT = Dict{UUID,Vector{Tuple{Pluto.Cell,Float64}}}()
 
 function new_packages(nb)
@@ -305,7 +235,6 @@ end
 
 _asking(nb) = lock(() -> get(_ASKING, nb.notebook_id, nothing), _ASKING_LOCK)
 
-# `keep`: the cells still want to run, with the next run (`_LEFT`). A Stop's are dropped.
 function _forget_asking!(nb; keep::Bool=false)
     held = lock(_ASKING_LOCK) do
         a = pop!(_ASKING, nb.notebook_id, nothing)
@@ -319,10 +248,6 @@ end
 
 forget_packages!(notebook_id::UUID) = lock(() -> (delete!(_ASKING, notebook_id); delete!(_APPROVED, notebook_id); delete!(_LEFT, notebook_id)), _ASKING_LOCK)
 
-# The user's yes to the packages a notebook asks about: they install, and the
-# held cells run. `packages`, when given, are the ones the user was shown: the
-# yes covers only those (#418). A package added since asks again, and the held
-# cells wait for that too; a yes that names none of what waits approves nothing.
 function approve_install!(session, nb, timeout::Real; packages=nothing)
     seen = packages === nothing ? nothing : Set(String[string(p) for p in packages])
     a, ok = lock(_ASKING_LOCK) do
@@ -337,7 +262,6 @@ function approve_install!(session, nb, timeout::Real; packages=nothing)
     a === nothing && throw(ArgumentError("nothing_to_approve::Nothing in this notebook waits for the user's OK"))
     cells = [string(c.cell_id) for c in a.cells]
     isempty(ok) && return Dict{String,Any}("approved" => false, "packages" => String[], "asking" => a.packages, "cells" => cells)
-    # Still asks about a package that is new since the question.
     ran = run_cells!(session, nb, a.cells; wait=false, timeout, ask_new=true)
     return merge!(Dict{String,Any}("approved" => true, "packages" => ok, "cells" => cells), ran)
 end
@@ -345,9 +269,6 @@ end
 function _asking_step(nb)
     a = _asking(nb)
     a === nothing && return nothing
-    # The packages were added another way, or the code changed so that nothing new is used:
-    # nothing waits for an OK any more. A snapshot releases the held cells then, on purpose, so an
-    # edit unblocks without another call; it costs a topology pass per snapshot while one asks.
     if isempty(new_packages(nb))
         _forget_asking!(nb; keep=true)
         return nothing
@@ -374,11 +295,6 @@ function snapshot(nb; controls = Dict{String,Any}())
     )
 end
 
-# Pluto's dependency data with the staged edits (`current_topology`),
-# cells in the order Pluto analysed them. `fresh` analyses the notebook as it is
-# now without keeping the result; `refresh` first updates the dependency cache
-# Pluto's page shows; `edges` adds each cell's direct upstream and downstream
-# cells; `packages` the packages each loads (`using`/`import`), sorted.
 function graph(nb; fresh::Bool=false, refresh::Bool=false, edges::Bool=false, packages::Bool=false)
     refresh && Pluto.update_dependency_cache!(nb)
     topology = fresh ? Pluto.updated_topology(nb.topology, nb, nb.cells) : current_topology(nb)
@@ -398,7 +314,6 @@ function graph(nb; fresh::Bool=false, refresh::Bool=false, edges::Bool=false, pa
             d["downstream"] = ids(Pluto.PlutoDependencyExplorer.where_referenced(topology, c))
         end
         if packages
-            # A cell never analysed has the default, empty analysis.
             usings = topology.codes[c].module_usings_imports
             d["packages"] = sort!(string.(collect(Pluto.ExpressionExplorer.external_package_names(usings))))
         end
@@ -412,7 +327,6 @@ function graph(nb; fresh::Bool=false, refresh::Bool=false, edges::Bool=false, pa
     )
 end
 
-"Shut down a notebook: its process ends and it leaves the session."
 function shutdown_notebook!(session, nb)
     safe_preview = nb.process_status === Pluto.ProcessStatus.waiting_for_permission
     Pluto.SessionActions.shutdown(session, nb; async = false, verbose = false)
@@ -421,12 +335,6 @@ end
 
 _adapter_cell(nb, id) = nb.cells_dict[UUID(id)]
 
-# Change the notebook. Each op sets a cell's code, inserts a new cell at an
-# index of the new order, deletes a cell, moves one to an index, or folds one. A
-# set_code with `expected` is refused, before any op applies, if the cell's code
-# isn't that. Pluto's page diffs `cell_order` by reference, so each change
-# assigns a new vector. Cells whose code changed are staged (`_stage!`); the file is
-# saved and the page updated.
 function apply!(session, nb, ops)
     for op in ops
         if op["op"] == "set_code" && haskey(op, "expected")
@@ -472,15 +380,10 @@ function apply!(session, nb, ops)
     return Dict{String,Any}("inserted" => inserted, "seq" => _next_seq!())
 end
 
-# A run's cells and the staged cells (`_stage!`) downstream of them, which the
-# run reaches and runs anyway. Pluto analyses only a run's own cells, so a staged
-# cell left out would be missing from the run (a new cell) or run with its old
-# names still defined (an edited one).
 function _with_staged_downstream(nb, cells)
     topology = current_topology(nb)
     staged = lock(() -> (s = get(_STAGED, nb.notebook_id, nothing); s === nothing ? Pluto.Cell[] : collect(s.cells)), _NOTIFY_LOCK)
     isempty(staged) && return cells
-    # Reached through the staged edits, or through what a staged cell used before them.
     reached = Set{Pluto.Cell}()
     for t in (topology, nb.topology)
         order = Pluto.PlutoDependencyExplorer.topological_order(t, collect(cells))
@@ -489,26 +392,15 @@ function _with_staged_downstream(nb, cells)
     return vcat(collect(cells), [c for c in staged if c in reached && !(c in cells)])
 end
 
-# Run cells; none is Pluto's reactive cleanup after a delete. Not accepted when
-# the notebook won't run code (safe preview, a stopped process). With `wait`,
-# the reply says which cells finished within `timeout` seconds, which cells of
-# the notebook were still running or queued then, and `exited` the cells that
-# were running if its process ended by itself meanwhile. A run that goes on,
-# waited for or not, is watched (`_watch_run!`): the reply's `run` names it,
-# and a `run_finished` notification with that `run` says when it ends.
 function run_cells!(session, nb, cells; wait::Bool, timeout::Real, ask_new::Bool=false)
     accepted = Pluto.will_run_code(nb)
-    # Cells released from a wait for an OK no longer needed run with this run (#523).
     if accepted
         left = lock(() -> pop!(_LEFT, nb.notebook_id, Tuple{Pluto.Cell,Float64}[]), _ASKING_LOCK)
         due = [c for (c, ran) in left if haskey(nb.cells_dict, c.cell_id) && c.output.last_run_timestamp == ran && !_unfinished(c)]
         cells = unique!(vcat(collect(cells), due))
     end
-    # A notebook that asks already holds these cells too, and asks again with
-    # what is new now (an edit may have dropped or added a package).
     if accepted && (ask_new || _asking(nb) !== nothing)
         held = lock(() -> (a = get(_ASKING, nb.notebook_id, nothing); a === nothing ? Pluto.Cell[] : a.cells), _ASKING_LOCK)
-        # Less any held cell deleted since.
         cells = unique!(filter(c -> haskey(nb.cells_dict, c.cell_id), vcat(held, collect(cells))))
         new = isempty(cells) ? String[] : new_packages(nb)
         if !isempty(new)
@@ -521,9 +413,6 @@ function run_cells!(session, nb, cells; wait::Bool, timeout::Real, ask_new::Bool
         end
         lock(() -> delete!(_ASKING, nb.notebook_id), _ASKING_LOCK)
     end
-    # Pluto marks cells queued only inside its run task, after package sync;
-    # mark them now, as its own run button does, so a caller that looks right
-    # away sees them waiting.
     roots = _with_staged_downstream(nb, cells)
     accepted && foreach(c -> c.queued = true, roots)
     run = Pluto.update_save_run!(session, nb, roots; run_async=true, save=true)
@@ -548,11 +437,6 @@ function run_cells!(session, nb, cells; wait::Bool, timeout::Real, ask_new::Bool
     return result
 end
 
-# A notebook's process is this Julia started again (Malt runs `Base.julia_cmd()`, from `Sys.BINDIR`).
-# juliaup removes a version it updates past even while that version runs, and then no notebook can
-# start a process until Julia restarts: Malt's spawn fails with ENOENT. What would start one asks
-# first, so it says why and what to do, and nothing that runs now is stopped for a start that can't
-# happen. The path is a Ref so the tests can point it somewhere empty.
 const _JULIA_EXE = Ref{String}("")
 _julia_exe() = isempty(_JULIA_EXE[]) ? joinpath(Sys.BINDIR, Base.julia_exename()) : _JULIA_EXE[]
 
@@ -566,8 +450,6 @@ function _require_julia()
     ))
 end
 
-# Pluto's "Run notebook code" for a notebook in safe preview: restart its
-# process, then run every cell (`run`) or leave it to start on the next run.
 function allow_execution!(session, nb, run::Bool, timeout::Real; ask_new::Bool=false)
     ps = nb.process_status
     ps === Pluto.ProcessStatus.ready &&
@@ -581,8 +463,6 @@ function allow_execution!(session, nb, run::Bool, timeout::Real; ask_new::Bool=f
     return _leave_preview!(session, nb, run, timeout; ask_new)
 end
 
-# Out of safe preview: a new process, then every cell runs (`run`), through the
-# new-package gate when `ask_new` (#397), or it starts on the next run.
 function _leave_preview!(session, nb, run::Bool, timeout::Real; ask_new::Bool=false)
     nb.process_status = Pluto.ProcessStatus.waiting_to_restart
     session.options.evaluation.run_notebook_on_load && Pluto._report_business_cells_planned!(nb)
@@ -597,14 +477,11 @@ function _leave_preview!(session, nb, run::Bool, timeout::Real; ask_new::Bool=fa
         _notify_browser(session, nb)
     end
     result = Dict{String,Any}("already_allowed" => false, "ran" => run, "process_status" => string(nb.process_status))
-    # The run it started, named as `run` names one, so the core can tell when it ends.
     run && haskey(ran, "run") && (result["run"] = ran["run"])
     run && haskey(ran, "asking") && (result["asking"] = ran["asking"])
     return result
 end
 
-# Pluto's own Restart: a new process, then every cell runs. Refused in safe
-# preview, where allow_execution starts the notebook.
 function restart!(session, nb, timeout::Real; ask_new::Bool=false)
     ps = nb.process_status
     ps === Pluto.ProcessStatus.waiting_for_permission &&
@@ -614,8 +491,6 @@ function restart!(session, nb, timeout::Real; ask_new::Bool=false)
     nb.process_status = Pluto.ProcessStatus.waiting_to_restart
     session.options.evaluation.run_notebook_on_load && Pluto._report_business_cells_planned!(nb)
     _notify_browser(session, nb)
-    # A process that ended while it started leaves its failed start behind, and the shutdown
-    # and the new run would rethrow its error (#194). So would an interrupt asked of that start.
     _forget_failed_start!(nb)
     nb.wants_to_interrupt = false
     Pluto.SessionActions.shutdown(session, nb; keep_in_session=true, async=true, verbose=false)
@@ -627,8 +502,6 @@ function restart!(session, nb, timeout::Real; ask_new::Bool=false)
     return result
 end
 
-# Drop the notebook's start from Pluto's workspaces if it failed (its process ended before Pluto
-# connected): every later fetch of it rethrows that error, so nothing could start a new one.
 function _forget_failed_start!(nb)
     WM = Pluto.WorkspaceManager
     WM.withtoken(WM.get_workspace_token) do
@@ -638,16 +511,12 @@ function _forget_failed_start!(nb)
     return nothing
 end
 
-# Pluto's own Restart, from the notebook's page, goes to its `restart_process` handler and not
-# through `restart!`, so it forgets a failed start the same way first (#194). Once per Julia.
 const _PLUTO_RESTART = Ref{Any}(nothing)
 function _wrap_page_restart!()
     _PLUTO_RESTART[] === nothing || return nothing
     original = _PLUTO_RESTART[] = Pluto.responses[:restart_process]
     Pluto.responses[:restart_process] = function (request; kwargs...)
         nb = request.notebook
-        # A restart that can't start a process would stop the one running: the page's Restart
-        # does nothing then, as the adapter's `restart` refuses with `julia_removed`.
         if nb !== nothing && !isfile(_julia_exe())
             @warn "Restart: Julia $VERSION was removed from $(dirname(dirname(_julia_exe()))), so the notebook can't restart until Julia restarts; it keeps the process it has"
             return nothing
@@ -661,12 +530,6 @@ function _wrap_page_restart!()
     return nothing
 end
 
-# Runs Pluto starts itself see the staged cells (`_stage!`) as the tools' runs do (#438). Without
-# this, a run from the page left a staged new cell downstream out, and ran a staged edited one
-# with its new code but its old names, so a name it newly defined reached no other cell.
-#
-# A run from the page (its `run_multiple_cells` handler) takes the staged cells it reaches with
-# it, as `run_cells!` does, and Pluto analyses them with the rest. Once per Julia.
 const _PLUTO_RUN = Ref{Any}(nothing)
 function _wrap_page_run!()
     _PLUTO_RUN[] === nothing || return nothing
@@ -674,7 +537,6 @@ function _wrap_page_run!()
     Pluto.responses[:run_multiple_cells] = function (request; kwargs...)
         nb = request.notebook
         ids = nb === nothing ? nothing : get(request.body, "cells", nothing)
-        # Anything unexpected is left to Pluto's own handler, as it came.
         if ids isa AbstractVector && all(id -> haskey(nb.cells_dict, UUID(string(id))), ids)
             cells = [nb.cells_dict[UUID(string(id))] for id in ids]
             roots = _with_staged_downstream(nb, cells)
@@ -685,11 +547,6 @@ function _wrap_page_run!()
     return nothing
 end
 
-# A run for a changed `@bind` value analyses no cell: Pluto's `set_bond_values_reactive` runs the
-# readers with the notebook's topology as it is (`run_reactive_async!`'s three-argument form,
-# which only it calls). With staged cells among what it reaches, they are analysed into the run,
-# as `update_save_run!` analyses a run's cells: the old topology, from before their edits, says
-# which names to drop. Once per Julia, on the Pluto releases that have that method.
 const _BOND_RUNS_HOOKED = Ref(false)
 function _wrap_bond_runs!()
     _BOND_RUNS_HOOKED[] && return nothing
@@ -702,8 +559,6 @@ function _wrap_bond_runs!()
 end
 
 function _run_reactive_with_staged!(session, nb, to_run; kwargs...)
-    # Pluto picks the readers of the bound names from its own topology, so a staged cell that
-    # reads one only since its edit isn't among them; it is, as a run from the page would reach it.
     pluto_picked = length(to_run)
     names = Set{Symbol}(first(pair) for pair in get(kwargs, :bond_value_pairs, ()))
     if !isempty(names)
@@ -717,14 +572,9 @@ function _run_reactive_with_staged!(session, nb, to_run; kwargs...)
     length(roots) == pluto_picked && return Pluto.run_reactive_async!(session, nb, old, old, roots; kwargs...)
     new = nb.topology = Pluto.updated_topology(old, nb, roots[pluto_picked+1:end])
     Pluto.update_dependency_cache!(nb)
-    # Saved, unlike Pluto's bond runs: the file's cells go in the order of what they now define and use.
     return Pluto.run_reactive_async!(session, nb, old, new, collect(roots); kwargs..., save=true)
 end
 
-# Pluto's own Stop, from the notebook's page, goes to its `interrupt_all` handler and not through
-# `interrupt!`, so it ended a waiting cell's process, and that read as a crash (#139). It is
-# `interrupt!` now, which does what that handler does, but stops the cell in its own task first.
-# Only on the Pluto releases `_stop_hook_ok` knows. Once per Julia.
 const _PLUTO_STOP = Ref{Any}(nothing)
 function _wrap_page_stop!()
     (_PLUTO_STOP[] === nothing && _stop_hook_ok()) || return nothing
@@ -738,24 +588,17 @@ function _wrap_page_stop!()
     return nothing
 end
 
-# Move the notebook's file to `path` (checked by the core), as Pluto's own file box does.
 function move!(session, nb, path::AbstractString)
     Pluto.SessionActions.move(session, nb, path)
     return Dict{String,Any}("path" => nb.path)
 end
 
-# Whether `path` is a notebook open in `session`, as Pluto's open tells.
 function _open_already(session, path::AbstractString)
     tamed = Pluto.tamepath(path)
     isfile(tamed) || return false
     return any(nb -> isfile(nb.path) && realpath(nb.path) == realpath(tamed), values(session.notebooks))
 end
 
-# Registries in the user's own depot, behind ours (a LocalRegistry, say). Pkg updates only the
-# first depot's (`Pkg.Registry.update`'s `depots = [depots1()]`, which Pluto's package manager uses),
-# which is ours, so a version registered from another computer was never seen: "no versions left"
-# (#367). Before a notebook opens, at most once per `cooldown` seconds, the ones we don't also have
-# are updated where they are; one we have too (General) is ours to update, not the user's copy.
 const _USER_REGISTRIES_UPDATED = Ref(-Inf)
 
 function update_user_registries(; cooldown::Real = 3600, depots = DEPOT_PATH)
@@ -772,7 +615,6 @@ function update_user_registries(; cooldown::Real = 3600, depots = DEPOT_PATH)
             Pkg.Registry.update([Pkg.Registry.RegistrySpec(; uuid = r.uuid) for r in theirs]; depots = [depot], io = stderr)
             updated += length(theirs)
         catch e
-            # Offline, or a registry that can't be reached: the copy there is used as it is.
             @warn "Couldn't update the registries in $depot" exception = (e, catch_backtrace())
         end
     end
@@ -780,7 +622,6 @@ function update_user_registries(; cooldown::Real = 3600, depots = DEPOT_PATH)
 end
 
 function open_notebook(session, path::AbstractString, run::Bool; ask_new::Bool=false, timeout::Real=60)
-    # One already open says so (below), as it would with its Julia there.
     run && !_open_already(session, path) && _require_julia()
     try
         update_user_registries()
@@ -789,15 +630,9 @@ function open_notebook(session, path::AbstractString, run::Bool; ask_new::Bool=f
     end
     gate = run && ask_new
     nb = try
-        # Pluto's own run on open adds every package the file uses: where new ones ask (#397),
-        # it opens as a safe preview and leaves it through the gate. A safe preview's load is over
-        # before the open answers (it runs nothing, so it is quick): one still loading when it
-        # leaves the preview, here or by an allow_execution sent at once, would find the notebook
-        # allowed to run and add them after all.
         allowed = run && !gate
         Pluto.SessionActions.open(session, path; run_async = allowed, execution_allowed = allowed)
     catch e
-        # Printing this exception walks the whole Notebook and never finishes.
         e isa Pluto.SessionActions.NotebookIsRunningException || rethrow()
         throw(ArgumentError("notebook_already_open::'$path' is already open as notebook_id $(e.notebook.notebook_id); use that id"))
     end
@@ -811,11 +646,8 @@ function open_notebook(session, path::AbstractString, run::Bool; ask_new::Bool=f
     return opened
 end
 
-# A new notebook at `path`, else named as Pluto names them in `folder`, else in
-# Pluto's own folder. Pluto writes the file (never a hand-written header), then
-# it opens and runs like any other; its cells come back so the caller can edit them.
 function new_notebook(session, path, folder)
-    _require_julia()  # before its file is made
+    _require_julia()
     nb = if path !== nothing
         Pluto.emptynotebook(path)
     elseif folder !== nothing

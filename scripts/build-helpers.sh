@@ -1,13 +1,4 @@
 #!/bin/sh
-# Build the runtime helper (endeavor) for Linux servers into
-# target/helpers/<os>-<arch>/, or into $HELPERS_OUT (an absolute path).
-#
-#   scripts/build-helpers.sh             cross-build x86_64 and aarch64 (musl) with cargo-zigbuild
-#   scripts/build-helpers.sh --via HOST  build on HOST, a Linux machine reachable by ssh, for its
-#                                        own architecture, and copy the binary back
-#
-# Neither way installs anything on this computer. --via installs rustup (and a
-# C compiler, with sudo) on HOST if they're missing.
 set -eu
 cd "$(dirname "$0")/.."
 out=${HELPERS_OUT:-target/helpers}
@@ -18,8 +9,6 @@ if [ "${1:-}" = "--via" ]; then
   arch=$(ssh "$host" uname -m)
   target=$arch-unknown-linux-musl
   toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
-  # The workspace, and the folders the binary carries: plugin/ (the skills)
-  # and runtime/.
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
   mkdir -p "$stage/src/crates"
@@ -30,7 +19,6 @@ if [ "${1:-}" = "--via" ]; then
   printf '[toolchain]\nchannel = "%s"\ntargets = ["%s"]\n' "$toolchain" "$target" > "$stage/src/rust-toolchain.toml"
   COPYFILE_DISABLE=1 tar --no-xattrs -C "$stage/src" -cf - . | ssh "$host" '
     set -e
-    # Neither may read stdin: it carries the source.
     command -v cc >/dev/null || sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc </dev/null >/dev/null
     [ -x "$HOME/.cargo/bin/rustup" ] || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --default-toolchain none >/dev/null
     d="$HOME/endeavor-helper-build"; rm -rf "$d/crates" "$d/plugin" "$d/runtime"; mkdir -p "$d"; tar -C "$d" -xf -'

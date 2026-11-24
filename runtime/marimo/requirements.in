@@ -1,5 +1,3 @@
-# What runs marimo's adapter (adapter.py): marimo, pinned, and what the adapter itself uses.
-# marimo moves together with scripts/cloud-setup.sh's MARIMO_VERSION and the notebooks' header.
 marimo==0.25.1
 websockets==15.0.1
 httpx==0.28.1

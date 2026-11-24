@@ -32,7 +32,7 @@ pub(crate) fn current_name(name: &str) -> &str {
     RENAMED_TOOLS.iter().find(|(old, _)| *old == name).map_or(name, |(_, now)| now)
 }
 
-const JULIA_CALLS: [&str; 11] = ["endeavor/set_folder", "endeavor/shutdown", "endeavor/allow_julia_install", "endeavor/use_julia", "endeavor/allow_r_install", "endeavor/julia_status", "endeavor/start_julia", "endeavor/r_status", "endeavor/leave_to_plugin", "endeavor/keep_for_app", "endeavor/end_when_idle"];
+const JULIA_CALLS: [&str; 12] = ["endeavor/set_folder", "endeavor/shutdown", "endeavor/allow_julia_install", "endeavor/use_julia", "endeavor/allow_r_install", "endeavor/allow_uv_install", "endeavor/julia_status", "endeavor/start_julia", "endeavor/r_status", "endeavor/leave_to_plugin", "endeavor/keep_for_app", "endeavor/end_when_idle"];
 
 pub fn is_tool(name: &str) -> bool {
     known_tool(current_name(name), false).is_some()
@@ -581,7 +581,7 @@ impl Bridge {
                 text(&result)
             }
             Ok(Reply::Image { meta, png_base64 }) => image_result(&meta, png_base64),
-            Err(error) => tool_error(&crate::core::own_r_offer_for(&error, caller.app), help),
+            Err(error) => tool_error(&crate::core::offer_for(&error, caller.app), help),
         }
     }
 
@@ -1260,7 +1260,7 @@ mod tests {
     fn the_app_calls_and_the_records_fields_are_those_of_the_cores_interface() {
         let calls: Vec<String> = quoted_names(code(include_str!("mcp.rs")), "endeavor/").iter().map(|call| call["endeavor/".len()..].to_owned()).collect();
         let calls_then = [
-            "allow_julia_install", "allow_r_install", "answer_run", "end_when_idle", "file_info", "julia_status", "keep_for_app", "leave_to_plugin", "move_notebook", "new_notebook", "r_status", "recent_sessions", "restart_notebook", "restore_cells", "run_preview", "set_folder",
+            "allow_julia_install", "allow_r_install", "allow_uv_install", "answer_run", "end_when_idle", "file_info", "julia_status", "keep_for_app", "leave_to_plugin", "move_notebook", "new_notebook", "r_status", "recent_sessions", "restart_notebook", "restore_cells", "run_preview", "set_folder",
             "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result", "use_julia",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];

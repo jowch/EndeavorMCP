@@ -1,19 +1,3 @@
-# The tests against real Julia (e2e_julia, e2e_serve), real Julia and R
-# (e2e_r) and real marimo (e2e_marimo), which ci.yml skips because they are ignored by default. They take a
-# few minutes once the packages are cached and much longer the first time, so
-# they run in their own workflow: CI's checks don't wait for them. Linux only
-# for now. They run on a
-# PR or push that changes what goes into the binary (the crates, the runtime,
-# the skills it embeds, the Cargo files), and on request (docs/testing.md).
-# The R job also runs every day: R notebooks install Ember's latest build from
-# r-universe, so a push to Ember's main reaches users at their next R start, and
-# a change there that breaks the adapter should show up here first.
-# The Julia tests run every day on the newest Julia too (julia-newest): the app
-# runs the user's own Julia when they have one, which juliaup moves to each new
-# release, so a release that breaks the runtime should show up here before users
-# hit it.
-# Because of those path filters, don't make this check required in branch
-# protection: a PR that changes none of them would wait for it forever.
 name: E2E
 
 on:
@@ -42,7 +26,6 @@ on:
 
 concurrency:
   group: e2e-${{ github.ref }}
-  # A run on main finishes, so each merge gets a result.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -55,13 +38,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Toolchain
         run: rustup toolchain install
-      # The version Endeavor downloads (JULIA_VERSION in crates/endeavor-mcp/src/julia.rs).
       - uses: julia-actions/setup-julia@v2
         with:
           version: '1.12.6'
-      # Each test installs the runtime's packages into a depot of its own under
-      # target/tmp. Keep those depots between runs, saved even when a test
-      # fails, so the next run doesn't install everything again.
       - name: Restore depots
         id: restore
         uses: actions/cache/restore@v4
@@ -71,8 +50,6 @@ jobs:
             target/tmp/e2e-serve/depot
           key: e2e-depots-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml') }}-${{ github.run_id }}
           restore-keys: e2e-depots-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml') }}-
-      # A run whose tests passed marks its depots complete. One restored without
-      # the mark came from a failed run and may lack packages.
       - name: Check depots
         id: depots
         run: |
@@ -81,8 +58,6 @@ jobs:
           fi
       - name: Build
         run: cargo build --locked -p endeavor-mcp --tests
-      # A test that finds no Julia prints SKIPPED and passes. Here that would
-      # hide a broken setup, so the step fails on it.
       - name: Test
         run: |
           set -o pipefail
@@ -95,8 +70,6 @@ jobs:
             fi
           done
           touch target/tmp/e2e-julia/depot/.e2e-complete target/tmp/e2e-serve/depot/.e2e-complete
-      # Save only when the restored depots weren't complete: a new entry each
-      # time would fill the cache, and complete depots have nothing to add.
       - name: Save depots
         if: always() && steps.depots.outputs.complete != 'true'
         uses: actions/cache/save@v4
@@ -114,7 +87,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # '1' is the newest release (juliaup's `release`), 'pre' the newest pre-release.
         julia: ['1', 'pre']
     steps:
       - uses: actions/checkout@v4
@@ -125,7 +97,6 @@ jobs:
           version: ${{ matrix.julia }}
       - name: Build
         run: cargo build --locked -p endeavor-mcp --tests
-      # Fresh depots, no cache: a new Julia compiles everything anyway.
       - name: Test
         run: |
           set -o pipefail
@@ -150,21 +121,12 @@ jobs:
       - uses: julia-actions/setup-julia@v2
         with:
           version: '1.12.6'
-      # R and most of Ember's packages from Ubuntu's archive. The first R
-      # notebook builds what's missing (RcppMsgPack) and Ember itself from
-      # r-universe's source package, as it would for a user.
-      # A stalled package mirror once hung `apt-get update` until the job's
-      # 45-minute limit, with no test run (#235). The step's limit and apt's
-      # network timeouts make it fail in minutes instead, and say so.
       - name: R
         timeout-minutes: 10
         run: |
           apt="-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3"
           sudo apt-get $apt update
           sudo apt-get $apt install -y --no-install-recommends r-base-core r-base-dev r-cran-commonmark r-cran-httpuv r-cran-jsonlite r-cran-curl r-cran-later r-cran-processx r-cran-promises r-cran-renv
-      # The Julia depot, and the folder Ember installs into (paths.rs ember_folder).
-      # A build's library is only there when its install finished, so a restored
-      # one is whole; the test updates it to Ember's latest build.
       - name: Restore depot and Ember
         id: restore-r
         uses: actions/cache/restore@v4
@@ -174,15 +136,8 @@ jobs:
             ~/.cache/endeavor/r
           key: e2e-r-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml', 'runtime/r/install.R') }}-${{ github.run_id }}
           restore-keys: e2e-r-${{ runner.os }}-julia-1.12.6-${{ hashFiles('runtime/**/Project.toml', 'runtime/Manifest.toml', 'runtime/r/install.R') }}-
-      # Every run installs Ember's latest build afresh (keeping the packages
-      # it needs), so a build that doesn't install or load fails the test
-      # instead of falling back to the cached one. It takes seconds. A cached
-      # build is only saved by a run that found its depot incomplete, so it
-      # could be weeks old: then R started with it while the update ran, and
-      # the notebook view's step failed on an Ember from before view_page().
       - name: Fresh Ember
         run: find ~/.cache/endeavor/r/ember -mindepth 1 -maxdepth 1 ! -name deps -exec rm -rf {} + 2>/dev/null || true
-      # As for Julia's: a passing run marks what it restored or installed complete.
       - name: Check depot
         id: depot-r
         run: |
@@ -200,17 +155,13 @@ jobs:
             echo "::error::e2e_r was skipped"
             exit 1
           fi
-          # e2e_r starts no Julia, so nothing else makes the depot.
           mkdir -p target/tmp/e2e-r/depot
           touch target/tmp/e2e-r/depot/.e2e-complete
-      # R's adapter on its own (runtime/r/test/test.R): every method over HTTP, against the Ember
-      # build e2e_r just installed. It ends non-zero when a check fails, after printing the adapter's log.
       - name: R adapter test
         run: |
           ember=~/.cache/endeavor/r/ember
           build=$(sed -n 's/^Current: //p' "$ember/ember.dcf")
           R_LIBS="$ember/$build:$ember/deps" Rscript runtime/r/test/test.R
-      # Only a passing run saves, so the Ember library saved is one that worked.
       - name: Save depot and Ember
         if: success() && steps.depot-r.outputs.complete != 'true'
         uses: actions/cache/save@v4
@@ -228,8 +179,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Toolchain
         run: rustup toolchain install
-      # Python notebooks need only uv: it fetches Python, marimo (runtime/marimo/requirements.txt)
-      # and each notebook's packages.
       - uses: astral-sh/setup-uv@v6
         with:
           version: '0.11.32'

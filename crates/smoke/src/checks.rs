@@ -1,7 +1,3 @@
-//! The checks a task's `checks.json` names. Each reads the proxy's log of tool
-//! calls, the notebooks the checker read afterwards, or what the agent did and
-//! said last. A check marked `"soft": true` is reported but doesn't fail the task.
-
 use std::collections::HashSet;
 
 use serde_json::{Value, json};
@@ -9,24 +5,16 @@ use serde_json::{Value, json};
 use crate::log::Call;
 use crate::mcp::Notebook;
 
-/// What the agent left, for the checks to read.
 pub struct Evidence<'a> {
     pub calls: &'a [Call],
     pub notebooks: &'a [Notebook],
-    /// The agent's own tools it used (for Claude, from its transcript), by name.
     pub agent_tools: &'a [String],
     pub final_message: &'a str,
-    /// The second person's steps (inject.rs).
     pub injections: &'a [Value],
-    /// The notebooks run again from their files in a fresh runtime, when a check asked for it.
     pub rerun: Option<&'a Result<Vec<Notebook>, String>>,
-    /// When each of the user's messages was sent, in Unix seconds.
     pub turns: &'a [f64],
-    /// The files a server task's server folder holds at the end, relative to it.
     pub server_files: &'a [String],
-    /// What Endeavor asked the user in its own dialogs (MCP elicitation), in order.
     pub questions: &'a [String],
-    /// The links Endeavor opened in the stand-in browser (`"browser": true`), in order.
     pub pages: &'a [String],
 }
 
@@ -40,8 +28,6 @@ pub struct Outcome {
 pub fn run(spec: &Value, ev: &Evidence) -> Outcome {
     let kind = spec["check"].as_str().unwrap_or_default();
     let soft = spec["soft"] == true;
-    // `when_reply`: the check applies only if some tool reply contains every one of these texts (a Julia
-    // run held for new packages); otherwise it doesn't apply, and passes as such.
     let applies = spec["when_reply"].as_array().is_none_or(|texts| {
         ev.calls.iter().any(|c| {
             let reply = c.reply.to_string();
@@ -67,19 +53,13 @@ fn describe(kind: &str, spec: &Value) -> String {
 fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
     let str_list = |key: &str| -> Vec<String> { spec[key].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(str::to_owned).collect() };
     match kind {
-        // A tool was called between `min` (default 1) and `max` (default any)
-        // times; with `ok`, counting only the calls that succeeded, and with
-        // `args`, only those whose arguments include these.
         "called" => {
             let tool = spec["tool"].as_str().unwrap_or_default();
             let ok = spec["ok"] == true;
-            // A call the runtime turned away while Julia started is the agent waiting as told, not a second call.
             let n = ev.calls.iter().filter(|c| c.tool == tool && !while_starting(c) && !(ok && c.is_error) && has_args(c, &spec["args"])).count() as u64;
             let (min, max) = (spec["min"].as_u64().unwrap_or(1), spec["max"].as_u64().unwrap_or(u64::MAX));
             if (min..=max).contains(&n) { Ok(format!("{n} calls")) } else { Err(format!("{n} calls")) }
         }
-        // Never called; with `args`, never with these arguments; with
-        // `before_turn` n, not before the user's n-th message was sent.
         "not_called" => {
             let tool = spec["tool"].as_str().unwrap_or_default();
             let until = match spec["before_turn"].as_u64() {
@@ -91,15 +71,12 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 n => Err(format!("{n} calls")),
             }
         }
-        // `tool` was called after the last call that ran cells (a plot looked at
-        // after it was drawn, before the agent reported).
         "called_after_last_run" => {
             let tool = spec["tool"].as_str().unwrap_or_default();
             let last_run = ev.calls.iter().rposition(runs);
             let after = last_run.map_or(0, |i| i + 1);
             if ev.calls[after.min(ev.calls.len())..].iter().any(|c| c.tool == tool) { Ok(String::new()) } else { Err(format!("no {tool} after the last run")) }
         }
-        // `count` (default 1) notebooks are open; with `ending`, each one's path ends so (".R": R notebooks).
         "notebooks" => {
             let want = spec["count"].as_u64().unwrap_or(1) as usize;
             let paths: Vec<&String> = ev.notebooks.iter().map(|n| &n.path).collect();
@@ -116,7 +93,6 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
             let errored: Vec<String> = ev.notebooks.iter().flat_map(|n| n.cells.iter().filter(|c| c.errored).map(move |c| format!("{}: {}", n.path, first_line(&c.code)))).collect();
             if errored.is_empty() { Ok(String::new()) } else { Err(errored.join("; ")) }
         }
-        // Some cell's output contains every one of `texts`.
         "output_contains" => {
             let texts = str_list("texts");
             let found = ev.notebooks.iter().flat_map(|n| &n.cells).any(|c| texts.iter().all(|t| c.output.contains(t.as_str())));
@@ -133,7 +109,6 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 Err(format!("not {want}: {wrong:?}"))
             }
         }
-        // The agent's last message contains one of `texts`, ignoring case.
         "final_message_contains_any" => {
             let message = ev.final_message.to_lowercase();
             let texts = str_list("texts");
@@ -142,12 +117,6 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 None => Err(format!("last message: {:?}", clip(ev.final_message, 300))),
             }
         }
-        // No call ran a cell again while an earlier run of it was still going.
-        // A cell is in flight from a reply that says it is running or queued
-        // (a run returned early, a waited run stopped waiting with it in
-        // `execution.still_running`, or a read shows it running) until a read
-        // shows it done. With `require_still_running`, a waited run must also
-        // have stopped waiting: an agent may rightly not wait at all.
         "no_rerun_of_running_cells" => {
             let start = ev.calls.first().map_or(0.0, |c| c.at);
             let mut in_flight: HashSet<String> = HashSet::new();
@@ -172,8 +141,6 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 (false, true) => Err("no waited run stopped waiting".into()),
             }
         }
-        // Some tool reply contains every one of `texts`: a result the agent
-        // reports was really computed, not guessed.
         "reply_contains" => {
             let texts = str_list("texts");
             let found = ev.calls.iter().any(|c| {
@@ -182,7 +149,6 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
             });
             if found { Ok(String::new()) } else { Err("no tool reply has them".into()) }
         }
-        // Every check in `checks` passes, or at least one does.
         "all_of" | "any_of" => {
             let outcomes: Vec<Outcome> = spec["checks"].as_array().into_iter().flatten().map(|c| run(c, ev)).collect();
             let detail = outcomes.iter().map(|o| format!("{} {}{}", if o.passed { "✓" } else { "✗" }, o.name, if o.detail.is_empty() { String::new() } else { format!(": {}", o.detail) })).collect::<Vec<_>>().join("; ");
@@ -195,7 +161,6 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 Err(detail)
             }
         }
-        // The second person did everything inject.json says, so the task tested what it is for.
         "injected" => {
             let failed: Vec<&Value> = ev.injections.iter().filter(|i| i["ok"] != true).collect();
             if ev.injections.is_empty() {
@@ -206,17 +171,13 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 Ok(format!("{} steps", ev.injections.len()))
             }
         }
-        // Some cell's code contains every one of `texts`; with `not`, also none of those.
         "code_contains" => {
             let (texts, not) = (str_list("texts"), str_list("not"));
             let found = ev.notebooks.iter().flat_map(|n| &n.cells).any(|c| texts.iter().all(|t| c.code.contains(t.as_str())) && !not.iter().any(|t| c.code.contains(t.as_str())));
             if found { Ok(String::new()) } else { Err("no cell's code has them".into()) }
         }
-        // Every Markdown cell with a heading shows its own heading: what L1 on Haiku broke when the
-        // file changed under marimo and its reload gave headings each other's code (#431).
         "headings_own_output" => {
             let headed: Vec<(&crate::mcp::Cell, String)> = ev.notebooks.iter().flat_map(|n| &n.cells).filter_map(|c| heading(&c.code).map(|h| (c, h))).collect();
-            // The heading alone, as text or as an HTML element: "Data" mustn't pass for "Data Checks".
             let wrong: Vec<String> = headed.iter().filter(|(c, h)| c.output.trim() != h.as_str() && !c.output.contains(&format!(">{h}<"))).map(|(c, h)| format!("{h}: {:?}", clip(&c.output, 80))).collect();
             if headed.is_empty() {
                 Err("no heading cell".into())
@@ -226,15 +187,11 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 Err(wrong.join("; "))
             }
         }
-        // No cell's code contains any of `texts` (a package installed by another way than the user's OK).
         "code_lacks" => {
             let texts = str_list("texts");
             let found: Vec<String> = ev.notebooks.iter().flat_map(|n| &n.cells).filter(|c| texts.iter().any(|t| c.code.contains(t.as_str()))).map(|c| first_line(&c.code).to_owned()).collect();
             if found.is_empty() { Ok(String::new()) } else { Err(format!("in: {}", found.join("; "))) }
         }
-        // Some code cell contains every one of `texts`, and none of those cells ran: each is still
-        // queued or has no output, and none has an error (cells held for the user's OK). A Markdown
-        // cell (`md"..."`) that names them isn't counted: its text shows whether or not it ran.
         "never_ran" => {
             let texts = str_list("texts");
             let cells: Vec<&crate::mcp::Cell> = ev.notebooks.iter().flat_map(|n| &n.cells).filter(|c| !c.code.trim_start().starts_with("md\"") && texts.iter().all(|t| c.code.contains(t.as_str()))).collect();
@@ -247,8 +204,6 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 Err(format!("ran: {}", ran.join("; ")))
             }
         }
-        // After a reply containing every one of `texts` (an error the agent had
-        // to deal with), a later call ran cells and succeeded.
         "ran_after_reply" => {
             let texts = str_list("texts");
             let Some(at) = ev.calls.iter().position(|c| {
@@ -259,13 +214,6 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
             };
             if ev.calls[at + 1..].iter().any(|c| runs(c) && !c.is_error) { Ok(format!("{} calls later", ev.calls.len() - at - 1)) } else { Err(format!("nothing ran after {}", ev.calls[at].tool)) }
         }
-        // Run again from its file in a fresh runtime and a fresh copy of the
-        // project folder, each notebook gives what the agent left. Pluto's
-        // reactivity already drops what a deleted cell defined; what this
-        // catches is what lives outside the notebook's memory: a file a cell
-        // wrote that a deleted cell made, and the code and order as saved.
-        // Cells still running when the agent ended aren't compared. A picture's bytes aren't
-        // either: it counts as the same if it's still a picture and didn't error.
         "reproducible" => {
             let rerun = match ev.rerun {
                 None => return Err("the notebooks weren't run again".into()),
@@ -284,12 +232,6 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 };
                 for (at, cell) in nb.cells.iter().enumerate().filter(|(_, c)| !c.busy) {
                     compared += 1;
-                    // A marimo notebook's cell ids aren't in its file, so a reload gives new
-                    // ones (#353): there, the same code in the same place is the same cell. The
-                    // same code, that is, but for the spaces on its blank lines, which marimo's
-                    // file doesn't keep (L1 on Haiku, 11-20). An id alone isn't enough: marimo
-                    // hands out its ids in a fixed order, so after a cell was put in above it, a
-                    // reload gives a cell's old id to the one now in its place (P4, 11-21).
                     let same = |a: &&crate::mcp::Cell| same_code(&a.code, &cell.code);
                     match again.cell(&cell.id).filter(same).or_else(|| again.cells.get(at).filter(same)) {
                         None => differ.push(format!("{}: gone", first_line(&cell.code))),
@@ -305,13 +247,11 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
             if !differ.is_empty() {
                 Err(differ.join("; "))
             } else if compared == 0 {
-                // Every cell was still running: the check would pass on nothing.
                 Err("no cell to compare".into())
             } else {
                 Ok(format!("{compared} cells the same"))
             }
         }
-        // The agent's last message contains none of `texts`, ignoring case.
         "final_message_lacks" => {
             let message = ev.final_message.to_lowercase();
             match str_list("texts").iter().find(|t| message.contains(&t.to_lowercase())) {
@@ -319,27 +259,21 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
                 None => Ok(String::new()),
             }
         }
-        // A file under the server task's server folder ends with `suffix`.
         "server_file" => {
             let suffix = spec["suffix"].as_str().unwrap_or_default();
             if ev.server_files.iter().any(|f| f.ends_with(suffix)) { Ok(String::new()) } else { Err(format!("server folder has {:?}", ev.server_files)) }
         }
-        // The agent never used these tools of its own (e.g. writing the notebook's file).
         "agent_tools_not_used" => {
             let tools = str_list("tools");
             let used: Vec<&String> = ev.agent_tools.iter().filter(|t| tools.contains(t)).collect();
             if used.is_empty() { Ok(String::new()) } else { Err(format!("used {used:?}")) }
         }
-        // Endeavor asked the user in its own dialog between `min` (default 1) and `max` (default any)
-        // times; with `texts`, counting only questions that contain every one of them.
         "asked_user" => {
             let texts = str_list("texts");
             let n = ev.questions.iter().filter(|q| texts.iter().all(|t| q.contains(t.as_str()))).count() as u64;
             let (min, max) = (spec["min"].as_u64().unwrap_or(1), spec["max"].as_u64().unwrap_or(u64::MAX));
             if (min..=max).contains(&n) { Ok(format!("{n} questions")) } else { Err(format!("{n} questions: {:?}", ev.questions)) }
         }
-        // Endeavor opened a page in the stand-in browser between `min` (default 1) and `max` times; with
-        // `path`, counting only links that contain it (`/install/`).
         "page_opened" => {
             let path = spec["path"].as_str().unwrap_or_default();
             let n = ev.pages.iter().filter(|l| l.contains(path)).count() as u64;
@@ -350,24 +284,18 @@ fn check(kind: &str, spec: &Value, ev: &Evidence) -> Result<String, String> {
     }
 }
 
-/// Whether a call's arguments include every key and value of `want` (an object; anything else matches all).
 fn has_args(call: &Call, want: &Value) -> bool {
     want.as_object().is_none_or(|want| want.iter().all(|(k, v)| call.args.get(k) == Some(v)))
 }
 
-/// An output that is a picture, which a second run needn't draw byte for byte the same.
 fn is_picture(output: &str) -> bool {
-    // A marimo (or any) picture read_cell names rather than shows: "[image/png output, 109198 bytes; ...]".
     output.contains("data:image") || output.contains("<img") || output.contains("<svg") || output.len() > 20_000 || output.contains("[image/")
 }
 
-/// Whether the runtime turned the call away because Julia, the runtime or the notebook's open was still
-/// starting: a normal result now, an error from an older runtime.
 fn while_starting(call: &Call) -> bool {
     call.reply.as_str().is_some_and(|t| t.contains("is starting")) || matches!(call.reply["error"].as_str(), Some("julia_starting" | "r_installing" | "python_installing" | "notebook_opening"))
 }
 
-/// Whether a call runs cells (each tool's own default for its run argument).
 fn runs(call: &Call) -> bool {
     match call.tool.as_str() {
         "execute_cell" | "submit_changes" | "run_all_cells" => true,
@@ -378,7 +306,6 @@ fn runs(call: &Call) -> bool {
     }
 }
 
-/// What a call's reply says about which cells are still going.
 fn track(call: &Call, in_flight: &mut HashSet<String>, saw_still_running: &mut bool) {
     let r = &call.reply;
     let ids = |v: &Value| -> Vec<String> { v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect() };
@@ -388,7 +315,6 @@ fn track(call: &Call, in_flight: &mut HashSet<String>, saw_still_running: &mut b
     }
     if runs(call) {
         let status = r["execution"]["status"].as_str().unwrap_or_default();
-        // A run that ended is done with its cells; one that returned early isn't.
         if matches!(status, "completed" | "errored") && still.is_empty() {
             for c in ids(&r["affected_cells"]) {
                 in_flight.remove(&c);
@@ -398,7 +324,6 @@ fn track(call: &Call, in_flight: &mut HashSet<String>, saw_still_running: &mut b
         }
         in_flight.extend(still);
     }
-    // A cell's own state, from a read.
     if call.tool == "read_cell" && let Some(id) = r["cell_id"].as_str().or(call.args["cell_id"].as_str()) {
         if r["running"] == true || r["queued"] == true {
             in_flight.insert(id.to_owned());
@@ -406,15 +331,12 @@ fn track(call: &Call, in_flight: &mut HashSet<String>, saw_still_running: &mut b
             in_flight.remove(id);
         }
     }
-    // list_notebooks names each notebook's running cells.
     if call.tool == "list_notebooks" {
         let running: HashSet<String> = r.as_array().into_iter().flatten().flat_map(|nb| ids(&nb["running"])).collect();
         in_flight.retain(|c| running.contains(c));
     }
 }
 
-/// The cells a running call ran: what its reply says it affected or still runs,
-/// else what its arguments name.
 fn ran_cells(call: &Call) -> Vec<String> {
     let mut cells: Vec<String> = Vec::new();
     cells.extend(call.reply["affected_cells"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned));
@@ -426,20 +348,15 @@ fn ran_cells(call: &Call) -> Vec<String> {
     cells
 }
 
-/// Two cells' code is the same but for spaces at the ends of lines: marimo writes a cell into its
-/// file indented, and a line of only spaces comes back with other spaces, or none.
 fn same_code(a: &str, b: &str) -> bool {
     a.lines().map(str::trim_end).eq(b.lines().map(str::trim_end))
 }
 
-/// An output without what a package prints only the first time it runs on a computer, which the
-/// re-run, on the same computer, doesn't print again.
 fn settled(output: &str) -> String {
     const FIRST_TIME: [&str; 1] = ["Matplotlib is building the font cache; this may take a moment."];
     output.lines().filter(|l| !FIRST_TIME.contains(&l.trim())).collect::<Vec<_>>().join("\n").trim_end().to_owned()
 }
 
-/// The first heading's text in a Markdown cell (`mo.md(...)`, `md"..."`), or None for another cell.
 fn heading(code: &str) -> Option<String> {
     let code = code.trim_start();
     if !(code.starts_with("mo.md(") || code.starts_with("md\"")) {
@@ -469,7 +386,6 @@ mod tests {
     use super::*;
     use crate::log::Log;
 
-    /// A log of these (request, reply) pairs, read back as calls.
     fn calls(pairs: &[(&str, Value, Value)]) -> Vec<Call> {
         let dir = std::env::temp_dir().join(format!("smoke-checks-{}-{:?}", std::process::id(), std::thread::current().id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -578,8 +494,6 @@ mod tests {
         };
         assert!(judge(Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "b = 1", "c = 1", "d = 1"])])).passed, "a reload that gives new ids matches by place and code");
         assert!(!judge(Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "c = 1", "b = 1", "d = 1"])])).passed, "but not a cell that moved");
-        // A cell put in above another took a new id; the reload gives the other's id to it, as marimo
-        // gives ids in order (P4 on the default model, 11-21).
         let inserted = renamed(["Hbol", "Xref", "MJUe", "vblA"], ["a = 1", "b = 1", "c = 1", "d = 1"]);
         let ev = Evidence { calls: &[], notebooks: std::slice::from_ref(&inserted), agent_tools: &[], final_message: "", injections: &[], rerun: Some(&Ok(vec![renamed(["Hbol", "MJUe", "vblA", "bkHC"], ["a = 1", "b = 1", "c = 1", "d = 1"])])), turns: &[], server_files: &[], questions: &[], pages: &[] };
         let after = run(&json!({ "check": "reproducible" }), &ev);

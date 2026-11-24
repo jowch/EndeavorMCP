@@ -1,16 +1,5 @@
-# Builds the workspace and runs its tests on Linux, macOS and Windows. The
-# tests against real Julia (e2e_julia, e2e_serve) are ignored by default and
-# run in e2e.yml instead (docs/testing.md). Each job has a time limit well above a
-# normal run (a few minutes), so a test that hangs fails the job instead of
-# holding it, and the PR's checks, for GitHub's default of six hours.
 name: CI
 
-# On main and on pull requests only. A push to any branch also ran here,
-# so every push to a PR's branch ran the whole matrix twice (once for the
-# push, once for the PR, in different concurrency groups), four macOS jobs
-# each time. A PR that changes only docs/ runs nothing: no job reads docs/.
-# No check is required to merge; if one ever is, a docs-only PR would wait on
-# it forever, so drop paths-ignore then.
 on:
   push:
     branches: [main]
@@ -35,7 +24,6 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15, windows-latest]
     steps:
-      # Tests compare checked-in text byte for byte, so keep LF line endings.
       - name: Git
         run: |
           git config --global core.autocrlf false
@@ -46,12 +34,8 @@ jobs:
       - name: Plugin copies
         if: runner.os == 'Linux'
         run: sh scripts/plugins.sh check
-      # Only the Helpers workflow's pin job changes the pinned build, on main.
-      # A PR that changes it could put a build that was never published on main.
       - name: Pinned build unchanged
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
-        # The checkout is the PR merged into its base's current tip, which is
-        # the merge's first parent (the event's base.sha can be older).
         run: |
           git fetch -q --deepen=1
           if ! git diff --quiet HEAD^1 HEAD -- scripts/release-key '*/launch/release-key'; then
@@ -59,9 +43,6 @@ jobs:
             echo "::error::This PR changes the pinned build (release-key). Only the Helpers workflow sets it, on main. Take main's copy: git checkout origin/main -- scripts/release-key '*/launch/release-key'"
             exit 1
           fi
-      # On Windows a socket's `try_clone` is an inheritable copy, and a child started while it is
-      # open keeps the connection open (#154). clippy.toml forbids it; only this lint is checked, and
-      # only outside tests, which may copy sockets.
       - name: No socket copies outside tests
         if: runner.os == 'Linux'
         run: |
@@ -71,14 +52,10 @@ jobs:
         run: cargo build --locked --workspace --all-targets
       - name: Test
         run: cargo test --locked --workspace --no-fail-fast
-      # The notebook view's look and Point are built in Endeavor's repo (frontend/src/view.ts).
-      # Last, so a copy that waits on an Endeavor PR doesn't hide the build and tests.
       - name: Notebook view's copy of Endeavor's view.js
         if: runner.os == 'Linux' && !cancelled()
         run: sh scripts/view-frontend.sh check
 
-  # The runtime package's own tests (runtime/EndeavorRuntime/test). The runtime
-  # runs only on Linux and macOS servers, so there is no Windows job.
   julia:
     name: julia ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -89,7 +66,6 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@v4
-      # The version Endeavor downloads (JULIA_VERSION in crates/endeavor-mcp/src/julia.rs).
       - uses: julia-actions/setup-julia@v2
         with:
           version: '1.12.6'

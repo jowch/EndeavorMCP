@@ -289,7 +289,7 @@ something subtle, make it soft.
 | `N12-moved-widget` | report a mean from an open notebook whose cutoff slider the user moved on the page from its default just before the agent looks | that the agent hears a result used a moved widget (`uses_moved_input`), and says which value it used and what the file's default is |
 | `N13-open-and-run` | open a notebook from disk, run it, and report a value; its two cells take 10 s each | that a read right after the first run waits for it, whether the agent started it with `open_notebook` and `run_notebook` (#331) or with `allow_execution` (#170), so the agent reports the value without polling or running the cells again. A soft check says which way the agent went: Claude Code's default model opens in safe preview, then calls `allow_execution` |
 | `T1-tidy`, `T2-tidy-r` | "tidy it up" on an open notebook the user wrote, in Julia and in R, then "Yes, go ahead with that" | the skill's tidy pass (#295, #296). The notebook has a stale summary (4.2; the cleaned mean is 5.1), a report cell above the cells it reads, and two dead-end cells. The agent reads it as the page shows it (`read_notebook_code` with `order="visual"` and `include_markdown=true`), deletes and moves no cell before the user's yes, and leaves it running and reproducible, with the stale number gone. Soft checks say whether the summary shows 5.1 (an output, so a computed mean counts) and whether a dead end was deleted |
-| `L1-long-analysis` (long) | a 96-well growth plate, from loading the data to a written summary, in twelve messages with plots; the plate has a failed well, a contaminated one, a saturated reading and gaps | what a real-sized session costs: requests, context at the end, and which replies fill it. Each new package asks first, and the harness says yes to whichever ones the agent picks (`"new_packages": "any"`), but to no other question. About 100 requests and 18 minutes with Claude Code's default model, so it runs only with `--long` |
+| `L1-long-analysis` (long) | a 96-well growth plate, from loading the data to a written summary, in twelve messages with plots; the plate has a failed well, a contaminated one, a saturated reading and gaps. `make-growth.py` writes it from a fixed seed; run it again only to change the data, since the checks depend on it | what a real-sized session costs: requests, context at the end, and which replies fill it. Each new package asks first, and the harness says yes to whichever ones the agent picks (`"new_packages": "any"`), but to no other question. About 100 requests and 18 minutes with Claude Code's default model, so it runs only with `--long` |
 | `Q1-ask-questions` (long) | eleven questions about L1's finished 38-cell notebook, already open and run: what it does, which wells it dropped, what the results mean, three sentences for a PI. Nothing asks for a change | what a questions-only session costs on a large notebook, and how much of it is the notebook's code read up front. The first runs (2026-11-04) used about 1M input tokens and ended at 60k context, with Sonnet 5.5 and Opus 5.5 alike. Compare `input_tokens` and `context_tokens` before and after a change to the tools or skills that affects reading |
 | `P1-new-python`, `P2-fix-python`, `P3-preview-python` | N1, N2 and N3 in Python (marimo) | the same, so a failure points at marimo. P1 and P2 say yes when asked about the usual table packages (numpy, pandas, polars and the like): with no one to answer, a new package's run would be held. P1 waits only 5 s for Python's first start (`python_wait`), so its agent gets `python_installing` and must call again |
 | `P4-heading-python` | rename a heading, add one, and add a tabulate table, in an open Python notebook whose headings use plain quotes | marimo's file writes `mo.md("...")` as a triple-quoted string. The tabulate install changes the file's header under marimo, whose reload pairs cells by similar code; every heading must still show its own text (`headings_own_output`), as L1 on Haiku didn't before #431 |
@@ -308,6 +308,46 @@ can't reach.
 
 Each `result.json` and the summary record the model or models that answered
 (from Claude's own events), so runs can be compared across models later.
+
+## Why the harness works as it does
+
+- The harness's own `endeavor mcp` sessions (setting notebooks up, reading
+  what the agent left, the second person's steps) are sessions of their
+  own. The proxy starts the second person's from inside the agent's MCP
+  server, whose `CLAUDE_CODE_SESSION_ID` would make it the agent's own
+  session (#176), so its edits wouldn't count as another session's, and
+  N5's `stale_read` and N6's `run_conflict` never came (#248).
+- The agent keeps only the variables it needs to run, sign in and reach the
+  network. A Claude Code session's own variables above all would connect it
+  to that session. Its first event is checked for a tool, plugin or server
+  beyond ours, or the starting session's memory; Claude Code's own built-in
+  plugins are allowed. Connectors load after the first turn has started, so
+  only a later turn's first event lists them, and the tools the agent used
+  catch one that connects later. A call Claude Code refused because the
+  agent hasn't that tool doesn't count as using it.
+- A re-run compares outputs with the project folder written as the agent's,
+  so a cell that prints its own folder compares the same (#440); macOS's
+  temporary folders show as `/var/...` or `/private/var/...`, so both are
+  replaced. A picture needn't be byte for byte the same, nor what a package
+  prints only the first time it runs on a computer.
+- A marimo notebook's cell ids aren't in its file, so a reload gives new ones
+  (#353): the same code in the same place is the same cell, but for the
+  spaces on its blank lines, which marimo's file doesn't keep. An id alone
+  isn't enough: marimo hands out ids in a fixed order, so a cell put in above
+  another took a new id, and the reload gives the other's id to it.
+- The headings check compares a heading alone ("Data" mustn't pass for "Data
+  Checks").
+- An install that waits for an OK the harness doesn't give isn't waited for,
+  since waiting would only run out the limit (N1 in Python, #541).
+- Every check that holds `reproducible`, at any depth, asks for a re-run
+  (N8 nests it, #524).
+- A task's folder is removed only once no process uses it: stopping the
+  runtime doesn't stop the background precompile, which runs from the
+  runtime unpacked in the task's folder. Removing it under that precompile
+  made Julia write its new cache file in the shared depot as mode 200 (#383).
+  There's no `ps` on Windows, so it isn't checked there.
+- The `asked_user` check of N7 and L1 matches the asking message's words, so
+  a rewording must change the check too (#412).
 
 ## Other agents
 

@@ -1,10 +1,4 @@
 #!/bin/sh
-# The notebook view's Endeavor look and Point (crates/endeavor-mcp/src/views/endeavor-view.js)
-# is a copy of the Endeavor app's frontend/dist/view.js, which the app's repo builds from its
-# frontend/src/view.ts. The app's repo is its source: change it there, then copy it here.
-#
-#   sh scripts/view-frontend.sh check          # fails if the copy differs from the app's main
-#   sh scripts/view-frontend.sh sync [file]    # copy the app's main (or a local build) here
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 copy="$here/crates/endeavor-mcp/src/views/endeavor-view.js"

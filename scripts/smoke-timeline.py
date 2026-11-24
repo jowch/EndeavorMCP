@@ -1,26 +1,4 @@
 #!/usr/bin/env python3
-"""How a smoke attempt's context filled, request by request, and what filled it.
-
-usage: scripts/smoke-timeline.py ATTEMPT_DIR [--top N] [--csv OUT]   (needs numpy)
-
-ATTEMPT_DIR is a smoke run's <task>/attempt-<n> folder (docs/smoke.md). From
-Claude's transcript it prints, for each user message, the requests it took and
-the context at its first and last; then what is in the context at the end, by
-source; then the largest single items.
-
-When Claude Code compacted the conversation, the earlier part is gone from
-the context: the fit leaves out the step across each compaction, the table
-of the end context counts only what came after the last one, and an item
-before it counts as re-read only until it.
-
-The context of each request comes from Claude's own usage. What filled it is
-estimated: the growth between two requests is the agent's last message (the
-code and text it wrote, and its thinking, which the transcript holds only as a
-signature) plus what came back (tool replies, pictures). A least-squares fit
-over all requests gives tokens per character for each kind, and per picture.
-A message's own usage can't be used for this: its output count stops at its
-first part.
-"""
 import collections, json, os, sys
 
 import numpy as np
@@ -40,9 +18,9 @@ def main():
     attempt = sys.argv[1]
     top = int(sys.argv[sys.argv.index("--top") + 1]) if "--top" in sys.argv else 15
     names = {}
-    reqs = []  # turn, ctx, items: what this request added for the next [(kind, source, size, label)]
-    turn, seen = 1, None  # each user message ends with a result event
-    compacted = []  # the number of requests made before each compaction
+    reqs = []
+    turn, seen = 1, None
+    compacted = []
     for line in open(os.path.join(attempt, "transcript.jsonl")):
         try:
             e = json.loads(line)
@@ -79,7 +57,6 @@ def main():
                     src, label = names.get(c["tool_use_id"], ("?", ""))
                     body = c.get("content")
                     parts = body if isinstance(body, list) else [{"type": "text", "text": str(body)}]
-                    # Text by its length; anything else but a picture (ToolSearch's tool references) by its JSON's.
                     chars = sum(len(p.get("text", "")) if p.get("type") == "text" else len(json.dumps(p)) for p in parts if p.get("type") != "image")
                     reqs[-1]["items"].append(("reply", src, chars, label))
                     for p in parts:
@@ -89,12 +66,10 @@ def main():
                     kind = "skill text" if c["text"].startswith("Base directory for this skill") else "user message"
                     reqs[-1]["items"].append(("reply", kind, len(c["text"]), c["text"].split("\n")[0][-60:]))
     n = len(reqs)
-    # A compaction Claude Code didn't report still shows as the context shrinking by a lot.
     for k in range(1, n):
         if reqs[k]["ctx"] < reqs[k - 1]["ctx"] - 5000 and not any(c == k for c in compacted):
             compacted.append(k)
     compacted = sorted(set(c for c in compacted if 0 < c < n))
-    # The requests of each stretch between compactions: request k's items reach request k + 1 only within one.
     starts = [0] + compacted
     ends = compacted + [n]
     segment_end = {k: e for b, e in zip(starts, ends) for k in range(b, e)}
@@ -119,7 +94,7 @@ def main():
     vol = sum(r["ctx"] for r in reqs)
     last = starts[-1]
     for k in pairs:
-        later = segment_end[k] - 1 - k  # requests that read it again
+        later = segment_end[k] - 1 - k
         for kind, src, size, label in reqs[k]["items"]:
             tk = rate[kind] * size
             weighted[src] += tk * later

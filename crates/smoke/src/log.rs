@@ -1,9 +1,3 @@
-//! The proxy's log: one JSON object per line, `{"pid": ..., "t": Unix seconds, "dir": "in"|"out"|"inject"|"user", "msg": ...}`,
-//! "in" from the agent, "out" from the server, "inject" a step the second person took (inject.rs),
-//! and "user" a message the runner sent the agent as the user. A line that isn't JSON is kept as a string.
-//! `pid` is the proxy's: an agent that restarts its server starts a second proxy on the
-//! same log, whose request ids start over.
-
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -29,25 +23,18 @@ impl Log {
     }
 }
 
-/// A tool call the agent made, with its reply.
 #[derive(Debug, Clone)]
 pub struct Call {
     pub tool: String,
     pub args: Value,
-    /// The reply's text, parsed as JSON where it is JSON.
     pub reply: Value,
     pub is_error: bool,
-    /// The size of the reply's text in bytes: what the agent reads of it, apart from pictures.
     pub reply_bytes: usize,
-    /// When the request was sent, in Unix seconds.
     pub at: f64,
 }
 
-/// The tool calls in a log, in the order they were made. A call with no reply
-/// (the agent gave up on it) has a null reply.
 pub fn calls(path: &Path) -> Vec<Call> {
     let Ok(file) = File::open(path) else { return Vec::new() };
-    // Keyed by (proxy pid, request id).
     let mut calls: Vec<((Value, Value), Call)> = Vec::new();
     for entry in BufReader::new(file).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str::<Value>(&l).ok()) {
         let msg = &entry["msg"];
@@ -78,19 +65,16 @@ pub fn calls(path: &Path) -> Vec<Call> {
     calls.into_iter().map(|(_, c)| c).collect()
 }
 
-/// The second person's steps, in order: `{tool, args, ok, reply}`.
 pub fn injections(path: &Path) -> Vec<Value> {
     let Ok(file) = File::open(path) else { return Vec::new() };
     BufReader::new(file).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str::<Value>(&l).ok()).filter(|e| e["dir"] == "inject").map(|e| e["msg"].clone()).collect()
 }
 
-/// When each of the user's messages was sent, in Unix seconds.
 pub fn turns(path: &Path) -> Vec<f64> {
     let Ok(file) = File::open(path) else { return Vec::new() };
     BufReader::new(file).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str::<Value>(&l).ok()).filter(|e| e["dir"] == "user").filter_map(|e| e["t"].as_f64()).collect()
 }
 
-/// What Endeavor asked the user in its own dialogs (`elicitation/create` from the server), in order.
 pub fn questions(path: &Path) -> Vec<String> {
     let Ok(file) = File::open(path) else { return Vec::new() };
     BufReader::new(file)

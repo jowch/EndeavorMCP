@@ -1,8 +1,3 @@
-//! The harness's own MCP sessions: `endeavor mcp` over stdio, joining the
-//! runtime the agent's session uses. The runner sets notebooks up with one and
-//! reads what the agent left with another; the proxy plays a second person
-//! with a third.
-
 use std::io::{BufRead, BufReader, Lines, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -10,10 +5,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-/// The harness's `endeavor mcp`. Each is a session of its own: the proxy starts the
-/// second person's from inside the agent's MCP server, whose `CLAUDE_CODE_SESSION_ID`
-/// would make it the agent's own session (#176), so its edits wouldn't count as
-/// another session's and N5's `stale_read` and N6's `run_conflict` never came (#248).
 fn command(endeavor: &Path, work: &Path, folder: &Path) -> Command {
     let mut c = Command::new(endeavor);
     c.arg("mcp").arg("--folder").arg(folder).args(crate::run::runtime_args(work)).envs(crate::run::runtime_env(work)).env_remove("CLAUDE_CODE_SESSION_ID");
@@ -56,7 +47,6 @@ impl Session {
         }
     }
 
-    /// A notebook view tool's reply (`notebook_socket_*`), which comes as structured content.
     pub fn view(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
         let msg = self.request("tools/call", json!({ "name": name, "arguments": arguments }))?;
         if msg["result"]["isError"] == true {
@@ -65,20 +55,16 @@ impl Session {
         Ok(msg["result"]["structuredContent"].clone())
     }
 
-    /// A tool's reply text, parsed as JSON. A runtime that is still starting is asked again.
     pub fn tool(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
         let began = Instant::now();
         loop {
             let msg = self.request("tools/call", json!({ "name": name, "arguments": arguments }))?;
             let text = msg["result"]["content"][0]["text"].as_str().unwrap_or_default().to_owned();
-            // Still starting is a normal result (Julia, a notebook's open, a machine's runtime), or an error from an older runtime.
             let code = serde_json::from_str::<Value>(&text).ok().and_then(|reply| reply["error"].as_str().map(str::to_owned)).unwrap_or_default();
-            // Ember's first install, for an R notebook, takes minutes; so may uv's first fetch of Python and marimo.
             if matches!(code.as_str(), "r_installing" | "python_installing") && began.elapsed() < Duration::from_secs(1200) {
                 std::thread::sleep(Duration::from_secs(5));
                 continue;
             }
-            // The loose match is only for a reply that isn't JSON: a notebook's own text may say "starting".
             let starting = matches!(code.as_str(), "julia_starting" | "notebook_opening") || (serde_json::from_str::<Value>(&text).is_err() && text.to_lowercase().contains("starting"));
             if starting && began.elapsed() < Duration::from_secs(600) {
                 continue;
@@ -98,7 +84,6 @@ impl Drop for Session {
     }
 }
 
-/// A notebook as the checker read it after the agent ended.
 #[derive(Debug, Default, Clone)]
 pub struct Notebook {
     pub path: String,
@@ -111,9 +96,7 @@ pub struct Cell {
     pub id: String,
     pub code: String,
     pub errored: bool,
-    /// The output as text: `read_cell`'s `output_text` where the runtime renders one, else its `output`.
     pub output: String,
-    /// Still running or queued when it was read.
     pub busy: bool,
 }
 
@@ -123,7 +106,6 @@ impl Notebook {
     }
 }
 
-/// Every notebook open in the runtime, with each cell's code, output and error.
 pub fn notebooks(session: &mut Session) -> Result<Vec<Notebook>, String> {
     let listed = session.tool("list_notebooks", json!({}))?;
     let mut out = Vec::new();
@@ -132,7 +114,6 @@ pub fn notebooks(session: &mut Session) -> Result<Vec<Notebook>, String> {
         let code = session.tool("read_notebook_code", json!({ "notebook_id": id, "order": "visual", "include_markdown": true }))?;
         let mut cells = Vec::new();
         for cell in code["cell_ids"].as_array().cloned().unwrap_or_default() {
-            // The code was just read above, so read_cell would leave it out without include_code.
             let read = session.tool("read_cell", json!({ "notebook_id": id, "cell_id": cell, "include_code": true }))?;
             let output = read["output_text"].as_str().or(read["output"].as_str()).unwrap_or_default().to_owned();
             cells.push(Cell {
@@ -148,7 +129,6 @@ pub fn notebooks(session: &mut Session) -> Result<Vec<Notebook>, String> {
     Ok(out)
 }
 
-/// The id of the open notebook whose file is `name` (a path relative to the project, or its file name).
 pub fn notebook_id(session: &mut Session, name: &str) -> Result<String, String> {
     let listed = session.tool("list_notebooks", json!({}))?;
     listed
@@ -160,7 +140,6 @@ pub fn notebook_id(session: &mut Session, name: &str) -> Result<String, String> 
         .ok_or_else(|| format!("no open notebook is {name}: {listed}"))
 }
 
-/// Open a notebook from the project, allowed to run, and run every cell to the end.
 pub fn open_and_run(session: &mut Session, path: &str, limit: Duration) -> Result<String, String> {
     let opened = session.tool("open_notebook", json!({ "path": path }))?;
     let id = opened["notebook_id"].as_str().ok_or_else(|| format!("open_notebook: no notebook_id: {opened}"))?.to_owned();
@@ -170,7 +149,6 @@ pub fn open_and_run(session: &mut Session, path: &str, limit: Duration) -> Resul
     Ok(id)
 }
 
-/// Wait until no cell of a notebook is running or queued.
 pub fn wait_until_done(session: &mut Session, id: &str, limit: Duration) -> Result<(), String> {
     let began = Instant::now();
     loop {
@@ -193,8 +171,6 @@ pub fn wait_until_done(session: &mut Session, id: &str, limit: Duration) -> Resu
     }
 }
 
-/// Why a cell waits for someone who won't come: an install that waits for an OK, which the harness
-/// doesn't give, so waiting on it would only run out the limit (N1 in Python, #541).
 fn held(read: &Value) -> Option<String> {
     (read["packages"]["step"] == "asking").then(|| format!("cell {} waits for an OK to install {}, which no one gives here", read["cell_id"].as_str().unwrap_or("?"), read["packages"]["packages"]))
 }

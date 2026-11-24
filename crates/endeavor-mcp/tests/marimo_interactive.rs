@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 const ADAPTER: &str = include_str!("../../../runtime/marimo/adapter.py");
 
 fn interactive(bundles: &[serde_json::Value]) -> Option<Vec<bool>> {
-    let start = ADAPTER.find("# What makes HTML interactive").unwrap();
+    let start = ADAPTER.find("INTERACTIVE = ").unwrap();
     let end = ADAPTER.find("def html_text(").unwrap();
     let script = format!(
         "import json, re, sys\n{}\nfor line in sys.stdin.read().splitlines():\n    print(interactive_bundle(json.loads(line)))\n",

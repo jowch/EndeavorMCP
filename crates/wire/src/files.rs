@@ -357,6 +357,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_real_path_on_windows_has_no_verbatim_prefix_as_julias_realpath_has_none() {
+        let path = text(&real_path(&std::env::temp_dir()).unwrap());
+        assert!(!path.starts_with(r"\\?\"), "{path}");
+        assert_eq!(path.chars().nth(1), Some(':'), "{path}");
+    }
+
     #[test]
     fn lists_folders_first_then_julia_files() {
         let dir = std::env::temp_dir().join(format!("endeavor-files-{}", std::process::id()));

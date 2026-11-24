@@ -1,30 +1,10 @@
 #!/bin/sh
-# Put the runtime helpers for Linux servers (endeavor, x86_64 and
-# aarch64) in target/helpers/<platform>/, or in $HELPERS_OUT, built from this
-# checkout's source. Endeavor's scripts/helpers.sh runs this in a checkout of
-# the commit Endeavor's Cargo.lock pins, with HELPERS_OUT set to its own
-# target/helpers.
-#
-#   scripts/helpers.sh               keep what's there if it matches, else
-#                                    download it, else build it
-#   scripts/helpers.sh --fetch-only  keep or download, never build (Endeavor's
-#                                    git hooks run this)
-#   scripts/helpers.sh --key         print the helper source key
-#
-# Downloads come from the "helpers" release on GitHub, which the Helpers
-# workflow (.github/workflows/helpers.yml) fills for every change to the
-# helper's source; plain curl, no sign-in. A checkout with uncommitted helper
-# changes, or one GitHub hasn't built yet, is built here instead: with
-# cargo-zigbuild if it's installed, else on the Linux machine named by
-# ENDEAVOR_HELPER_HOST (scripts/build-helpers.sh --via, its architecture only).
 set -eu
 cd "$(dirname "$0")/.."
 out=${HELPERS_OUT:-target/helpers}
 paths="crates/endeavor-mcp crates/wire plugin runtime rust-toolchain.toml"
 platforms="linux-x86_64 linux-aarch64"
 
-# The crates the helper is built from, as "name version" lines, read from a
-# Cargo.lock on stdin: only the helper's own dependencies.
 closure() {
   awk -v start=endeavor-mcp '
     /^\[\[package\]\]/ { flush(); name = ""; ver = ""; deps = ""; indeps = 0; next }
@@ -50,7 +30,6 @@ closure() {
     }' | LC_ALL=C sort
 }
 
-# The committed helper source, its dependencies and the version it reports, hashed.
 key() {
   {
     for p in $paths; do git rev-parse "HEAD:$p"; done
@@ -59,7 +38,6 @@ key() {
   } | shasum -a 256 | cut -c1-12
 }
 
-# True if the working tree's helper source differs from what key() hashes.
 dirty() {
   [ -n "$(git status --porcelain -- $paths Cargo.toml)" ] || [ "$(closure < Cargo.lock)" != "$(git show HEAD:Cargo.lock | closure)" ]
 }
@@ -86,7 +64,6 @@ for platform in $platforms; do
 done
 [ -z "$missing" ] && exit 0
 
-# The repository's GitHub owner/name, from origin's URL.
 repo=$(git remote get-url origin | sed -E 's#^(https://github\.com/|git@github\.com:)##; s#\.git$##')
 base="https://github.com/$repo/releases/download/helpers"
 

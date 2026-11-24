@@ -1,13 +1,5 @@
-# A notebook's controls (`@bind name Slider(...)` and the like), as `read_cell` shows them under
-# `inputs`, and a note on the cells whose results used a control moved away from its default.
-# A control's value lives only in the notebook's process and isn't saved: a rerun of the file
-# uses the default. An agent that reads a result made at a moved value reports numbers the
-# notebook won't reproduce unless it is told.
 
-# The code that describes controls, run in the notebook's process, where the widgets are. It is
-# also evaluated into this module, so the tests can describe widgets directly.
 const _CONTROLS_CODE = quote
-    # A value as the agent reads it, cut to `max` bytes.
     function __endeavor_shown(x; max::Int = 80)
         text = try
             repr(x; context = :compact => true)
@@ -18,10 +10,7 @@ const _CONTROLS_CODE = quote
         sizeof(text) <= max ? text : text[1:prevind(text, max - 2)] * " …"
     end
 
-    # A widget's own text form, when its package gives it one (Masque's describes the picture,
-    # its layers and its value), else nothing.
     function __endeavor_own_text(el)
-        # Base's own methods print any value's fields, which says nothing a widget's kind doesn't.
         own = try
             m = which(show, Tuple{IO, MIME"text/plain", typeof(el)})
             sig = Base.unwrap_unionall(m.sig)
@@ -39,8 +28,6 @@ const _CONTROLS_CODE = quote
         sizeof(text) <= 300 ? String(text) : text[1:prevind(text, 298)] * " …"
     end
 
-    # The label a choice has on the page, for widgets that list `value => label` pairs (PlutoUI's
-    # Select, Radio, MultiSelect), when it differs from the value.
     function __endeavor_label(el, value)
         options = try
             getfield(el, :options)
@@ -67,8 +54,6 @@ const _CONTROLS_CODE = quote
         return d
     end
 
-    # What a control allows, after `transform_value`: the page's own values are indices for a
-    # Slider and "puiselect-3" for a Select, which would mislead. Empty when it doesn't say.
     function __endeavor_allows(el, default, possible, transform)
         (possible === :NotGiven || nameof(typeof(possible)) === :NotGiven) && return ""
         if nameof(typeof(possible)) === :InfinitePossibilities
@@ -104,9 +89,6 @@ const _CONTROLS_CODE = quote
         return " $n choices, from $(__endeavor_shown(values[1])) to $(__endeavor_shown(values[end]))"
     end
 
-    # One control: `name`, its `line` for `inputs`, and whether it is `moved` from its default,
-    # with the value and the default as text. A widget that gives no default (a home-made
-    # `html"<input>"`) has none and is never moved: its value starts as `missing`.
     function __endeavor_control(name, el, value, initial, possible, transform)
         default = try
             Core.applicable(Base.get, el) ? Base.get(el) : initial(el)
@@ -124,8 +106,6 @@ const _CONTROLS_CODE = quote
         Dict{String,Any}("name" => string(name), "line" => line, "moved" => moved, "value" => shown, "default" => __endeavor_shown(default))
     end
 
-    # Every control the given cells made on their last run, by cell, in the notebook's module
-    # `mod`. A cell with none is left out.
     function __endeavor_controls(mod::Symbol, cells)
         R = Main.PlutoRunner
         m = isdefined(Main, mod) ? getfield(Main, mod) : nothing
@@ -146,9 +126,6 @@ end
 
 Core.eval(@__MODULE__, _CONTROLS_CODE)
 
-# What the runtime last learned about each notebook's controls: `key` says what it was learned
-# for (the notebook's process, its cells' last runs, the page's values), `info` is what
-# `__endeavor_controls` answered, and `task` a query still on its way.
 mutable struct _Controls
     key::Any
     info::Dict{String,Any}
@@ -159,16 +136,12 @@ end
 const _CONTROLS = Dict{UUID,_Controls}()
 const _CONTROLS_LOCK = ReentrantLock()
 
-# How long a snapshot waits for the notebook's process to describe its controls. A process busy
-# with code that never yields doesn't answer: the snapshot then shows what was known before.
 const _CONTROLS_WAIT = 3.0
 
 _has_control(cell) = occursin("@bind", cell.code)
 
 forget_controls!(notebook_id::UUID) = lock(() -> delete!(_CONTROLS, notebook_id), _CONTROLS_LOCK)
 
-# A finished query's answer becomes what is known. A failed one keeps the last answer, and counts as
-# asked for its key, so it isn't asked again until something changes.
 function _adopt!(entry::_Controls)
     task = entry.task
     (task === nothing || !istaskdone(task)) && return nothing
@@ -187,16 +160,6 @@ function _controls_query(workspace, ids)
     end)
 end
 
-"""
-    controls(session, nb) -> Dict{String,Any}
-
-Each of the notebook's cells that made controls on its last run, by cell id, with each control as
-`__endeavor_control` describes it. Asks the notebook's process only when something that could
-change the answer changed, and only while no cell runs or waits to: a busy process may not answer
-for a long time. Until it answers, the last answer stands. Empty for a notebook with no `@bind`,
-and with no process (safe preview). Reads Pluto's internals, so a Pluto release that changes
-them gives none rather than failing the snapshot.
-"""
 function controls(session, nb)
     try
         _controls(session, nb)
@@ -219,13 +182,8 @@ function _controls(session, nb)
     catch
         UInt(0)
     end
-    # Every cell's last run, not only the widgets' cells': a value the page sends is in
-    # `nb.bonds` before the run that sets it in the notebook's module starts, so a query in that
-    # moment reads the old value. The readers' runs then change the key, and the next call asks again.
     key = (objectid(workspace), [(c.cell_id, c.output.last_run_timestamp) for c in cells], bonds)
     busy = any(c -> c.running || c.queued, cells)
-    # Only the call that starts a query waits for it. A query that outlasts the wait is left to
-    # finish, and every call until then answers with what was known before, at once.
     task = lock(_CONTROLS_LOCK) do
         entry = get!(() -> _Controls(nothing, Dict{String,Any}(), nothing, nothing), _CONTROLS, nb.notebook_id)
         _adopt!(entry)
@@ -241,13 +199,6 @@ function _controls(session, nb)
     return lock(() -> haskey(_CONTROLS, nb.notebook_id) ? _CONTROLS[nb.notebook_id].info : Dict{String,Any}(), _CONTROLS_LOCK)
 end
 
-"""
-    moved_input_notes(nb, controls) -> Dict{String,Vector{String}}
-
-For each cell whose upstream includes a control moved away from its default, a note naming it,
-by cell id. The control's own cell has its default in its `inputs` line instead. Empty when every
-control is at its default, the usual case.
-"""
 function moved_input_notes(nb, controls)
     notes = Dict{String,Vector{String}}()
     isempty(controls) && return notes

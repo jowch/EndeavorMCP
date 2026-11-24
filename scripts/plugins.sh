@@ -1,18 +1,4 @@
 #!/bin/sh
-# Keeps the plugin folders in step with their one source each:
-#
-#   plugin/skills/                         the skills
-#   scripts/endeavor-mcp.sh, install.sh    the launcher and its installer
-#   scripts/release-key                    the pinned build
-#
-# `sync` writes the copies; `check` fails if any copy differs. release-key
-# names the newest build the Helpers workflow published from main, and only
-# that workflow writes it (.github/workflows/helpers.yml, its pin job), after
-# every platform built: a PR doesn't touch it, so PRs don't have to be re-pinned
-# each time main moves.
-# Each plugin holds the launcher files in launch/ and a copy of the skills,
-# not a link: an agent may not follow a link out of the plugin's folder, and a
-# checkout without symlink support turns a link into a text file.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
