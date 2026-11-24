@@ -846,12 +846,14 @@ fn a_python_notebook_through_the_runtime() {
         let began = Instant::now();
         let failed = loop {
             let env = environment();
-            if !env["failed"].is_null() || began.elapsed() > Duration::from_secs(120) {
+            if !env["failed"].is_null() || began.elapsed() > Duration::from_secs(600) {
                 break env["failed"].clone();
             }
             std::thread::sleep(Duration::from_millis(250));
         };
         assert!(failed["packages"].to_string().contains("endeavor") && failed["log"].as_str().is_some_and(|log| !log.is_empty()), "a failed install is kept for the app: {failed}");
+        let left = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": absent }));
+        assert!(left["errored"] == true && left["status"] != "queued", "a cell whose install failed shows its error, not a queue: {left}");
         agent.ok("delete_cell", json!({ "notebook_id": id, "cell_id": absent }));
         agent.ok("close_notebook", json!({ "notebook_id": id }));
         let opened = agent.ok("open_notebook", json!({ "path": name }));

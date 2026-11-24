@@ -891,8 +891,10 @@ def header_deps(header):
 
 
 def header_python(header):
+    if not header:
+        return None
     import tomlkit
-    return str(tomlkit.parse(header).get("requires-python") or "") or None if header else None
+    return str(tomlkit.parse(header).get("requires-python") or "") or None
 
 
 def direct_package(dep):
