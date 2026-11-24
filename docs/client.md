@@ -322,6 +322,10 @@ and writes it as well: `{"schema": 1, "machines": [Server, ...]}`.
   `nul.txt`) and a trailing dot.
 - A machine's Julia is a path or a shell line such as `module load julia`;
   unset looks on the login shell's PATH, then downloads Endeavor's own. R is
-  the same, but Endeavor doesn't download R. A cluster's depot defaults to
-  `$SCRATCH/endeavor/depot` when the cluster sets `$SCRATCH` (home quotas are
-  small).
+  the same, but Endeavor doesn't download R. A server's depot follows one
+  rule (`paths::server_depot`): the machine's `depot` in `machines.json` for a
+  Slurm job, else `$SCRATCH/endeavor/depot` when the server sets `$SCRATCH`
+  (home quotas are small on clusters), else `depot` in the install folder. The
+  bootstrap leaves the depot to the helper, which looks for `$SCRATCH` in its
+  environment and then in a login shell, since ssh starts it without one. So
+  the helper's own runtime and its Slurm jobs share one depot (#22).

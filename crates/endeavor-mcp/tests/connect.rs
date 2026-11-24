@@ -1779,7 +1779,7 @@ impl FakeSlurm {
         let path = format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap());
         let mut command = Command::new(env!("CARGO_BIN_EXE_endeavor"));
         command
-            .args(["connect", "--runtime", "/nonexistent", "--depot", "/nonexistent"])
+            .args(["connect", "--runtime", "/nonexistent", "--depot", ""])
             .args(["--launcher", "slurm", "--julia", julia.to_str().unwrap(), "--build", "1.0.0-abc"])
             .env("PATH", path)
             .env("FAKE_SLURM", &self.dir)

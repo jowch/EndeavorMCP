@@ -166,7 +166,7 @@ fn root_state_and_depot_land_where_given() {
     );
     let args = connect_args(&home, &format!("{root}\n/var/endeavor/state\n\n--julia\nauto\nprocess\n--r\nauto\n"));
     assert_eq!(args[2], "/var/endeavor/state", "an absolute state folder is used as it is");
-    assert_eq!(args[12], format!("{root}/depot:"), "no depot means one in the install folder");
+    assert_eq!(args[12], "", "no depot is left to the helper, which knows the server's $SCRATCH");
 }
 
 #[test]
@@ -297,7 +297,7 @@ fn an_empty_root_means_the_cache_folder_in_home() {
     let cache = crate::paths::Env::from_vars(&|name| (name == "HOME").then(|| home.display().to_string())).server_root();
     fake_install(&cache);
     let args = connect_args(&home, "\nstate\n\n--julia\nauto\nprocess\n--r\nauto\n");
-    assert_eq!((args[2].as_str(), args[10].as_str(), args[12].as_str()), (cache.join("state").to_str().unwrap(), cache.join("v1/runtime").to_str().unwrap(), cache.join("depot:").to_str().unwrap()));
+    assert_eq!((args[2].as_str(), args[10].as_str(), args[12].as_str()), (cache.join("state").to_str().unwrap(), cache.join("v1/runtime").to_str().unwrap(), ""));
 }
 
 #[test]

@@ -142,6 +142,13 @@ pub(crate) fn scratch_depot(scratch: &str) -> String {
     format!("{scratch}/endeavor/depot:")
 }
 
+pub(crate) fn server_depot(scratch: Option<String>, cache: &Path) -> String {
+    match scratch {
+        Some(scratch) => scratch_depot(&scratch),
+        None => format!("{}/depot:", cache.display()),
+    }
+}
+
 pub fn with_user_depot(depot: &str) -> String {
     let home = std::env::home_dir().unwrap_or_default();
     with_user_depot_from(depot, std::env::var("JULIA_DEPOT_PATH").ok().as_deref(), &home, if cfg!(windows) { ';' } else { ':' })
@@ -215,6 +222,8 @@ mod tests {
     fn the_depot_is_never_relative() {
         assert_eq!(Env::default().depot(), "/.cache/endeavor/depot:", "no home at all");
         assert_eq!(Env { home: "/home/ada".into(), ..Env::default() }.depot(), "/home/ada/.cache/endeavor/depot:");
+        assert_eq!(server_depot(None, Path::new("/home/ada/.cache/endeavor")), "/home/ada/.cache/endeavor/depot:", "a server without $SCRATCH");
+        assert_eq!(server_depot(Some("/scratch/ada".into()), Path::new("/home/ada/.cache/endeavor")), "/scratch/ada/endeavor/depot:", "the helper and its Slurm jobs share $SCRATCH's depot");
     }
 
     #[test]

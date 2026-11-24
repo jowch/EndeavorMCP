@@ -234,10 +234,7 @@ fn submit_job(args: &Args, mux: &Arc<Mux>, request: &JobRequest, flags: Vec<Stri
     token(dir)?;
     let depot = match request.depot.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
         Some(d) => format!("{}:", wire::files::expand(d).display()),
-        None => match s::scratch() {
-            Some(scratch) => crate::paths::scratch_depot(&scratch),
-            None => args.depot.clone(),
-        },
+        None => args.depot.clone(),
     };
     let exe = std::env::current_exe().map_err(|e| format!("Couldn't find the helper itself: {e}"))?;
     let build = args.build.as_deref().map_or(String::new(), |build| format!(" --build {}", quote(build)));

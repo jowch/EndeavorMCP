@@ -298,6 +298,11 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
+    let runtime: PathBuf = runtime.ok_or("--runtime is required")?;
+    let depot = match depot.ok_or("--depot is required")? {
+        depot if depot.is_empty() => paths::server_depot(wire::slurm::scratch(), runtime.parent().and_then(Path::parent).unwrap_or(&runtime)),
+        depot => depot,
+    };
     let env = paths::Env::here();
     let unnamed = (state_dir.is_none() && launcher == Launcher::Process).then(|| (env.state_dir(), env.apps_old_state_dir()));
     Ok(Args {
@@ -309,8 +314,8 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
         julia: julia.ok_or("--julia or --julia-shell is required")?,
         julia_when_needed,
         r: r.unwrap_or_default(),
-        runtime: runtime.ok_or("--runtime is required")?,
-        depot: depot.ok_or("--depot is required")?,
+        runtime,
+        depot,
         launcher,
         quit_with_client,
         own_with_client: own_with_client.into(),
@@ -1727,6 +1732,8 @@ mod tests {
         assert_eq!(shell.unwrap().julia, julia::Source::Shell("module load julia".into()));
         assert!(args("connect --state-dir /s --julia /j --julia-shell x --runtime /r --depot /d").is_err());
         assert!(args("connect --state-dir /s").is_err());
+        let defaulted = parse_args(["connect", "--state-dir", "/s", "--julia", "auto", "--runtime", "/c/v1/runtime", "--depot", ""].map(String::from).to_vec()).unwrap();
+        assert_eq!(defaulted.depot, paths::server_depot(wire::slurm::scratch(), Path::new("/c")), "an empty depot takes the server's rule");
         assert!(args("serve --state-dir /s --julia /j --runtime /r --depot /d").is_err());
         assert!(args("connect --state-dir /s --julia /j --runtime /r --depot /d --bogus").is_err());
     }
