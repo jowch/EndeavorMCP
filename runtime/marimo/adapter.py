@@ -125,7 +125,7 @@ def on_marimos_drive(path):
     drive = other_drive(real(path), ROOT)
     if drive is not None:
         root = os.path.splitdrive(ROOT)[0]
-        raise argument_error("unsupported", f"'{path}' is on {drive}, but Python notebooks run from one drive at a time, and since Endeavor started that is {root}. Don't change the path, and don't open or read the file another way. Tell the user exactly this: Python notebooks can use one drive at a time, this one is on {drive}, and after Endeavor restarts the first Python notebook opened or made can be on {drive}.")
+        raise argument_error("unsupported", f"'{path}' is on {drive}, but Python notebooks run from one drive at a time, and since Endeavor started that is {root}. Don't change the path. Tell the user exactly this: Python notebooks can use one drive at a time, this one is on {drive}, and after Endeavor restarts the first Python notebook opened or made can be on {drive}.")
 
 
 class Marimo:
