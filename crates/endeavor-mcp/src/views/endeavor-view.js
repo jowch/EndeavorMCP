@@ -45,9 +45,22 @@
     return mac ? e.metaKey : e.ctrlKey;
   }
 
+  // src/engine.ts
+  var onEmber = () => location.pathname.startsWith("/ember/");
+  var onMarimo = () => location.pathname.startsWith("/marimo/");
+  var pluto = { cell: "pluto-cell", input: "pluto-input", output: "pluto-output", selected: "pluto-cell.selected", id: (cell) => cell.id };
+  var marimo = {
+    cell: ".marimo-cell[data-cell-id]",
+    input: "[data-testid=cell-editor]",
+    output: ".output-area[data-cell-role=output]",
+    selected: ":not(*)",
+    id: (cell) => cell.getAttribute("data-cell-id") ?? ""
+  };
+  var dom = () => onMarimo() ? marimo : pluto;
+
   // src/reveal.ts
   function cellCode(cell) {
-    const content = cell?.querySelector("pluto-input .cm-content");
+    const content = cell?.querySelector(`${dom().input} .cm-content`);
     const view = content?.cmTile?.root?.view;
     if (view) return view.state.doc.toString();
     const lines = content ? [...content.querySelectorAll(".cm-line")].map((l) => l.textContent ?? "") : [];
@@ -257,7 +270,8 @@
   }
 
   // src/state.ts
-  var context = { host: "This Mac", agent: "Claude", asking: false, crash: null };
+  var context = { host: "This Mac", agent: "Claude", asking: false, crash: null, notebook: "" };
+  var notebookId = () => new URLSearchParams(location.search).get("id") ?? context.notebook;
 
   // src/askbox.ts
   var svg = (body, size = 12) => `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
@@ -424,20 +438,19 @@
     return `${cellName(pick.code)} \xB7 ${part}`;
   }
   function sendQuote(picks, comment, add, ref) {
-    const notebook = new URLSearchParams(location.search).get("id");
-    send({ type: "quote", notebook, picks, comment, add, ...ref === void 0 ? {} : { ref } });
+    send({ type: "quote", notebook: notebookId(), picks, comment, add, ...ref === void 0 ? {} : { ref } });
   }
 
   // src/annotate.ts
-  var css2 = `
-  body.annotating pluto-cell:hover, body.annotating pluto-cell :hover { cursor: crosshair !important; }
+  var css2 = () => `
+  body.annotating ${dom().cell}:hover, body.annotating ${dom().cell} :hover { cursor: crosshair !important; }
   body.annotating .annotate-hover { outline: 1.5px dashed var(--e-hover-edge); outline-offset: 3px; }
   body.annotating .annotate-picked { outline: 1.5px solid var(--e-accent); outline-offset: 3px; }
   body.annotating.annotate-drawing .annotate-hover { outline: none; }
   body.annotating.annotate-drawing, body.annotating.annotate-drawing * { user-select: none; }
-  body.annotate-numbers pluto-input .cm-lineNumbers .cm-gutterElement { color: var(--cm-color-line-numbers) !important; }
-  body.annotate-numbers pluto-input .cm-lineNumbers .cm-gutterElement::after { color: transparent !important; }
-  body.annotating pluto-input .cm-line.annotate-line { background: rgba(204, 63, 0, 0.12); }
+  body.annotate-numbers ${dom().input} .cm-lineNumbers .cm-gutterElement { color: var(--cm-color-line-numbers) !important; }
+  body.annotate-numbers ${dom().input} .cm-lineNumbers .cm-gutterElement::after { color: transparent !important; }
+  body.annotating ${dom().input} .cm-line.annotate-line { background: rgba(204, 63, 0, 0.12); }
   #annotate-tag { position: absolute; z-index: 9999; display: none; pointer-events: none; padding: 0 6px; border-radius: 4px;
     background: var(--e-accent); color: #fff; font: 11px/18px system-ui; }
   body.annotating #annotate-tag.shown { display: block; }
@@ -467,18 +480,18 @@
   body.annotating.${SHOOTING} #annotate-frame, body.annotating.${SHOOTING} #annotate-box, body.annotating.${SHOOTING} #annotate-tag,
   body.annotating.${SHOOTING} #annotate-hint, body.annotating.${SHOOTING} #annotate-bar { display: none; }
   body.annotating.${SHOOTING} .annotate-picked, body.annotating.${SHOOTING} .annotate-hover { outline: none; }
-  body.annotating.${SHOOTING} pluto-input .cm-line.annotate-line { background: none; }
+  body.annotating.${SHOOTING} ${dom().input} .cm-line.annotate-line { background: none; }
 `;
   var DRAG = 4;
   var FIGURE = "img, svg, canvas, video";
   var PARAGRAPH = "p, li, h1, h2, h3, h4, h5, h6, pre, blockquote, table";
   var TREE = "pluto-tree, table.pluto-table";
   function targetAt(el) {
-    const cell = el?.closest("pluto-cell");
+    const cell = el?.closest(dom().cell);
     if (!el || !cell) return null;
-    const input = el.closest("pluto-input");
+    const input = el.closest(dom().input);
     if (input) return { part: "code", cell, el: input };
-    const output = el.closest("pluto-output");
+    const output = el.closest(dom().output);
     if (!output) return { part: "cell", cell, el: cell };
     let figure = el.closest(FIGURE);
     while (figure?.parentElement?.closest(FIGURE) && output.contains(figure.parentElement.closest(FIGURE))) figure = figure.parentElement.closest(FIGURE);
@@ -503,7 +516,7 @@
     right: r.right + window.scrollX,
     bottom: r.bottom + window.scrollY
   });
-  var cmLines = (cell) => [...cell.querySelectorAll("pluto-input .cm-line")];
+  var cmLines = (cell) => [...cell.querySelectorAll(`${dom().input} .cm-line`)];
   function pickStatus(picks) {
     if (picks.length > 1) return `${picks.length} picks`;
     const pick = picks[0];
@@ -542,9 +555,9 @@
     const picks = [];
     let hover = null;
     const active = () => document.body.classList.contains("annotating");
-    const cells = () => [...document.querySelectorAll("pluto-cell")];
+    const cells = () => [...document.querySelectorAll(dom().cell)];
     const style = document.createElement("style");
-    style.textContent = css2;
+    style.textContent = css2();
     const frame = document.createElement("div");
     frame.id = "annotate-frame";
     const box = document.createElement("div");
@@ -628,20 +641,20 @@
       const code = cellCode(cell);
       switch (target.part) {
         case "cell":
-          return { pick: { part: "cell", cell: cell.id, code }, el };
+          return { pick: { part: "cell", cell: dom().id(cell), code }, el };
         case "code":
-          return { pick: { part: "cell", cell: cell.id, code }, el };
+          return { pick: { part: "cell", cell: dom().id(cell), code }, el };
         case "output":
-          return { pick: { part: "output", cell: cell.id, code, text: (el.innerText ?? el.textContent ?? "").trim() || widgetValues(el) }, el };
+          return { pick: { part: "output", cell: dom().id(cell), code, text: (el.innerText ?? el.textContent ?? "").trim() || widgetValues(el) }, el };
         case "figure":
-          return { pick: { part: "figure", cell: cell.id, code }, el };
+          return { pick: { part: "figure", cell: dom().id(cell), code }, el };
       }
     }
     function linesPick(cell, from, to) {
       const [first, last] = [Math.min(from, to), Math.max(from, to)];
       const code = cellCode(cell);
       const text2 = code.split("\n").slice(first - 1, last).join("\n");
-      return { pick: { part: "lines", cell: cell.id, code, lines: [first, last], text: text2 }, lines: cmLines(cell).slice(first - 1, last) };
+      return { pick: { part: "lines", cell: dom().id(cell), code, lines: [first, last], text: text2 }, lines: cmLines(cell).slice(first - 1, last) };
     }
     function set(enable) {
       if (enable === active()) return;
@@ -651,7 +664,7 @@
       drag = null;
       showHover(null);
       if (enable) {
-        for (const c of document.querySelectorAll("pluto-cell.selected")) picks.push(targetPick({ part: "cell", cell: c, el: c }));
+        for (const c of document.querySelectorAll(dom().selected)) picks.push(targetPick({ part: "cell", cell: c, el: c }));
         text.focus();
       }
       refresh();
@@ -697,7 +710,7 @@
       e.stopPropagation();
       const m = e;
       if (e.type === "mousedown" && m.button === 0) {
-        const cell = target.closest("pluto-cell");
+        const cell = target.closest(dom().cell);
         const line = cell && !m.altKey ? lineAt(target, cell) : 0;
         drag = { x: m.clientX + window.scrollX, y: m.clientY + window.scrollY, moved: false, add: m.shiftKey, lines: line ? { cell, from: line, to: line } : void 0 };
       }
@@ -748,7 +761,7 @@
           const r = pageBox(c.getBoundingClientRect());
           return drawn.left < r.right && r.left < drawn.right && drawn.top < r.bottom && r.top < drawn.bottom;
         });
-        choose({ pick: { part: "box", cells: under.map((c) => c.id) }, box: drawn }, done.add);
+        choose({ pick: { part: "box", cells: under.map(dom().id) }, box: drawn }, done.add);
       },
       true
     );
@@ -1117,9 +1130,6 @@ ${text.value}` : sent.comment;
     document.head.append(style);
   }
 
-  // src/engine.ts
-  var onEmber = () => location.pathname.startsWith("/ember/");
-
   // src/theme.ts
   var tokens = `
 :root {
@@ -1412,11 +1422,14 @@ footer form#feedback { display: none !important; }
 }`;
     }).join("");
   }
-  function initTheme(fontsFrom = "app") {
+  function initTokens() {
     const tokenSheet = document.createElement("style");
     tokenSheet.id = "endeavor-tokens";
     tokenSheet.textContent = tokens;
     document.head.append(tokenSheet);
+  }
+  function initTheme(fontsFrom = "app") {
+    initTokens();
     const fonts = document.createElement("style");
     fonts.id = "endeavor-fonts";
     fonts.textContent = juliaMonoFaces(fontsFrom);
