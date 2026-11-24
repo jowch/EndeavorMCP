@@ -1424,6 +1424,7 @@ pluto-editor { --e-side: clamp(28px, calc(100vw * 50 / 860), 50px); }
 pluto-editor main { margin-left: calc(var(--e-side) - 20px) !important; margin-right: auto !important;
   width: calc(100% - 2 * var(--e-side) + 20px + 6px) !important; max-width: 731px !important; }
 pluto-editor main > preamble { height: 0 !important; margin-top: 0 !important; overflow: visible; }
+pluto-editor.fullscreen main > preamble #saveall-container { transform: translateX(max(0px, 100vw - (var(--e-side) - 20px) - min(100vw - 2 * var(--e-side) + 26px, 731px) - 24px)) !important; }
 pluto-runarea > span { font-size: 10px; }
 `;
   var appChrome = `
