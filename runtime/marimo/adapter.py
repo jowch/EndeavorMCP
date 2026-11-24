@@ -1738,6 +1738,17 @@ class Adapter:
         self.notify("notebook_shut_down", notebook_id=nb.id)
         return {"safe_preview": safe_preview}
 
+    async def export(self, nb, form):
+        if form == "file":
+            with open(nb.path, encoding="utf-8") as f:
+                return {"text": f.read()}
+        if form != "html":
+            raise argument_error("invalid_format", f"Python notebooks export as 'file' or 'html', not '{form}'")
+        if not nb.live:
+            raise argument_error("execution_blocked", "The notebook is in safe preview; it can export as a web page once it may run")
+        r = await nb.m.post("/api/export/html", await nb.session_id(), {"download": False, "files": [], "includeCode": True}, timeout=120)
+        return {"text": r.text}
+
     async def move(self, nb, path):
         path = os.path.abspath(os.path.expanduser(path))
         if os.path.exists(path):
@@ -1820,6 +1831,8 @@ class Adapter:
             return await self.shutdown(nb)
         if method == "move":
             return await self.move(nb, p.get("path", ""))
+        if method == "export":
+            return await self.export(nb, p.get("format"))
         if method == "render_text":
             return {"text": None}
         if method == "render_png":

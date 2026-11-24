@@ -1406,6 +1406,14 @@ impl Notebooks {
         Ok(result)
     }
 
+    pub fn export(&self, notebook_id: &str, format: &str) -> Result<Value, String> {
+        let nb = self.snapshot(notebook_id)?;
+        match self.backend_of(&nb.id) {
+            Backend::Marimo => self.call("export", json!({ "notebook_id": nb.id, "format": format })),
+            Backend::Pluto | Backend::Ember => Err("ArgumentError: not_supported::Julia and R notebooks export through their own page".into()),
+        }
+    }
+
     pub fn move_notebook(&self, notebook_id: &str, path: &str) -> Result<Value, String> {
         let nb = self.snapshot(notebook_id)?;
         let target = absolute_path(path)?;

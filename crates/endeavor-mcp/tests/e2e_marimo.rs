@@ -363,6 +363,17 @@ fn a_python_notebook_through_the_runtime() {
         assert!(!order.to_string().contains(&added), "{order}");
     });
 
+    step("the app exports the notebook as its file and as marimo's own web page", || {
+        let file = app_call(agent.port, &agent.token, "endeavor/export_notebook", json!({ "notebook_id": notebook, "format": "file" }));
+        let text = file["result"]["text"].as_str().unwrap_or_default();
+        assert!(text.contains("@app.cell") && text == std::fs::read_to_string(&path).unwrap(), "{file}");
+        let page = app_call(agent.port, &agent.token, "endeavor/export_notebook", json!({ "notebook_id": notebook, "format": "html" }));
+        let html = page["result"]["text"].as_str().unwrap_or_default();
+        assert!(html.contains("<marimo-") && html.contains("growth"), "{}", &html[..html.len().min(400)]);
+        let other = app_call(agent.port, &agent.token, "endeavor/export_notebook", json!({ "notebook_id": notebook, "format": "pdf" }));
+        assert!(other.to_string().contains("invalid_format"), "{other}");
+    });
+
     step("a preview that leaves no cell where it was still keeps its ids", || {
         std::fs::write(folder.join("shift.py"), GROWTH).unwrap();
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
