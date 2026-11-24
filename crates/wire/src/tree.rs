@@ -10,8 +10,12 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>, bool)>) -> Res
     let mut entries: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
-        let name = format!("{prefix}/{}", entry.file_name().to_string_lossy());
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        let name = format!("{prefix}/{file_name}");
         let meta = std::fs::metadata(entry.path()).map_err(|e| e.to_string())?;
+        if local_junk(&file_name, meta.is_dir()) {
+            continue;
+        }
         if meta.is_dir() {
             walk(&entry.path(), &name, out)?;
         } else {
@@ -24,6 +28,10 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>, bool)>) -> Res
         }
     }
     Ok(())
+}
+
+fn local_junk(name: &str, is_dir: bool) -> bool {
+    if is_dir { name == "__pycache__" } else { name.ends_with(".pyc") || name == ".DS_Store" }
 }
 
 pub struct Fnv(pub u64);
@@ -46,5 +54,22 @@ impl Fnv {
             self.add(path.as_bytes());
             self.add(contents);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn local_junk_is_left_out_of_the_tree() {
+        let dir = std::env::temp_dir().join(format!("wire-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("marimo/__pycache__")).unwrap();
+        std::fs::write(dir.join("marimo/adapter.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.join("marimo/__pycache__/adapter.cpython-313.pyc"), b"\x00").unwrap();
+        std::fs::write(dir.join("marimo/stray.pyc"), b"\x00").unwrap();
+        std::fs::write(dir.join("marimo/.DS_Store"), b"\x00").unwrap();
+        let files = super::files(&dir, "runtime").unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(files.iter().map(|(path, _, _)| path.as_str()).collect::<Vec<_>>(), ["runtime/marimo/adapter.py"]);
     }
 }
