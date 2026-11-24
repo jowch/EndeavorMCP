@@ -272,3 +272,31 @@ fn a_start_of_its_own_ends_when_its_helper_is_killed_before_the_app_has_it() {
     assert!(!dir.join("runtime.json").exists());
     assert!(std::fs::read_to_string(dir.join("runtime.log")).unwrap().contains("the connection that started Endeavor ended while it started"));
 }
+
+#[test]
+fn an_event_stream_ends_upstream_as_soon_as_its_client_hangs_up() {
+    let dir = state_dir("windows-events");
+    let mut cleanup = Cleanup::new(&dir);
+    let bridge = FakeBridge::start(&dir);
+    let julia = stand_in(&dir);
+    let serve = serve(&dir, &bridge, Some(&julia), &mut cleanup);
+    start_julia(&dir);
+    let record = read_json(&dir.join("runtime.json"));
+    let (port, pages) = (record["port"].as_u64().unwrap() as u16, record["page_token"].as_str().unwrap().to_owned());
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(socket, "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {pages}\r\n\r\n").unwrap();
+    let mut reader = BufReader::new(&socket);
+    bridge.event("first");
+    let mut seen = String::new();
+    while !seen.contains("data: first") {
+        assert_ne!(reader.read_line(&mut seen).unwrap(), 0, "the stream ended early: {seen}");
+    }
+    drop(reader);
+    drop(socket);
+    assert!(bridge.events_closed(), "the core closed the stream to Julia without waiting for a write to fail");
+
+    let stop = Command::new(env!("CARGO_BIN_EXE_endeavor")).arg("stop").arg("--state-dir").arg(&dir).output().unwrap();
+    assert!(stop.status.success(), "{stop:?}");
+    assert_eq!(ended(serve).0, Some(0));
+}
