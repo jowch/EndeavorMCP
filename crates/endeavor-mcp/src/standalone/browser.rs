@@ -3,21 +3,34 @@ use std::process::{Command, Stdio};
 #[derive(Debug, PartialEq)]
 enum Opener {
     System,
-    Program(String),
+    Programs(Vec<String>),
     Nothing,
 }
 
+const BROWSER_LIST_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
+
 fn chosen(var: &impl Fn(&str) -> Option<String>) -> Opener {
-    match var("BROWSER").map(|value| value.trim().to_owned()) {
-        Some(value) if value.eq_ignore_ascii_case("none") => Opener::Nothing,
-        Some(value) if !value.is_empty() => Opener::Program(value),
-        _ => Opener::System,
+    let value = var("BROWSER").unwrap_or_default();
+    let entries: Vec<String> = value.split(BROWSER_LIST_SEPARATOR).map(str::trim).filter(|entry| !entry.is_empty()).map(str::to_owned).collect();
+    match entries.first() {
+        None => Opener::System,
+        Some(first) if first.eq_ignore_ascii_case("none") => Opener::Nothing,
+        Some(_) => Opener::Programs(entries),
     }
+}
+
+fn with_url(entry: &str, url: &str) -> (String, Vec<String>) {
+    if !entry.contains("%s") {
+        return (entry.to_owned(), vec![url.to_owned()]);
+    }
+    let mut words = entry.split_whitespace().map(|word| word.replace("%s", url));
+    let program = words.next().unwrap_or_default();
+    (program, words.collect())
 }
 
 pub(crate) fn can_open(var: impl Fn(&str) -> Option<String>) -> bool {
     match chosen(&var) {
-        Opener::Program(_) => return true,
+        Opener::Programs(_) => return true,
         Opener::Nothing => return false,
         Opener::System => {}
     }
@@ -46,13 +59,13 @@ You can't forward the port for them: it starts on their computer."
     )
 }
 
-fn command(url: &str, opener: Opener) -> Option<(String, Vec<String>)> {
+fn commands(url: &str, opener: Opener) -> Vec<(String, Vec<String>)> {
     match opener {
-        Opener::Nothing => None,
-        Opener::Program(program) => Some((program, vec![url.to_owned()])),
-        Opener::System if cfg!(target_os = "macos") => Some(("open".to_owned(), vec![url.to_owned()])),
-        Opener::System if cfg!(windows) => Some(("rundll32.exe".to_owned(), vec!["url.dll,FileProtocolHandler".to_owned(), url.to_owned()])),
-        Opener::System => Some(("xdg-open".to_owned(), vec![url.to_owned()])),
+        Opener::Nothing => Vec::new(),
+        Opener::Programs(entries) => entries.iter().map(|entry| with_url(entry, url)).collect(),
+        Opener::System if cfg!(target_os = "macos") => vec![("open".to_owned(), vec![url.to_owned()])],
+        Opener::System if cfg!(windows) => vec![("rundll32.exe".to_owned(), vec!["url.dll,FileProtocolHandler".to_owned(), url.to_owned()])],
+        Opener::System => vec![("xdg-open".to_owned(), vec![url.to_owned()])],
     }
 }
 
@@ -69,9 +82,12 @@ pub(crate) fn open(url: &str) -> bool {
         return false;
     }
     let opener = chosen(&var);
-    let users_own = matches!(opener, Opener::Program(_));
-    let Some((program, args)) = command(url, opener) else { return false };
-    match Command::new(&program).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+    let users_own = matches!(opener, Opener::Programs(_));
+    first_that_opens(commands(url, opener), users_own)
+}
+
+fn first_that_opens(tried: Vec<(String, Vec<String>)>, users_own: bool) -> bool {
+    tried.into_iter().any(|(program, args)| match Command::new(&program).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
         Ok(mut child) => {
             if cfg!(windows) && !users_own {
                 std::thread::spawn(move || child.wait());
@@ -83,7 +99,7 @@ pub(crate) fn open(url: &str) -> bool {
             eprintln!("endeavor: couldn't open the browser ({program}): {e}");
             false
         }
-    }
+    })
 }
 
 fn took(mut child: std::process::Child, program: &str, wait: std::time::Duration) -> bool {
@@ -150,23 +166,45 @@ mod tests {
     #[test]
     fn the_url_is_one_argument() {
         let url = "http://localhost:1/edit?id=a&token=b";
-        for opener in [Opener::System, Opener::Program("firefox".into())] {
-            let (_, args) = command(url, opener).unwrap();
+        for opener in [Opener::System, Opener::Programs(vec!["firefox".into()])] {
+            let (_, args) = commands(url, opener).remove(0);
             assert_eq!(args.last().map(String::as_str), Some(url));
         }
     }
 
     #[test]
-    fn browser_names_the_program_that_opens_the_link_and_none_opens_nothing() {
+    fn browser_names_the_programs_to_try_in_order_and_none_opens_nothing() {
         let url = "http://localhost:1/edit?id=a";
+        let tried = |value: &str| commands(url, chosen(&vars(&[("BROWSER", value)])));
         assert_eq!(chosen(&vars(&[])), Opener::System);
         assert_eq!(chosen(&vars(&[("BROWSER", "  ")])), Opener::System, "an empty BROWSER is no choice");
         assert_eq!(chosen(&vars(&[("BROWSER", "None")])), Opener::Nothing);
-        let program = r"C:\Program Files\Firefox\firefox.exe";
-        assert_eq!(command(url, chosen(&vars(&[("BROWSER", program)]))), Some((program.to_owned(), vec![url.to_owned()])), "a path with spaces is one program");
-        assert_eq!(command(url, chosen(&vars(&[("BROWSER", "none")]))), None);
+        assert!(tried("none").is_empty());
+        let sep = BROWSER_LIST_SEPARATOR;
+        let listed = tried(&format!("firefox{sep}{sep} chromium --new-window %s "));
+        assert_eq!(listed, vec![("firefox".to_owned(), vec![url.to_owned()]), ("chromium".to_owned(), vec!["--new-window".to_owned(), url.to_owned()])], "each entry in turn; %s is the link");
+        if cfg!(windows) {
+            let program = r"C:\Program Files\Firefox\firefox.exe";
+            assert_eq!(tried(program), vec![(program.to_owned(), vec![url.to_owned()])], "a path with spaces is one program");
+        }
         let over_ssh = [("SSH_CONNECTION", "10.0.0.1 1 10.0.0.2 22"), ("SSH_TTY", "/dev/pts/1")];
         assert!(can_open(vars(&[over_ssh[0], over_ssh[1], ("BROWSER", "/usr/local/bin/code-open")])), "a BROWSER of the user's own opens even over ssh, as an editor's remote helper does");
         assert!(!can_open(vars(&[("DISPLAY", ":0"), ("BROWSER", "none")])));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_next_browser_is_tried_when_one_is_missing_or_fails() {
+        let dir = std::env::temp_dir().join(format!("endeavor-browser-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let opened = dir.join("opened");
+        let script = dir.join("opener");
+        std::fs::write(&script, format!("#!/bin/sh\necho \"$1\" > '{}'\n", opened.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tried = commands("http://localhost:1/", chosen(&vars(&[("BROWSER", &format!("{}/missing:false:{}", dir.display(), script.display()))])));
+        assert!(first_that_opens(tried, true));
+        assert_eq!(std::fs::read_to_string(&opened).unwrap().trim(), "http://localhost:1/");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
