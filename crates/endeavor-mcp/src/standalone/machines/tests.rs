@@ -638,3 +638,12 @@ fn only_an_answered_sign_in_keeps_the_user_counted_as_there() {
     let wanted = Mutex::new(Instant::now() - SIGN_IN_WINDOW - Duration::from_secs(1));
     assert_eq!(put_to_user("lab", &wanted, || panic!("put to the user past the window")), Reply::GaveUp);
 }
+
+#[test]
+fn the_leave_asked_on_this_computer_names_uv_and_on_a_mac_r_too() {
+    let asked = leave_question(LOCAL);
+    assert!(asked.contains("uv for Python notebooks") && asked.contains("this computer"), "{asked}");
+    assert_eq!(asked.contains("R, or uv"), cfg!(target_os = "macos"), "{asked}");
+    assert_eq!(leave_question(""), asked);
+    assert!(leave_question("lab").contains("Julia") && !leave_question("lab").contains("uv"));
+}

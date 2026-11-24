@@ -439,7 +439,8 @@ fn install_question(name: &str, items: &[wire::Item], tool: &str) -> String {
 
 fn leave_question(machine: &str) -> String {
     if machine == LOCAL || machine.is_empty() {
-        "If an R notebook needs R and none is found on this computer, may Endeavor install its own copy of R?".to_owned()
+        let what = if cfg!(target_os = "macos") { "R, or uv for Python notebooks," } else { "uv for Python notebooks" };
+        format!("If a notebook needs {what} and none is found on this computer, may Endeavor install its own copy?")
     } else {
         format!("If a notebook on {machine} needs Julia and none is found there, may Endeavor download its own copy of Julia?")
     }
@@ -1440,9 +1441,11 @@ impl Relay {
                     notes.push(note);
                 }
             } else {
-                let (call, what) = if local { ("endeavor/allow_r_install", "install R") } else { ("endeavor/allow_julia_install", "download Julia") };
-                if let Err(e) = crate::bridge_rpc(runtime.port, &runtime.token, call, json!({})) {
-                    notes.push(format!("Couldn't pass the user's leave to {what} on to {name} ({e}); calling use_machine again with `install: true` tries again."));
+                let leaves: &[(&str, &str)] = if local { &[("endeavor/allow_r_install", "install R"), ("endeavor/allow_uv_install", "download uv")] } else { &[("endeavor/allow_julia_install", "download Julia")] };
+                for (call, what) in leaves {
+                    if let Err(e) = crate::bridge_rpc(runtime.port, &runtime.token, call, json!({})) {
+                        notes.push(format!("Couldn't pass the user's leave to {what} on to {name} ({e}); calling use_machine again with `install: true` tries again."));
+                    }
                 }
             }
         }

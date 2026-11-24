@@ -16,7 +16,7 @@ use wire::backend::Backend;
 use crate::mcp::Bridge;
 use crate::{USAGE, bridge_call, owner_only, remove_state};
 
-pub const INTERFACE: u32 = 47;
+pub const INTERFACE: u32 = 48;
 
 const JULIA_STATE: &str = "julia.json";
 
@@ -142,7 +142,8 @@ pub fn main(argv: &[String]) -> ! {
     bridge.notebooks.exits_when_idle.store(exit_idle, std::sync::atomic::Ordering::SeqCst);
     let not_let_in = not_let_in(&open_command(&args.state_dir));
     let allow_r_install = Arc::new(std::sync::atomic::AtomicBool::new(args.install_r));
-    let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone(), r: OnceLock::new(), marimo: Default::default(), state_dir: args.state_dir.clone(), left: Default::default(), left_generation: Default::default() });
+    let allow_uv_install = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let served = Arc::new(Served { bridge, page_token, pluto: OnceLock::new(), ember: Default::default(), cookie, not_let_in, julia, app_folder: Default::default(), stops, allow_r_install: allow_r_install.clone(), allow_uv_install: allow_uv_install.clone(), r: OnceLock::new(), marimo: Default::default(), state_dir: args.state_dir.clone(), left: Default::default(), left_generation: Default::default() });
     #[cfg(unix)]
     pass_on_stop_signals(stop_signals, served.clone());
     let r = RStarter::new(&args, &engine_token, allow_r_install);
@@ -158,7 +159,7 @@ pub fn main(argv: &[String]) -> ! {
             _ => {}
         }
     }));
-    let marimo = MarimoStarter::new(&args, &engine_token);
+    let marimo = MarimoStarter::new(&args, &engine_token, allow_uv_install);
     #[cfg(unix)]
     let marimo = MarimoStarter { mask: Some(inherited_mask), ..marimo };
     let marimo = Arc::new(marimo);
@@ -1218,6 +1219,8 @@ const INSTALL_FAILED: &str = "r_failed::Couldn't install Ember for R notebooks; 
 
 const NO_COMPILER: &str = "r_failed::Couldn't install Ember for R notebooks: it has to be built on this computer, and there is no compiler here to build it. The runtime's log has the details.";
 
+const MARIMO_PYTHON: &str = "3.12";
+
 struct MarimoStarter {
     adapter: PathBuf,
     requirements: PathBuf,
@@ -1229,6 +1232,14 @@ struct MarimoStarter {
     spawn: Spawner,
     child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
     pending: std::sync::Mutex<Option<MarimoPending>>,
+    allow_uv: Arc<std::sync::atomic::AtomicBool>,
+    uv_install: Arc<std::sync::Mutex<UvInstall>>,
+}
+
+enum UvInstall {
+    Idle,
+    Running(std::time::Instant),
+    Failed(String),
 }
 
 struct MarimoPending {
@@ -1239,7 +1250,7 @@ struct MarimoPending {
 }
 
 impl MarimoStarter {
-    fn new(args: &Args, token: &str) -> MarimoStarter {
+    fn new(args: &Args, token: &str, allow_uv: Arc<std::sync::atomic::AtomicBool>) -> MarimoStarter {
         let folder = args.runtime.join("marimo");
         MarimoStarter {
             adapter: folder.join("adapter.py"),
@@ -1252,6 +1263,8 @@ impl MarimoStarter {
             spawn: Spawner::new(),
             child: Arc::default(),
             pending: Default::default(),
+            allow_uv,
+            uv_install: Arc::new(std::sync::Mutex::new(UvInstall::Idle)),
         }
     }
 
@@ -1264,7 +1277,8 @@ impl MarimoStarter {
         }
         let mut pending = self.pending.lock().unwrap();
         if pending.is_none() {
-            *pending = Some(self.spawn_adapter()?);
+            let uv = self.uv(served, until)?;
+            *pending = Some(self.spawn_adapter(&uv)?);
         }
         let deadline = pending.as_ref().unwrap().began + MARIMO_START;
         let state = loop {
@@ -1317,12 +1331,54 @@ impl MarimoStarter {
         Ok(Arc::new(crate::notebooks::R::new(bridge, self.token.clone()).telling(Box::new(why_ended))))
     }
 
-    fn spawn_adapter(&self) -> Result<MarimoPending, String> {
-        let uv = find_uv().ok_or_else(|| "python_not_found::Python notebooks need uv, which isn't installed. Install it (https://docs.astral.sh/uv/getting-started/installation/), then try again.".to_owned())?;
+    fn uv(&self, served: &Served, until: std::time::Instant) -> Result<PathBuf, String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        loop {
+            if let Some(uv) = find_uv() {
+                return Ok(uv);
+            }
+            let mut install = self.uv_install.lock().unwrap();
+            match std::mem::replace(&mut *install, UvInstall::Idle) {
+                UvInstall::Failed(why) => return Err(format!("python_failed::{why}")),
+                UvInstall::Running(began) => {
+                    *install = UvInstall::Running(began);
+                    if std::time::Instant::now() > until {
+                        return Err(format!("python_installing::Downloading uv {} for Python notebooks ({} seconds so far). Make the same call again right away: each call waits up to {} seconds.", crate::uv::VERSION, began.elapsed().as_secs(), marimo_wait().as_secs()));
+                    }
+                }
+                UvInstall::Idle => match crate::uv::item() {
+                    Some(item) if self.allow_uv.load(SeqCst) => {
+                        *install = UvInstall::Running(std::time::Instant::now());
+                        let state = self.uv_install.clone();
+                        std::thread::spawn(move || {
+                            let done = match crate::uv::install(&mut |line| eprintln!("{line}")) {
+                                Ok(_) => UvInstall::Idle,
+                                Err(why) => {
+                                    eprintln!("endeavor core: {why}");
+                                    UvInstall::Failed(why)
+                                }
+                            };
+                            *state.lock().unwrap() = done;
+                        });
+                        eprintln!("endeavor core: downloading {item} for Python notebooks");
+                    }
+                    Some(item) => return Err(uv_offer(&item)),
+                    None => return Err(NO_UV.into()),
+                },
+            }
+            drop(install);
+            if served.bridge.notebooks.stopping.load(SeqCst) {
+                return Err("python_failed::Endeavor is stopping".into());
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    fn spawn_adapter(&self, uv: &Path) -> Result<MarimoPending, String> {
         let _ = std::fs::remove_file(&self.state);
         let secret = ember_secret().map_err(|e| format!("python_failed::{e}"))?;
-        let mut command = Command::new(&uv);
-        command.args(["run", "--quiet", "--no-project", "--with-requirements"]).arg(&self.requirements).arg("python").arg(&self.adapter);
+        let mut command = Command::new(uv);
+        command.args(["run", "--quiet", "--no-project", "--python", MARIMO_PYTHON, "--with-requirements"]).arg(&self.requirements).arg("python").arg(&self.adapter);
         command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_MARIMO_TOKEN", &secret).env("ENDEAVOR_MARIMO_STATE", &self.state).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
         if !cfg!(debug_assertions) {
             command.env_remove("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS");
@@ -1382,7 +1438,27 @@ fn find_uv() -> Option<PathBuf> {
     let home = crate::paths::Env::here().home;
     let path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default();
     let more = [home.join(".local/bin"), home.join(".cargo/bin"), PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")];
-    path.into_iter().chain(more).map(|dir| dir.join("uv")).find(|uv| uv.is_file())
+    path.into_iter().chain(more).map(|dir| dir.join("uv")).find(|uv| uv.is_file()).or_else(crate::uv::own)
+}
+
+const NO_UV: &str = "python_not_found::Python notebooks need uv, which isn't installed. Install it (https://docs.astral.sh/uv/getting-started/installation/), then try again.";
+
+const UV_OFFER: (&str, &str) = (
+    "python_not_found::Python notebooks need uv, which isn't installed here, and Endeavor may download its own only if the user agrees: ",
+    ". Ask the user; only if they agree, call `use_machine` with `machine` \"local\" and `install: true`, then make this call again. The user can also install uv themselves: https://docs.astral.sh/uv/getting-started/installation/.",
+);
+
+const NO_UV_IN_APP: &str = "python_not_found::Python notebooks need uv, which isn't installed on this computer. Tell the user to install it (https://docs.astral.sh/uv/getting-started/installation/), then open the notebook again.";
+
+fn uv_offer(item: &wire::Item) -> String {
+    format!("{}{item}{}", UV_OFFER.0, UV_OFFER.1)
+}
+
+pub(crate) fn offer_for(error: &str, app: bool) -> std::borrow::Cow<'_, str> {
+    if app && error.starts_with(UV_OFFER.0) && error.ends_with(UV_OFFER.1) {
+        return NO_UV_IN_APP.into();
+    }
+    own_r_offer_for(error, app)
 }
 
 const STOPPED_STARTING: &str = "r_failed::R stopped while starting";
@@ -1795,6 +1871,7 @@ struct Served {
     ember: std::sync::Mutex<Option<Page>>,
     marimo: std::sync::Mutex<Option<Page>>,
     allow_r_install: Arc<std::sync::atomic::AtomicBool>,
+    allow_uv_install: Arc<std::sync::atomic::AtomicBool>,
     r: OnceLock<Arc<RStarter>>,
     page_token: String,
     cookie: String,
@@ -1857,6 +1934,7 @@ impl Served {
                 None => result = json!({ "error": "use_julia needs a path" }),
             },
             "endeavor/allow_r_install" => self.allow_r_install.store(true, std::sync::atomic::Ordering::SeqCst),
+            "endeavor/allow_uv_install" => self.allow_uv_install.store(true, std::sync::atomic::Ordering::SeqCst),
             "endeavor/leave_to_plugin" => result = json!({ "left": leave_to_plugin(self, Arc::new(|front: &crate::mcp::Front| front.alive())) }),
             "endeavor/keep_for_app" => keep_for_app(self),
             "endeavor/end_when_idle" => end_when_idle(self),
@@ -2450,6 +2528,23 @@ mod tests {
     }
 
     #[test]
+    fn marimo_runs_on_the_python_its_requirements_were_compiled_for_not_whatever_python_uv_finds_first() {
+        let requirements = include_str!("../../../runtime/marimo/requirements.txt");
+        let compiled_for = requirements.lines().next().and_then(|header| header.split("--python-version ").nth(1)).and_then(|rest| rest.split_whitespace().next());
+        assert_eq!(compiled_for, Some(MARIMO_PYTHON), "a Mac with only its own Python 3.9 can't install requirements compiled for a newer one");
+    }
+
+    #[test]
+    fn the_app_has_no_way_to_say_yes_to_endeavors_own_uv_so_its_agent_is_told_to_have_the_user_install_uv() {
+        let item = wire::Item { kind: wire::KIND_RUNTIME.into(), name: "uv 0.11.32".into(), size_mb: Some(22), place: Some("/x/uv-0.11.32".into()) };
+        let offer = uv_offer(&item);
+        assert_eq!(offer_for(&offer, false), offer);
+        let app = offer_for(&offer, true);
+        assert!(app.starts_with("python_not_found::") && !app.contains("use_machine") && app.contains("docs.astral.sh/uv"), "{app}");
+        assert_eq!(offer_for(NO_UV, true), NO_UV);
+    }
+
+    #[test]
     fn the_own_r_offer_is_worded_for_the_caller_not_the_runtime() {
         let item = wire::Item { kind: wire::KIND_RUNTIME.into(), name: "R 4.6.1".into(), size_mb: Some(165), place: Some("/x/R-4.6.1".into()) };
         for started_by_app in [true, false] {
@@ -2657,7 +2752,7 @@ mod tests {
         let (stops, _) = std::sync::mpsc::channel();
         let argv = ["--state-dir", "/nonexistent", "--julia", "/nonexistent/julia", "--runtime", "/nonexistent/runtime", "--depot", "/nonexistent/depot"].map(String::from);
         let julia = JuliaStarter::new(&parse_args(&argv).unwrap(), TOKEN, "process", stops.clone());
-        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), "e".into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default(), r: OnceLock::new(), marimo: Default::default(), state_dir: PathBuf::from("/nonexistent"), left: Default::default(), left_generation: Default::default() })
+        Arc::new(Served { bridge: Bridge::new(TOKEN.into(), "e".into(), ""), page_token: PAGES.into(), pluto: OnceLock::new(), ember: Default::default(), cookie: cookie_name(PAGES), not_let_in: String::new(), julia, app_folder: Default::default(), stops, allow_r_install: Default::default(), allow_uv_install: Default::default(), r: OnceLock::new(), marimo: Default::default(), state_dir: PathBuf::from("/nonexistent"), left: Default::default(), left_generation: Default::default() })
     }
 
     #[test]
