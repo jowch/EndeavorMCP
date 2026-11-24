@@ -162,7 +162,7 @@ pub fn main(argv: &[String]) -> ! {
             _ => {}
         }
     }));
-    let marimo = MarimoStarter::new(&args, &engine_token, allow_uv_install);
+    let marimo = MarimoStarter::new(&args, &engine_token, allow_uv_install, launcher == "slurm");
     #[cfg(unix)]
     let marimo = MarimoStarter { mask: Some(inherited_mask), ..marimo };
     let marimo = Arc::new(marimo);
@@ -1269,6 +1269,7 @@ struct MarimoStarter {
     pending: std::sync::Mutex<Option<MarimoPending>>,
     allow_uv: Arc<std::sync::atomic::AtomicBool>,
     uv_install: Arc<std::sync::Mutex<UvInstall>>,
+    in_job: bool,
 }
 
 enum UvInstall {
@@ -1300,7 +1301,7 @@ struct MarimoPending {
 }
 
 impl MarimoStarter {
-    fn new(args: &Args, token: &str, allow_uv: Arc<std::sync::atomic::AtomicBool>) -> MarimoStarter {
+    fn new(args: &Args, token: &str, allow_uv: Arc<std::sync::atomic::AtomicBool>, in_job: bool) -> MarimoStarter {
         let folder = args.runtime.join("marimo");
         MarimoStarter {
             adapter: folder.join("adapter.py"),
@@ -1314,6 +1315,7 @@ impl MarimoStarter {
             pending: Default::default(),
             allow_uv,
             uv_install: Arc::new(std::sync::Mutex::new(UvInstall::Idle)),
+            in_job,
         }
     }
 
@@ -1386,6 +1388,7 @@ impl MarimoStarter {
                     }
                 }
                 UvInstall::Idle => match crate::uv::item() {
+                    Some(_) if self.in_job => return Err(NO_UV_IN_JOB.into()),
                     Some(item) if self.allow_uv.load(SeqCst) => {
                         *install = UvInstall::Running(std::time::Instant::now());
                         let state = self.uv_install.clone();
@@ -1440,7 +1443,7 @@ impl MarimoStarter {
                 Ok(())
             });
         }
-        let mut process = self.spawn.spawn(command).map_err(|e| format!("python_not_found::Couldn't start uv ({}): {e}", uv.display()))?;
+        let mut process = self.spawn.spawn(command).map_err(|e| format!("python_failed::Couldn't start uv ({}): {e}", uv.display()))?;
         #[cfg(windows)]
         let tree = match crate::winproc::Tree::of(&process) {
             Ok(tree) => tree,
@@ -1501,8 +1504,10 @@ const UV_OFFER: (&str, &str) = (
     ". Ask the user; only if they agree, call `use_machine` with `machine` \"local\" and `install: true`, then make this call again. The user can also install uv themselves: https://docs.astral.sh/uv/getting-started/installation/.",
 );
 
+const NO_UV_IN_JOB: &str = "python_not_found::Python notebooks need uv, which isn't installed on this cluster, and Endeavor can't download its own into a Slurm job. Ask the user to install uv on this cluster (https://docs.astral.sh/uv/getting-started/installation/), then make this call again.";
+
 const UV_OFFER_IN_APP: (&str, &str) = (
-    "python_not_found::Python notebooks need uv, which isn't installed on this computer. Endeavor can download its own uv if the user agrees: ",
+    "python_not_found::Python notebooks need uv, which isn't installed on the computer this notebook runs on. Endeavor can download its own uv there if the user agrees: ",
     ". Tell the user to start a new Python session in Endeavor and click Install uv in its notebook pane, or to install uv themselves (https://docs.astral.sh/uv/getting-started/installation/). Once it's installed, open the notebook again.",
 );
 
@@ -1510,12 +1515,17 @@ fn uv_offer(item: &wire::Item) -> String {
     format!("{}{item}{}", UV_OFFER.0, UV_OFFER.1)
 }
 
-pub(crate) fn uv_offer_on(message: &str, machine: &str, cluster: bool) -> Option<String> {
-    let before = UV_OFFER.0.split_once("::").map_or(UV_OFFER.0, |(_, said)| said);
-    let (item, tail) = message.strip_prefix(before)?.split_once(UV_OFFER.1)?;
-    if cluster {
-        return Some(format!("Python notebooks need uv, which isn't installed on {machine}, and Endeavor can't download its own into a Slurm job. Ask the user to install uv on {machine} (https://docs.astral.sh/uv/getting-started/installation/), then make this call again.{tail}"));
+fn message_of(error: &str) -> &str {
+    error.split_once("::").map_or(error, |(_, said)| said)
+}
+
+pub(crate) fn uv_offer_on(message: &str, machine: &str) -> Option<String> {
+    let in_job = message_of(NO_UV_IN_JOB);
+    if let Some(tail) = message.strip_prefix(in_job) {
+        return Some(format!("{}{tail}", in_job.replace("this cluster", machine)));
     }
+    let before = message_of(UV_OFFER.0);
+    let (item, tail) = message.strip_prefix(before)?.split_once(UV_OFFER.1)?;
     Some(format!("{before}{item}{}{tail}", UV_OFFER.1.replace("\"local\"", &format!("\"{machine}\""))))
 }
 
@@ -2666,21 +2676,27 @@ mod tests {
         let app = offer_for(&offer, true);
         assert!(app.starts_with("python_not_found::") && !app.contains("use_machine"), "{app}");
         assert!(app.contains("start a new Python session in Endeavor and click Install uv in its notebook pane") && app.contains(&item.to_string()) && app.contains("docs.astral.sh/uv"), "{app}");
+        assert!(app.contains("isn't installed on the computer this notebook runs on") && !app.contains("this computer."), "a server's offer doesn't say it's the user's computer: {app}");
         assert_eq!(offer_for(NO_UV, true), NO_UV);
+        assert_eq!(offer_for(NO_UV_IN_JOB, true), NO_UV_IN_JOB, "a job never offers Install uv");
     }
 
     #[test]
-    fn a_machines_uv_offer_names_that_machine_and_a_clusters_asks_the_user_to_install_uv() {
+    fn a_machines_uv_offer_names_that_machine_and_a_clusters_job_asks_the_user_to_install_uv() {
         let item = wire::Item { kind: wire::KIND_RUNTIME.into(), name: "uv 0.11.32".into(), size_mb: Some(22), place: Some("/x/uv-0.11.32".into()) };
         let raw = crate::mcp::tool_error(&uv_offer(&item), true);
         let said: serde_json::Value = serde_json::from_str(raw["content"][0]["text"].as_str().unwrap()).unwrap();
         let message = said["message"].as_str().unwrap();
-        let server = uv_offer_on(message, "lab", false).unwrap();
+        let server = uv_offer_on(message, "lab").unwrap();
         assert!(server.contains("`use_machine` with `machine` \"lab\" and `install: true`") && !server.contains("\"local\"") && server.contains("uv 0.11.32"), "{server}");
         assert!(server.ends_with(&message[message.find(UV_OFFER.1).unwrap() + UV_OFFER.1.len()..]), "the help after the offer stays: {server}");
-        let cluster = uv_offer_on(message, "hpc", true).unwrap();
-        assert!(cluster.contains("install uv on hpc") && !cluster.contains("use_machine"), "{cluster}");
-        assert_eq!(uv_offer_on(NO_UV.split_once("::").unwrap().1, "lab", false), None);
+        let raw = crate::mcp::tool_error(NO_UV_IN_JOB, true);
+        let said: serde_json::Value = serde_json::from_str(raw["content"][0]["text"].as_str().unwrap()).unwrap();
+        let message = said["message"].as_str().unwrap();
+        let cluster = uv_offer_on(message, "hpc").unwrap();
+        assert!(cluster.contains("isn't installed on hpc") && cluster.contains("install uv on hpc") && !cluster.contains("this cluster") && !cluster.contains("use_machine"), "{cluster}");
+        assert!(cluster.ends_with(&message[message_of(NO_UV_IN_JOB).len()..]), "the help after it stays: {cluster}");
+        assert_eq!(uv_offer_on(message_of(NO_UV), "lab"), None);
     }
 
     #[test]
