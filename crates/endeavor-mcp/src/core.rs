@@ -32,6 +32,7 @@ struct Args {
     depot: String,
     r: crate::r::Source,
     r_library: Option<String>,
+    ember: Option<PathBuf>,
     own_r: bool,
     install_r: bool,
     lifeline: Option<usize>,
@@ -39,7 +40,7 @@ struct Args {
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut args = argv.iter();
-    let (mut state_dir, mut julia, mut runtime, mut depot, mut r, mut r_library) = (None, None, None, None, None, None);
+    let (mut state_dir, mut julia, mut runtime, mut depot, mut r, mut r_library, mut ember) = (None, None, None, None, None, None, None);
     let (mut install_julia, mut julia_when_needed, mut own_r, mut install_r) = (false, false, false, false);
     let mut lifeline = None;
     while let Some(arg) = args.next() {
@@ -60,6 +61,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     "--r" | "--r-shell" if r.is_some() => return Err("give one of --r and --r-shell".into()),
                     "--r" | "--r-shell" => r = Some(crate::r::Source::from_flag(arg, value?)),
                     "--r-library" => r_library = Some(value?),
+                    "--ember" => ember = Some(PathBuf::from(value?)),
                     "--lifeline" => lifeline = Some(value?.parse().map_err(|_| "--lifeline needs a file descriptor or handle")?),
                     _ => return Err(format!("unknown argument {arg}")),
                 }
@@ -75,6 +77,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         depot: depot.ok_or("--depot is required")?,
         r: r.unwrap_or_default(),
         r_library,
+        ember,
         own_r,
         install_r,
         lifeline,
@@ -889,7 +892,7 @@ impl RStarter {
             shell_has_r: false.into(),
             r: args.r.clone(),
             library: args.r_library.clone(),
-            ember: crate::paths::Env::here().ember_folder(),
+            ember: args.ember.clone().unwrap_or_else(|| crate::paths::Env::here().ember_folder()),
             repository: test_repository.unwrap_or_else(|| EMBER_REPOSITORY.into()),
             install: Arc::new(std::sync::Mutex::new(Install::Idle)),
             adapter: args.runtime.join("r").join("adapter.R"),

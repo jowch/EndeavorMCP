@@ -327,5 +327,7 @@ and writes it as well: `{"schema": 1, "machines": [Server, ...]}`.
   Slurm job, else `$SCRATCH/endeavor/depot` when the server sets `$SCRATCH`
   (home quotas are small on clusters), else `depot` in the install folder. The
   bootstrap leaves the depot to the helper, which looks for `$SCRATCH` in its
-  environment and then in a login shell, since ssh starts it without one. So
-  the helper's own runtime and its Slurm jobs share one depot (#22).
+  environment and then in a login shell, since ssh starts it without one. The
+  helper passes the same folder's `r/ember` to the runtime as Ember's library
+  (`--ember`), so R's Ember sits beside the depot. So the helper's own runtime
+  and its Slurm jobs share one depot and one Ember (#22).
