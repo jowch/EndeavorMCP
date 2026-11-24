@@ -80,6 +80,7 @@ struct Engine {
     starting: Mutex<()>,
     opens_with: Mutex<Vec<(String, String)>>,
     edit_before_apply: Mutex<Option<(String, String)>>,
+    file_drops_added_cells: Mutex<bool>,
 }
 
 impl Engine {
@@ -357,6 +358,9 @@ impl Engine {
                         }
                         other => panic!("op {other}"),
                     }
+                }
+                if *self.file_drops_added_cells.lock().unwrap() {
+                    nb.cells.retain(|c| !inserted.contains(&c.id));
                 }
                 let mut seq = self.seq.lock().unwrap();
                 *seq += 1;
@@ -1489,6 +1493,16 @@ fn restoring_a_turns_cells_puts_their_code_back_all_or_nothing() {
     let raced = restore(json!([{ "cell_id": added, "expected": "w = y", "code": null }])).unwrap();
     assert_eq!(raced, json!({ "restored": [], "changed": [added] }), "the user's edit just before the delete is kept");
     assert_eq!(s.engine.code(NB, &added), "w = y * 2");
+}
+
+#[test]
+fn a_cell_gone_before_the_reply_is_cell_not_found_not_a_crash() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.py", &[(X, "x = 1")]);
+    s.read("", NB, X);
+    *s.engine.file_drops_added_cells.lock().unwrap() = true;
+    assert_eq!(s.refused("", "add_cell", json!({ "notebook_id": NB, "after_cell_id": X, "code": "y = 2" })), "cell_not_found");
+    assert_eq!(s.engine.order(NB), [X.to_owned()]);
 }
 
 #[test]

@@ -448,7 +448,6 @@ class Notebook:
                     changes.append({"type": "set-name", "cellId": cid, "name": cell["name"] or "_"})
                 changes.append({"type": "set-config", "cellId": cid, **camel})
             changes.append({"type": "reorder-cells", "cellIds": target})
-            await self.m.post("/api/document/transaction", self.watcher, {"changes": changes})
             for ch in changes:
                 self.document_change(ch)
             for got, cid in zip(ids, target):
@@ -461,12 +460,11 @@ class Notebook:
             return {}
 
     async def reform(self, cells):
-        changes = [{"type": "set-code", "cellId": c, "code": self.cells[c]["code"]} for c in cells if c in self.cells]
+        reformed = [c for c in cells if c in self.cells]
         try:
-            await self.m.post("/api/document/transaction", self.watcher, {"changes": changes})
             await self.adapter.save(self, self.watcher)
         except Exception as e:  # noqa: BLE001
-            print(f"endeavor marimo: kept the file's form of {len(changes)} cells of {self.path}: {e}", file=sys.stderr)
+            print(f"endeavor marimo: kept the file's form of {len(reformed)} cells of {self.path}: {e}", file=sys.stderr)
 
     def kernel_ready(self, d, reform=False):
         old = self.cells
@@ -1512,7 +1510,6 @@ class Adapter:
             nb.write_file()
         elif changes:
             sid = nb.watcher
-            await nb.m.post("/api/document/transaction", sid, {"changes": changes})
             deleted = [ch["cellId"] for ch in changes if ch["type"] == "delete-cell"]
             if deleted:
                 if any(nb.cells[c]["ran_code"] is not None for c in deleted):
@@ -1543,6 +1540,8 @@ class Adapter:
             print(f"endeavor marimo: couldn't take {cells} out of the kernel: {out[-500:]}", file=sys.stderr)
 
     async def save(self, nb, sid):
+        if os.path.basename(nb.path) == os.environ.get("ENDEAVOR_TEST_MARIMO_SLOW_SAVE_FILE"):
+            await asyncio.sleep(1.5)
         cells = [nb.cells[c] for c in nb.order]
         await nb.m.post("/api/kernel/save", sid, {
             "cellIds": list(nb.order), "codes": [c["code"] for c in cells], "names": [c["name"] or "_" for c in cells],

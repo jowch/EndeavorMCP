@@ -1424,6 +1424,7 @@ impl MarimoStarter {
         command.env("ENDEAVOR_TOKEN", &self.token).env("ENDEAVOR_MARIMO_TOKEN", &secret).env("ENDEAVOR_MARIMO_STATE", &self.state).env("ENDEAVOR_MARIMO_ROOT", root).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
         if !cfg!(debug_assertions) {
             command.env_remove("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS");
+            command.env_remove("ENDEAVOR_TEST_MARIMO_SLOW_SAVE_FILE");
         }
         #[cfg(unix)]
         if let Some(mask) = self.mask {
