@@ -1132,6 +1132,39 @@ fn write_string(out: &mut String, text: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn a_socket_counts_as_closed_only_once_its_client_has_gone_and_sent_nothing_left_unread() {
+        use std::io::Write;
+        use std::time::{Duration, Instant};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let pair = || {
+            let client = super::TcpStream::connect(address).unwrap();
+            (client, listener.accept().unwrap().0)
+        };
+        let soon = |what: &dyn Fn() -> bool| {
+            let until = Instant::now() + Duration::from_secs(5);
+            while !what() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            what()
+        };
+
+        let (_client, server) = pair();
+        assert!(!super::closed(&server), "open and quiet");
+
+        let (mut client, server) = pair();
+        client.write_all(b"x").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!super::closed(&server), "a byte is still to be read");
+
+        let (client, server) = pair();
+        drop(client);
+        assert!(soon(&|| super::closed(&server)), "the client hung up");
+    }
+
     #[test]
     fn a_link_without_the_token_and_the_one_that_lets_a_browser_in() {
         assert_eq!(super::browser_link(9, "/edit?id=a"), "http://localhost:9/edit?id=a");

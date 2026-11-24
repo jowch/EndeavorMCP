@@ -462,7 +462,12 @@ pub(crate) mod winsock {
         let mut byte = 0u8;
         // SAFETY: peeks at most one byte into `byte`; the poll said the socket is readable, so recv doesn't block.
         let n = unsafe { recv(socket.as_raw_socket() as SOCKET, &raw mut byte, 1, MSG_PEEK) };
-        if n > 0 { Peeked::Sent } else { Peeked::Closed }
+        match n {
+            1.. => Peeked::Sent,
+            0 => Peeked::Closed,
+            _ if io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock => Peeked::Quiet,
+            _ => Peeked::Closed,
+        }
     }
 }
 
