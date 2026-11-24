@@ -244,4 +244,7 @@ tools, which cut 40 bytes either side of a match by byte index as Julia did.
 - `set_input` moves an R notebook's input as its widget does (Ember's
   `set_input()`): readers rerun in autorun, go stale in lazy mode, and the
   value isn't saved. R reads it only once its running cell finishes, so one
-  not read by the wait's end is reported as on its way, not refused.
+  not read by the wait's end is reported as on its way, not refused. In a
+  Python notebook it sets a `mo.ui` widget through marimo's code mode, as the
+  page does, checked against the widget's range or options first, and its
+  readers rerun as `execute_cell` runs them.

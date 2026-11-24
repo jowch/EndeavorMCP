@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import collections
 import functools
 import ast
@@ -761,6 +762,25 @@ def interactive_bundle(bundle):
     return any(INTERACTIVE.search(str(bundle.get(mime) or "")) for mime in ("text/html", "text/markdown"))
 
 
+IMG_SRC = re.compile(r"<img\b[^>]*?\bsrc\s*=\s*[\"']([^\"']+)[\"']", re.I)
+DATA_PNG = re.compile(r"data:image/png;base64,([A-Za-z0-9+/=]+)$")
+VIRTUAL_FILE = re.compile(r"^(?:\./)?@file/(\d+)-[^/]+\.png$", re.I)
+EMBEDDED_PNG_MIN = 4096
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def embedded_png(html):
+    found = []
+    for src in IMG_SRC.findall(html):
+        data, virtual = DATA_PNG.match(src), VIRTUAL_FILE.match(src)
+        if data and data.group(1).startswith("iVBORw0KGgo"):
+            found.append((len(data.group(1)) * 3 // 4, data.group(1)))
+        elif virtual:
+            found.append((int(virtual.group(1)), src))
+    size, src = max(found, default=(0, None))
+    return src if size >= EMBEDDED_PNG_MIN else None
+
+
 def html_text(html):
     text = re.sub(r"<(script|style)\b.*?</\1>", "", html, flags=re.S | re.I)
     text = re.sub(r"<br\s*/?>|</(p|div|tr|li|h\d|pre)>", "\n", text, flags=re.I)
@@ -814,6 +834,8 @@ def output_text(out, console):
             parts.append("[a marimo UI element: " + (re.search(r"<marimo-([a-z-]+)", html.split("<marimo-ui-element", 1)[1]) or ["", "widget"])[1] + "]")
         else:
             parts.append(html_text(html))
+        if embedded_png(html):
+            parts.append("[the output holds an image; call view_cell_output to see it]")
     elif any(v not in (None, "") for v in bundle.values()):
         parts.append(f"[{', '.join(sorted(bundle))} output]")
     parts = [p.rstrip("\n") for p in parts if p]
@@ -1194,6 +1216,85 @@ def imports(code):
 CODE_MODE = "import marimo._code_mode as cm\nctx = cm.get_context(skip_staleness_check=True)\n"
 
 
+SET_INPUT = CODE_MODE + """import json as _json
+import marimo as _mo
+from marimo._plugins.ui._core.ui_element import UIElement as _UIElement
+
+
+def _endeavor_ui_value(el, value):
+    ui = _mo.ui
+    number = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    def within(v):
+        if not number(v):
+            raise ValueError(f"It takes a number, not {_json.dumps(v)}")
+        low, high = getattr(el, "start", None), getattr(el, "stop", None)
+        if (low is not None and v < low) or (high is not None and v > high):
+            raise ValueError(f"It allows {low} to {high}")
+        step = getattr(el, "step", None)
+        if step and low is not None and abs((v - low) / step - round((v - low) / step)) > 1e-9:
+            raise ValueError(f"It allows {low} to {high} in steps of {step}")
+        return v
+
+    def stepped(v):
+        steps = getattr(el, "steps", None)
+        if steps is None:
+            return within(v)
+        if v not in steps:
+            raise ValueError("It allows one of " + ", ".join(map(str, steps)))
+        return list(steps).index(v)
+
+    def choice(v):
+        if v not in el.options:
+            raise ValueError("It allows one of " + ", ".join(_json.dumps(o) for o in list(el.options)[:30]))
+        return v
+
+    if isinstance(el, ui.slider):
+        return stepped(value)
+    if isinstance(el, ui.range_slider):
+        if not isinstance(value, list) or len(value) != 2:
+            raise ValueError("It takes two numbers, the low end and the high end, as [2, 6]")
+        low, high = (stepped(v) for v in value)
+        if low > high:
+            raise ValueError("The low end comes first")
+        return [low, high]
+    if isinstance(el, ui.number):
+        return within(value)
+    if isinstance(el, (ui.checkbox, ui.switch)):
+        if not isinstance(value, bool):
+            raise ValueError("It takes true or false")
+        return value
+    if isinstance(el, (ui.text, ui.text_area)):
+        if not isinstance(value, str):
+            raise ValueError("It takes a string")
+        return value
+    if isinstance(el, ui.radio):
+        return choice(value)
+    if isinstance(el, ui.dropdown):
+        return [choice(value)]
+    if isinstance(el, ui.multiselect):
+        return [choice(v) for v in (value if isinstance(value, list) else [value])]
+    return None
+
+
+async def _endeavor_set_input(name, value):
+    el = ctx.globals.get(name)
+    if not isinstance(el, _UIElement):
+        return {"error": "input_refused", "message": f"`{name}` isn't a widget: it is a {type(el).__name__}, not a `mo.ui` control"}
+    try:
+        sent = _endeavor_ui_value(el, value)
+    except ValueError as e:
+        return {"error": "invalid_value", "message": f"`{name}` is a {type(el).__name__}. {e}. Nothing changed"}
+    if sent is None:
+        return {"error": "input_refused", "message": f"`{name}` is a {type(el).__name__}, which only the user sets, on the page. set_input sets a slider, range_slider, number, checkbox, switch, text, text_area, dropdown, radio or multiselect"}
+    async with ctx:
+        ctx.set_ui_value(el, sent)
+    return {"set": True}
+"""
+
+SET_INPUT_MARK = "ENDEAVOR-SET-INPUT "
+
+
 class Adapter:
     def __init__(self):
         self.marimo = Marimo()
@@ -1435,6 +1536,41 @@ class Adapter:
             await self.start_run(nb, rerun, watch=False)
             await asyncio.sleep(0.3)
 
+    async def set_input(self, nb, name, value, wait, timeout):
+        if not isinstance(name, str) or not name.isidentifier():
+            raise argument_error("invalid_argument", "name must be the name the widget is assigned to")
+        if not nb.allowed:
+            raise argument_error("execution_blocked", "The notebook is in safe preview, so its widgets can't be set until it may run (allow_execution)")
+        g = graph(nb)
+        cells = {c["cell_id"]: c for c in g["cells"]}
+        defining = [c for c in nb.order if name in cells[c]["definitions"]]
+        if len(defining) != 1:
+            raise argument_error("input_refused", f"No cell assigns `{name}`" if not defining else f"`{name}` is assigned in more than one cell: {', '.join(defining)}")
+        cell = defining[0]
+        c = nb.cells[cell]
+        if c["status"] in ("queued", "running"):
+            raise argument_error("input_refused", f"Cell {cell}, which makes `{name}`, is {c['status']}; set it once read_cell says the cell has finished")
+        if not nb.live:
+            raise argument_error("input_refused", "The notebook is still starting; set the widget once its cells have run")
+        unready = "errored; fix it and run it first" if c["errored"] else "hasn't run; run it first (execute_cell)" if c["ran_code"] is None \
+            else "hasn't run since it was edited; run it first" if c["ran_code"] != c["code"] else None
+        if unready:
+            raise argument_error("input_refused", f"Cell {cell}, which makes `{name}`, {unready}")
+        code = SET_INPUT + f"print({SET_INPUT_MARK!r} + _json.dumps(await _endeavor_set_input({name!r}, _json.loads({json.dumps(value)!r}))))\n"
+        try:
+            ok, out = await self.marimo.execute(await nb.session_id(), code)
+        except Exception as e:  # noqa: BLE001
+            ok, out = False, str(e)
+        said = next((json.loads(line[len(SET_INPUT_MARK):]) for line in out.splitlines() if line.startswith(SET_INPUT_MARK)), None)
+        if not ok or said is None:
+            raise argument_error("input_refused", f"marimo didn't set `{name}`; its value is unchanged: {out[-300:].strip()}")
+        if said.get("error"):
+            raise argument_error(said["error"], said["message"])
+        readers = [r for r in nb.order if r != cell and name in cells[r]["references"]]
+        result = await self.run(nb, readers, wait, timeout) if readers else {"accepted": True, "process_status": nb.process_status()}
+        result.update(cell=cell, value=value, cells=readers, lazy=False)
+        return result
+
     async def run(self, nb, cells, wait, timeout, ask_new=False):
         cells = [nb.check_cell(c) for c in cells]
         result = {"accepted": nb.allowed and nb.live, "process_status": nb.process_status()}
@@ -1587,12 +1723,27 @@ class Adapter:
         nb.path = real(path)
         return {"path": nb.path}
 
-    def render_png(self, nb, cid):
+    async def virtual_png(self, src):
+        if not src or not VIRTUAL_FILE.match(src):
+            return src
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.get(self.marimo.base + "/" + src.removeprefix("./"), headers=self.marimo.headers())
+        except httpx.HTTPError:
+            return None
+        return base64.b64encode(r.content).decode() if r.status_code == 200 and r.content.startswith(PNG_MAGIC) else None
+
+    async def render_png(self, nb, cid):
         out = nb.cells[cid]["output"] or {}
         bundle = bundle_of(out)
         png = bundle.get("image/png")
-        rendered = {"png": str(png).split(",", 1)[-1].replace("\n", ""), "mime": "image/png"} if png else \
-            {"png": None, "mime": next(iter(bundle), out.get("mimetype") or "")}
+        embedded = None if png else await self.virtual_png(embedded_png(str(bundle.get("text/html") or "")))
+        if png:
+            rendered = {"png": str(png).split(",", 1)[-1].replace("\n", ""), "mime": "image/png"}
+        elif embedded:
+            rendered = {"png": embedded, "mime": "text/html", "source": "embedded image"}
+        else:
+            rendered = {"png": None, "mime": next(iter(bundle), out.get("mimetype") or "")}
         if interactive_bundle(bundle):
             rendered["interactive"] = True
         return rendered
@@ -1644,7 +1795,7 @@ class Adapter:
         if method == "render_text":
             return {"text": None}
         if method == "render_png":
-            return self.render_png(nb, nb.check_cell(p.get("cell_id")))
+            return await self.render_png(nb, nb.check_cell(p.get("cell_id")))
         if method == "validate":
             nb.check_cell(p.get("cell_id"))
             return self.validate(nb, str(p.get("code") or ""))
@@ -1655,7 +1806,9 @@ class Adapter:
             return await self.preview_packages(nb, p.get("date"), p.get("package"), p.get("version"))
         if method == "set_package_date":
             return await self.apply_packages(nb, p.get("date"))
-        if method in ("answer", "set_input"):
+        if method == "set_input":
+            return await self.set_input(nb, p.get("name"), p.get("value"), bool(p.get("wait")), p.get("timeout"))
+        if method == "answer":
             raise argument_error("not_supported", "Python notebooks can't do this yet: it works in Julia and R notebooks")
         raise argument_error("unknown_method", f"Unknown adapter method: '{method}'")
 

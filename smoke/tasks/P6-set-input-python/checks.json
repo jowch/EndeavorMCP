@@ -1,0 +1,12 @@
+{
+  "about": "set_input in Python (#354): an open, run marimo notebook with a mo.ui slider for the cutoff at 2.5. The user asks for the answer at 4 without changing the file's default. The agent sets the slider with set_input rather than editing the cell, the readers rerun, and the answer is 4.57 t/ha from 3 plots. Tags: already_open, widgets, set_input, python.",
+  "checks": [
+    { "check": "notebooks", "count": 1 },
+    { "check": "no_errored_cells" },
+    { "check": "called", "tool": "set_input", "min": 1 },
+    { "check": "output_contains", "texts": ["4.57 t/ha, from 3 plots"] },
+    { "check": "code_contains", "texts": ["value=2.5"] },
+    { "check": "final_message_contains_any", "texts": ["4.57", "4.6 t"] },
+    { "check": "final_message_contains_any", "texts": ["3 plots", "three plots", "3 of", "**3**"] }
+  ]
+}
