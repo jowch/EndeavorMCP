@@ -898,7 +898,7 @@ def header_deps(header):
 
 def uv_python_version(requirement, folder):
     try:
-        found = subprocess.run(["uv", "python", "find", requirement or platform.python_version()], cwd=folder or None,
+        found = subprocess.run([os.environ.get("UV", "uv"), "python", "find", requirement or platform.python_version()], cwd=folder or None,
                                capture_output=True, text=True, timeout=30)
         if found.returncode != 0 or not found.stdout.strip():
             return None

@@ -108,6 +108,7 @@ impl Agent {
         (reply["result"]["isError"] == true, serde_json::from_str(text).unwrap_or_else(|_| json!(text)))
     }
 
+    #[track_caller]
     fn ok(&mut self, name: &str, arguments: Value) -> Value {
         let (failed, result) = self.call(name, arguments.clone());
         assert!(!failed, "{name}({arguments}): {result}");
@@ -845,14 +846,15 @@ fn a_python_notebook_through_the_runtime() {
         until(&mut agent, "asking");
         agent.ok("approve_install", json!({ "notebook_id": id, "packages": ["endeavor_e2e_absent"] }));
         let began = Instant::now();
-        let failed = loop {
+        let env = loop {
             let env = environment();
             if !env["failed"].is_null() || began.elapsed() > Duration::from_secs(600) {
-                break env["failed"].clone();
+                break env;
             }
             std::thread::sleep(Duration::from_millis(250));
         };
-        assert!(failed["packages"].to_string().contains("endeavor") && failed["log"].as_str().is_some_and(|log| !log.is_empty()), "a failed install is kept for the app: {failed}");
+        let failed = &env["failed"];
+        assert!(failed["packages"].to_string().contains("endeavor") && failed["log"].as_str().is_some_and(|log| !log.is_empty()), "a failed install is kept for the app: {env}");
         let left = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": absent }));
         assert!(left["errored"] == true && left["queued"] != true, "a cell whose install failed shows its error, not a queue: {left}");
         agent.ok("delete_cell", json!({ "notebook_id": id, "cell_id": absent }));
