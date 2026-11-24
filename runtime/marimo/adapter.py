@@ -109,7 +109,11 @@ def real(path):
     return os.path.realpath(os.path.expanduser(path))
 
 
-ROOT = real(os.environ.get("ENDEAVOR_MARIMO_ROOT") or os.sep)
+def drive_root(path, splitdrive=os.path.splitdrive, sep=os.sep):
+    return splitdrive(path)[0] + sep
+
+
+ROOT = drive_root(real(os.environ.get("ENDEAVOR_MARIMO_ROOT") or os.sep))
 
 
 def other_drive(path, root, splitdrive=os.path.splitdrive):
@@ -121,7 +125,7 @@ def on_marimos_drive(path):
     drive = other_drive(real(path), ROOT)
     if drive is not None:
         root = os.path.splitdrive(ROOT)[0]
-        raise argument_error("unsupported", f"'{path}' is on {drive}, and Python notebooks run from one drive at a time: since Endeavor started, that is {root}, the drive of the first one opened. Tell the user; after Endeavor restarts, the first Python notebook opened or made can be on {drive}.")
+        raise argument_error("unsupported", f"'{path}' is on {drive}, but Python notebooks run from one drive at a time, and since Endeavor started that is {root}. Don't change the path, and don't open or read the file another way. Tell the user exactly this: Python notebooks can use one drive at a time, this one is on {drive}, and after Endeavor restarts the first Python notebook opened or made can be on {drive}.")
 
 
 class Marimo:
@@ -1218,7 +1222,14 @@ class Adapter:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         date = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         Path(path).write_text(NEW_HEADER.format(python=f"{sys.version_info[0]}.{sys.version_info[1]}", version=marimo.__version__, date=date) + NEW_NOTEBOOK)
-        r = await self.open(path, True)
+        try:
+            r = await self.open(path, True)
+        except BaseException:
+            if (made := self.by_path(real(path))) is not None:
+                await made.close()
+                self.forget(made)
+            Path(path).unlink(missing_ok=True)
+            raise
         nb = self.notebooks[r["notebook_id"]]
         r["cells"] = [{"cell_id": c, "code": nb.cells[c]["code"]} for c in nb.order]
         return r
