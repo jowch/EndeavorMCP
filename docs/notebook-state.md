@@ -131,6 +131,12 @@ runs every five minutes.
   notebook's file as it is on disk. `html` is marimo's own web page export,
   made in the notebook's marimo session, so it needs the notebook out of safe
   preview. Julia and R notebooks export through their own page instead.
+- **`environment`**: what a Python notebook runs on, for the app's Packages
+  view, since marimo's page shows none of it. It gives the header's Python
+  requirement, the direct packages with their pinned versions, the package
+  date, the install that waits for the user or is running, and the last
+  install that failed, with marimo's log. A failure stays until the next
+  install works. Julia and R notebooks read this from their own page.
 - **`approve_install`** covers only the packages the user's yes named that
   the call asked for, so a yes never widens what was asked (#418). Names
   compare as PyPI's do (case, `-`, `_`, `.`), and the names that go on are

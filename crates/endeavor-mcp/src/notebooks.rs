@@ -1414,6 +1414,14 @@ impl Notebooks {
         }
     }
 
+    pub fn environment(&self, notebook_id: &str) -> Result<Value, String> {
+        let nb = self.snapshot(notebook_id)?;
+        match self.backend_of(&nb.id) {
+            Backend::Marimo => self.call("environment", json!({ "notebook_id": nb.id })),
+            Backend::Pluto | Backend::Ember => Err("ArgumentError: not_supported::Julia and R notebooks show their packages on their own page".into()),
+        }
+    }
+
     pub fn move_notebook(&self, notebook_id: &str, path: &str) -> Result<Value, String> {
         let nb = self.snapshot(notebook_id)?;
         let target = absolute_path(path)?;
