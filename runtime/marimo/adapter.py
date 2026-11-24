@@ -1669,8 +1669,9 @@ async def main():
     write_state(port, adapter.marimo)
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
+    if sys.platform != "win32":
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop.set)
     ended = asyncio.create_task(adapter.marimo.child.wait())
     await asyncio.wait([serving, ended, asyncio.create_task(stop.wait())], return_when=asyncio.FIRST_COMPLETED)
     server.should_exit = True

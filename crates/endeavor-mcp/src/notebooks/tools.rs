@@ -1281,8 +1281,7 @@ impl Call<'_> {
         match wire::backend::Backend::of_file(std::path::Path::new(path)) {
             None => return Err(argument_error(&format!("not_a_notebook::'{path}' isn't a notebook: it doesn't start with a Pluto or Ember notebook's first line, and it isn't a marimo app"))),
             Some(wire::backend::Backend::Ember) => r_notebooks(&format!("'{path}' is an Ember notebook (R)"))?,
-            Some(wire::backend::Backend::Marimo) => python_notebooks(&format!("'{path}' is a marimo notebook (Python)"))?,
-            Some(wire::backend::Backend::Pluto) => {}
+            Some(wire::backend::Backend::Marimo | wire::backend::Backend::Pluto) => {}
         }
         let run = self.args.get("run_notebook").cloned().unwrap_or(json!(false));
         let Value::Bool(run) = run else { return Err(non_boolean(&run)) };
@@ -1377,7 +1376,6 @@ impl Call<'_> {
                         params["engine"] = json!(kind);
                     }
                     Some(kind @ wire::backend::Backend::Marimo) => {
-                        python_notebooks("This session's notebooks are Python notebooks")?;
                         params["engine"] = json!(kind);
                     }
                     _ => {}
@@ -1388,9 +1386,8 @@ impl Call<'_> {
                 let path = absolute_path(&super::requested_path(requested, folder)?)?;
                 match super::engines::of_path(&path) {
                     wire::backend::Backend::Ember => r_notebooks(&format!("'{path}' would be an R notebook"))?,
-                    wire::backend::Backend::Marimo => python_notebooks(&format!("'{path}' would be a Python notebook"))?,
                     _ if !path.ends_with(".jl") => {
-                        let ends = if cfg!(windows) { ".jl" } else { ".jl (Julia), .R (R) or .py (Python, marimo)" };
+                        let ends = if cfg!(windows) { ".jl (Julia) or .py (Python, marimo)" } else { ".jl (Julia), .R (R) or .py (Python, marimo)" };
                         return Err(argument_error(&format!("invalid_path::Notebook path must end in {ends}: '{path}'")));
                     }
                     _ => {}
@@ -1908,13 +1905,6 @@ pub(super) fn already_open(error: &str) -> bool {
 fn r_notebooks(what: &str) -> Result<(), String> {
     if cfg!(windows) {
         return Err(argument_error(&format!("unsupported::{what}. R notebooks don't run on Windows yet; they need macOS or Linux")));
-    }
-    Ok(())
-}
-
-fn python_notebooks(what: &str) -> Result<(), String> {
-    if cfg!(windows) {
-        return Err(argument_error(&format!("unsupported::{what}. Python notebooks don't run on Windows yet; they need macOS or Linux")));
     }
     Ok(())
 }

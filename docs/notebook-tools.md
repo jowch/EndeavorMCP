@@ -216,8 +216,8 @@ tools, which cut 40 bytes either side of a match by byte index as Julia did.
   in the session's language when its client gave it. A new notebook without a
   path is the session's. A read-only folder (a computer's files shared
   read-only into a virtual machine) is refused before the engine fails to
-  save, saying where to make it instead; this is checked only on Unix. R and
-  Python notebooks aren't offered on Windows yet.
+  save, saying where to make it instead; this is checked only on Unix. R
+  notebooks aren't offered on Windows yet.
 - An agent that names a notebook that isn't open is told the open ones, by id
   and path, a few at most (#274).
 
