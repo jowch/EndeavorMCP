@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use wire::ToApp;
@@ -354,6 +354,59 @@ pub struct ConnectError {
     pub needs: Option<NeedsInstall>,
 }
 
+const CONNECT_DEADLINE: Duration = Duration::from_secs(60);
+
+fn connect_deadline() -> Duration {
+    let set = if cfg!(debug_assertions) { std::env::var("ENDEAVOR_TEST_CONNECT_DEADLINE_MS").ok().and_then(|ms| ms.parse().ok()) } else { None };
+    set.map_or(CONNECT_DEADLINE, Duration::from_millis)
+}
+
+struct Answering {
+    answered: Arc<Mutex<bool>>,
+    timed_out: Arc<AtomicBool>,
+}
+
+impl Answering {
+    fn watch(pid: u32, auth: &Auth) -> Answering {
+        let (answered, timed_out) = (Arc::new(Mutex::new(false)), Arc::new(AtomicBool::new(false)));
+        let asker = match auth {
+            Auth::Env(env) => env.iter().find(|(name, _)| name == wire::askpass::ADDRESS_ENV).map(|(_, address)| address.clone()),
+            Auth::Batch => None,
+        };
+        let (since, until) = (Instant::now(), Instant::now() + connect_deadline());
+        let (watched, timing) = (answered.clone(), timed_out.clone());
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(50));
+                let answered = watched.lock().unwrap();
+                if *answered || asker.as_deref().is_some_and(|asker| super::askpass::asked_since(asker, since)) {
+                    return;
+                }
+                if Instant::now() >= until {
+                    timing.store(true, Ordering::SeqCst);
+                    kill_group(pid);
+                    return;
+                }
+            }
+        });
+        Answering { answered, timed_out }
+    }
+
+    fn answered(&self) {
+        *self.answered.lock().unwrap() = true;
+    }
+
+    fn timed_out(&self) -> bool {
+        self.timed_out.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for Answering {
+    fn drop(&mut self) {
+        self.answered();
+    }
+}
+
 pub fn connect(server: &Server, transport: &Transport, options: &Options, cancel: &Cancel, on: &dyn Fn(Event)) -> Result<(Channel, Hello), ConnectError> {
     connect_as(server, transport, options, false, cancel, on)
 }
@@ -375,12 +428,15 @@ fn connect_as(server: &Server, transport: &Transport, options: &Options, own_wit
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let host = transport.host();
+    let answering = Answering::watch(child.id(), &options.auth);
     let give_up = |mut child: Child, why: Option<String>, signed_in: bool| {
+        answering.answered();
         kill_group(child.id());
         Cancel::finished(&cancel.pid, child.id());
         let status = child.wait().ok();
         match why {
             Some(why) => wrong(why),
+            None if answering.timed_out() => ConnectError { message: didnt_answer(host), retry: true, needs: None },
             None => {
                 let (message, retry) = explain_retry(transport, &options.auth, &stderr.finish(), status, cancel.cancelled.load(Ordering::SeqCst), signed_in);
                 ConnectError { message, retry, needs: None }
@@ -407,7 +463,10 @@ fn connect_as(server: &Server, transport: &Transport, options: &Options, own_wit
                     _ => None,
                 };
                 match parsed {
-                    Some((os, arch, found)) => break (os.to_owned(), arch.to_owned(), found),
+                    Some((os, arch, found)) => {
+                        answering.answered();
+                        break (os.to_owned(), arch.to_owned(), found);
+                    }
                     None => return Err(give_up(child, Some(format!("{host}'s setup script answered with something Endeavor doesn't understand: {line}")), true)),
                 }
             }
@@ -657,7 +716,7 @@ fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: 
     } else if said("Connection refused") {
         Some((format!("{host} refused the connection. Check the host name and port, and that it accepts SSH."), true))
     } else if said("timed out") || said("Operation timed out") {
-        Some((format!("{host} didn't answer (the connection timed out). Check the host name, and that you're on a network that can reach it (a VPN, perhaps)."), true))
+        Some((didnt_answer(host), true))
     } else if said("No route to host") || said("Network is unreachable") {
         Some((format!("Couldn't reach {host} from this network."), true))
     } else {
@@ -670,6 +729,10 @@ fn explain_retry(transport: &Transport, auth: &Auth, stderr: &[String], status: 
         };
         (message, true)
     })
+}
+
+fn didnt_answer(host: &str) -> String {
+    format!("{host} didn't answer (the connection timed out). Check the host name, and that you're on a network that can reach it (a VPN, perhaps).")
 }
 
 #[cfg(test)]
