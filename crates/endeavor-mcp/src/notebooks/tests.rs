@@ -79,6 +79,7 @@ struct Engine {
     hold_open: Mutex<Option<Receiver<()>>>,
     starting: Mutex<()>,
     opens_with: Mutex<Vec<(String, String)>>,
+    edit_before_apply: Mutex<Option<(String, String)>>,
 }
 
 impl Engine {
@@ -315,8 +316,12 @@ impl Engine {
                 Ok(json!({ "safe_preview": nb.safe_preview }))
             }
             "apply" => {
+                if let Some((cell, code)) = self.edit_before_apply.lock().unwrap().take() {
+                    let at = find(nb, &json!(cell));
+                    nb.cells[at].code = code;
+                }
                 let ops = params["ops"].as_array().unwrap();
-                for op in ops.iter().filter(|op| op["op"] == "set_code" && op.get("expected").is_some()) {
+                for op in ops.iter().filter(|op| matches!(op["op"].as_str(), Some("set_code" | "delete")) && op.get("expected").is_some()) {
                     let at = find(nb, &op["cell_id"]);
                     if nb.cells[at].code != op["expected"] {
                         return Err(format!("ArgumentError: stale_read::Cell {} changed since last read; call read_cell again", nb.cells[at].id));
@@ -1477,6 +1482,13 @@ fn restoring_a_turns_cells_puts_their_code_back_all_or_nothing() {
     s.engine.with(NB, |nb| nb.cells[1].running = true);
     restore(json!([{ "cell_id": Y, "expected": "y = x + 2", "code": "y = x + 1" }])).unwrap();
     assert_eq!(pending(), json!([Y]));
+
+    s.read("7", NB, Y);
+    let added = s.call("7", "add_cell", json!({ "notebook_id": NB, "after_cell_id": Y, "code": "w = y" })).unwrap()["cell_id"].as_str().unwrap().to_owned();
+    *s.engine.edit_before_apply.lock().unwrap() = Some((added.clone(), "w = y * 2".into()));
+    let raced = restore(json!([{ "cell_id": added, "expected": "w = y", "code": null }])).unwrap();
+    assert_eq!(raced, json!({ "restored": [], "changed": [added] }), "the user's edit just before the delete is kept");
+    assert_eq!(s.engine.code(NB, &added), "w = y * 2");
 }
 
 #[test]

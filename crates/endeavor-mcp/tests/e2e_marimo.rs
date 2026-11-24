@@ -355,6 +355,14 @@ fn a_python_notebook_through_the_runtime() {
         agent.ok("delete_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
     });
 
+    step("restoring a turn deletes the cell it added, with the engine checking its code", || {
+        let added = agent.ok("add_cell", json!({ "notebook_id": notebook, "code": "w = 1", "after_cell_id": order[1] }))["cell_id"].as_str().unwrap().to_owned();
+        let restored = app_call(agent.port, &agent.token, "endeavor/restore_cells", json!({ "notebook_id": notebook, "cells": [{ "cell_id": added, "expected": "w = 1", "code": null }] }));
+        assert_eq!(restored["result"], json!({ "restored": [added], "changed": [] }), "{restored}");
+        let order = agent.ok("get_cell_order", json!({ "notebook_id": notebook }));
+        assert!(!order.to_string().contains(&added), "{order}");
+    });
+
     step("a preview that leaves no cell where it was still keeps its ids", || {
         std::fs::write(folder.join("shift.py"), GROWTH).unwrap();
         let mut agent = Agent { port, token: agent.token.clone(), id: 0, session: None };
@@ -975,14 +983,19 @@ fn a_plugin_session_opens_a_python_notebook_on_the_apps_runtime() {
     });
 }
 
-fn allow_uv_install(port: u16, token: &str) {
+fn app_call(port: u16, token: &str, method: &str, params: Value) -> Value {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "endeavor/allow_uv_install", "params": {} }).to_string();
+    socket.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string();
     write!(socket, "POST /endeavor/call HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
     let mut reply = String::new();
     socket.read_to_string(&mut reply).unwrap();
     assert!(reply.starts_with("HTTP/1.1 200") || reply.starts_with("HTTP/1.0 200"), "{reply}");
+    serde_json::from_str(reply.split_once("\r\n\r\n").map_or("", |(_, body)| body)).unwrap_or(Value::Null)
+}
+
+fn allow_uv_install(port: u16, token: &str) {
+    app_call(port, token, "endeavor/allow_uv_install", json!({}));
 }
 
 #[test]

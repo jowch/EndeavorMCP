@@ -1286,7 +1286,7 @@ class Adapter:
         if not nb.live:
             nb.reload_if_changed()
         for op in ops:
-            if op.get("op") == "set_code" and op.get("expected") is not None:
+            if op.get("op") in ("set_code", "delete") and op.get("expected") is not None:
                 cid = nb.check_cell(op["cell_id"])
                 if nb.cells[cid]["code"] != op["expected"]:
                     raise argument_error("stale_read", f"Cell {cid} changed since last read; call read_cell again")

@@ -298,9 +298,12 @@ repository was split out of [Endeavor](https://github.com/jowch/Endeavor) on
   nothing, and only if every cell still has the code the turn left. Nothing
   runs; the code is the user's, a cell whose code isn't what last ran shows
   unrun, and an agent reads a restored cell before a run of it or of what
-  needs it (`run_conflict`). Cells the turn deleted can't come back yet, and
-  a cell to delete isn't checked by the engine itself (#146). The app's Restore
-  button is the next step.
+  needs it (`run_conflict`). Cells the turn deleted can't come back yet. Pluto's
+  and marimo's engines check a cell to delete against the turn's code, as they
+  do an edited one (#146); Ember's doesn't yet (Ember #642), so there a user's
+  edit in the moment before the delete can still be lost. A cell that is
+  already gone counts as restored in Pluto; marimo refuses the restore. The app's Restore button is the
+  next step.
 - When someone else changed a cell since a session last read it (the user,
   another session, or this conversation before it was resumed), that session's
   next `read_cell` says so in `changed_since_your_read` (with the code it had

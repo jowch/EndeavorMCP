@@ -337,9 +337,9 @@ _adapter_cell(nb, id) = nb.cells_dict[UUID(id)]
 
 function apply!(session, nb, ops)
     for op in ops
-        if op["op"] == "set_code" && haskey(op, "expected")
-            cell = _adapter_cell(nb, op["cell_id"])
-            cell.code == op["expected"] ||
+        if op["op"] in ("set_code", "delete") && haskey(op, "expected")
+            cell = op["op"] == "delete" ? get(nb.cells_dict, UUID(op["cell_id"]), nothing) : _adapter_cell(nb, op["cell_id"])
+            cell === nothing || cell.code == op["expected"] ||
                 throw(ArgumentError("stale_read::Cell $(cell.cell_id) changed since last read; call read_cell again"))
         end
     end
