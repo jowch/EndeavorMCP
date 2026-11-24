@@ -16,7 +16,7 @@ use wire::backend::Backend;
 use crate::mcp::Bridge;
 use crate::{USAGE, bridge_call, owner_only, remove_state};
 
-pub const INTERFACE: u32 = 49;
+pub const INTERFACE: u32 = 50;
 
 const JULIA_STATE: &str = "julia.json";
 
