@@ -122,7 +122,7 @@ jobs:
         with:
           version: '1.12.6'
       - name: R
-        timeout-minutes: 10
+        timeout-minutes: 25
         run: |
           apt="-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3"
           sudo apt-get $apt update
