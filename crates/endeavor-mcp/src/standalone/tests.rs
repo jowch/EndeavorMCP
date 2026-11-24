@@ -89,6 +89,9 @@ fn flags_set_what_they_name() {
     assert!(parsed("status --force").unwrap_err().contains("--force isn't an option of status"));
     assert_eq!(parsed("status --json --state-dir /s").unwrap(), Command::Status { state_dir: PathBuf::from("/s"), json: true });
     assert!(matches!(parsed("status").unwrap(), Command::Status { json: false, .. }));
+    assert_eq!(parsed("open --state-dir /s --port 41234").unwrap(), Command::Open { state_dir: PathBuf::from("/s"), forwarded: Some(41234) });
+    assert!(matches!(parsed("open").unwrap(), Command::Open { forwarded: None, .. }));
+    assert!(parsed("stop --port 1").unwrap_err().contains("--port isn't an option of stop"));
 }
 
 #[test]

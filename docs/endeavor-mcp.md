@@ -409,10 +409,14 @@ it opens in a browser that has the runtime's cookie. The `mcp` front opens the
 notebook of each successful `new_notebook` and `open_notebook` in the user's
 browser with the link that sets the cookie, and adds `opened_in_browser` (false
 where it can't: in a debug build, over ssh, or on Linux without a display). Where
-it can't, a result with a `browser_url` from the runtime on this computer also has
+it can't, a result with a `browser_url` also has
 `browser_note`, the steps for the user: open the address, `endeavor open` here
 if the page asks to let the browser in, and `ssh -L` from their computer only if
-the address doesn't load. (A virtual machine on the user's computer often shares
+the address doesn't load. For a machine's notebooks the address is the
+connection's port on this computer, and the key is the machine's: the front
+writes that port's key to `forwarded/<port>.json` (owner-only) in its state
+folder, and the note's command is `endeavor open --port <port>`, which reads it
+while that front still runs. (A virtual machine on the user's computer often shares
 its ports, and `orb run` sets the same ssh variables as a real login, so the note
 doesn't guess.) It
 also takes `token=` out of a `browser_url` from an older runtime. A browser that

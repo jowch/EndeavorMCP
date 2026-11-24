@@ -156,6 +156,13 @@ precompiled, and an update leaves it stale: until the runtime got round to it
   starts on the user's computer; `endeavor open` lets the browser in.
 - `endeavor open` prints the link only to a terminal: an agent that runs it
   in its shell would read the token.
+- A machine's notebooks come through this process's own port for the
+  connection, with the machine's key. When the agent's note is for them, this
+  process records the key for that port in `forwarded/<port>.json` in its state
+  folder (owner-only, with its pid), and the note names
+  `endeavor open --port <port>`. The record goes before the connection lets its
+  port go and when this process ends, and the command also refuses a record
+  whose process was killed, so a port that is reused later doesn't get the key.
 - The opener gets the URL as one argument and no shell reads it (`start` in
   cmd would split it at `&`). On Windows `rundll32` always exits 0, so there
   "opened" means it started. A debug build never opens a real browser.

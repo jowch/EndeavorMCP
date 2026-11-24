@@ -136,13 +136,14 @@ struct Held {
     launcher: Option<Launcher>,
     wanted: Arc<Mutex<Instant>>,
     _asker: Option<Asker>,
+    forwarded: Option<std::path::PathBuf>,
 }
 
 impl Held {
     fn new(server: &Server, allow_install: bool, saved: bool, launcher: Option<Launcher>) -> Result<Held, String> {
         let wanted = Arc::new(Mutex::new(Instant::now()));
         let (session, asker) = open_session(server.clone(), allow_install, launcher, &wanted)?;
-        Ok(Held { server: server.clone(), session: Arc::new(session), saved, launcher, wanted, _asker: asker })
+        Ok(Held { server: server.clone(), session: Arc::new(session), saved, launcher, wanted, _asker: asker, forwarded: None })
     }
 
     fn asked_for(&self) -> Arc<Session> {
@@ -153,6 +154,12 @@ impl Held {
     fn replaceable(&self) -> bool {
         replaceable(&self.session.status())
     }
+
+    fn unforward(&mut self) {
+        if let Some(file) = self.forwarded.take() {
+            let _ = std::fs::remove_file(file);
+        }
+    }
 }
 
 fn replaceable(status: &Status) -> bool {
@@ -161,6 +168,7 @@ fn replaceable(status: &Status) -> bool {
 
 impl Drop for Held {
     fn drop(&mut self) {
+        self.unforward();
         let session = self.session.clone();
         std::thread::spawn(move || session.close());
     }
@@ -245,12 +253,20 @@ impl Connections {
         drop(old);
     }
 
+    pub(super) fn forward(&self, port: u16, write: impl FnOnce() -> Result<std::path::PathBuf, String>) -> Result<(), String> {
+        let mut held = self.held.lock().unwrap();
+        let Some(through) = held.values_mut().find(|held| held.session.port() == port) else { return Err(format!("no connection of this session listens on port {port}")) };
+        through.forwarded = Some(write()?);
+        Ok(())
+    }
+
     fn status(&self, id: &str) -> Option<Status> {
         self.held.lock().unwrap().get(id).filter(|held| held.saved).map(|held| held.session.status())
     }
 
     pub(super) fn close_all(&self) {
-        let all: Vec<Held> = self.held.lock().unwrap().drain().map(|(_, held)| held).collect();
+        let mut all: Vec<Held> = self.held.lock().unwrap().drain().map(|(_, held)| held).collect();
+        all.iter_mut().for_each(Held::unforward);
         let ending: Vec<_> = all.into_iter().map(|held| std::thread::spawn(move || held.session.close())).collect();
         for ending in ending {
             let _ = ending.join();
