@@ -1374,8 +1374,8 @@ class Adapter:
         path = os.path.abspath(os.path.expanduser(path))
         if os.path.exists(path):
             raise argument_error("file_exists", f"'{path}' already exists; use open_notebook to load it")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
         await self.server_for(real(path))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         date = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         Path(path).write_text(NEW_HEADER.format(python=f"{sys.version_info[0]}.{sys.version_info[1]}", version=marimo.__version__, date=date) + NEW_NOTEBOOK)
         try:
