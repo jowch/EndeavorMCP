@@ -217,7 +217,9 @@ Ask the agent for notebook work, for example:
 The notebook opens in your browser when the agent makes or opens it. It is
 Pluto's own page, so you can read, edit and run cells there too. If it doesn't
 open (on a computer you reach over ssh, say), the agent gives you the address,
-and the page says how to get in. The agent can:
+and the page says how to get in. To open it in another browser, set `BROWSER`
+to that browser's program; with `BROWSER=none` no browser opens, and the agent
+gives you the address. The agent can:
 
 - Create a notebook, or open one you have. An opened notebook starts in safe
   preview: nothing runs until you click **Run notebook code** or ask the agent

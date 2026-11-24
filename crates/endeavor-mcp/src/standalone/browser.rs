@@ -1,6 +1,26 @@
 use std::process::{Command, Stdio};
 
+#[derive(Debug, PartialEq)]
+enum Opener {
+    System,
+    Program(String),
+    Nothing,
+}
+
+fn chosen(var: &impl Fn(&str) -> Option<String>) -> Opener {
+    match var("BROWSER").map(|value| value.trim().to_owned()) {
+        Some(value) if value.eq_ignore_ascii_case("none") => Opener::Nothing,
+        Some(value) if !value.is_empty() => Opener::Program(value),
+        _ => Opener::System,
+    }
+}
+
 pub(crate) fn can_open(var: impl Fn(&str) -> Option<String>) -> bool {
+    match chosen(&var) {
+        Opener::Program(_) => return true,
+        Opener::Nothing => return false,
+        Opener::System => {}
+    }
     let set = |name: &str| var(name).is_some_and(|value| !value.is_empty());
     if cfg!(any(target_os = "macos", windows)) {
         return !set("SSH_CONNECTION") && !set("SSH_TTY");
@@ -26,13 +46,13 @@ You can't forward the port for them: it starts on their computer."
     )
 }
 
-pub(crate) fn command(url: &str) -> (&'static str, Vec<String>) {
-    if cfg!(target_os = "macos") {
-        ("open", vec![url.to_owned()])
-    } else if cfg!(windows) {
-        ("rundll32.exe", vec!["url.dll,FileProtocolHandler".to_owned(), url.to_owned()])
-    } else {
-        ("xdg-open", vec![url.to_owned()])
+fn command(url: &str, opener: Opener) -> Option<(String, Vec<String>)> {
+    match opener {
+        Opener::Nothing => None,
+        Opener::Program(program) => Some((program, vec![url.to_owned()])),
+        Opener::System if cfg!(target_os = "macos") => Some(("open".to_owned(), vec![url.to_owned()])),
+        Opener::System if cfg!(windows) => Some(("rundll32.exe".to_owned(), vec!["url.dll,FileProtocolHandler".to_owned(), url.to_owned()])),
+        Opener::System => Some(("xdg-open".to_owned(), vec![url.to_owned()])),
     }
 }
 
@@ -44,17 +64,20 @@ pub(crate) fn open(url: &str) -> bool {
         use std::io::Write;
         return std::fs::OpenOptions::new().create(true).append(true).open(file).and_then(|mut f| writeln!(f, "{url}")).is_ok();
     }
-    if !can_open(|name| std::env::var(name).ok()) {
+    let var = |name: &str| std::env::var(name).ok();
+    if !can_open(var) {
         return false;
     }
-    let (program, args) = command(url);
-    match Command::new(program).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+    let opener = chosen(&var);
+    let users_own = matches!(opener, Opener::Program(_));
+    let Some((program, args)) = command(url, opener) else { return false };
+    match Command::new(&program).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
         Ok(mut child) => {
-            if cfg!(windows) {
+            if cfg!(windows) && !users_own {
                 std::thread::spawn(move || child.wait());
                 return true;
             }
-            took(child, program, OPENER_WAIT)
+            took(child, &program, OPENER_WAIT)
         }
         Err(e) => {
             eprintln!("endeavor: couldn't open the browser ({program}): {e}");
@@ -127,7 +150,23 @@ mod tests {
     #[test]
     fn the_url_is_one_argument() {
         let url = "http://localhost:1/edit?id=a&token=b";
-        let (_, args) = command(url);
-        assert_eq!(args.last().map(String::as_str), Some(url));
+        for opener in [Opener::System, Opener::Program("firefox".into())] {
+            let (_, args) = command(url, opener).unwrap();
+            assert_eq!(args.last().map(String::as_str), Some(url));
+        }
+    }
+
+    #[test]
+    fn browser_names_the_program_that_opens_the_link_and_none_opens_nothing() {
+        let url = "http://localhost:1/edit?id=a";
+        assert_eq!(chosen(&vars(&[])), Opener::System);
+        assert_eq!(chosen(&vars(&[("BROWSER", "  ")])), Opener::System, "an empty BROWSER is no choice");
+        assert_eq!(chosen(&vars(&[("BROWSER", "None")])), Opener::Nothing);
+        let program = r"C:\Program Files\Firefox\firefox.exe";
+        assert_eq!(command(url, chosen(&vars(&[("BROWSER", program)]))), Some((program.to_owned(), vec![url.to_owned()])), "a path with spaces is one program");
+        assert_eq!(command(url, chosen(&vars(&[("BROWSER", "none")]))), None);
+        let over_ssh = [("SSH_CONNECTION", "10.0.0.1 1 10.0.0.2 22"), ("SSH_TTY", "/dev/pts/1")];
+        assert!(can_open(vars(&[over_ssh[0], over_ssh[1], ("BROWSER", "/usr/local/bin/code-open")])), "a BROWSER of the user's own opens even over ssh, as an editor's remote helper does");
+        assert!(!can_open(vars(&[("DISPLAY", ":0"), ("BROWSER", "none")])));
     }
 }
