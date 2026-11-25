@@ -590,7 +590,7 @@ Next:
   such cells (#232). A waited `submit_changes` with
   nothing staged reports the cells that ran while it waited, and `errored` if one failed (#171; interface 14).
   `allow_execution`'s run of the notebook is the agent's run too, so a read or a waited submit
-  right after it waits for it, in both engines (#170; interface 15). So is the run an agent's `open_notebook` starts with `run_notebook`, in both engines, and the session's Stop interrupts it (#331, interface 41). A read whose
+  right after it waits for it, in both engines (#170; interface 15). So is the run an agent's `open_notebook` starts with `run_notebook`, in both engines (#331, interface 41). A read whose
   wait runs out with the cell still running or queued says so in a `message`, with
   how long it waited (#203): agents that saw only `running` reported that it
   hadn't waited. When R ends, its
@@ -756,6 +756,14 @@ Next:
   time) that finishes after the agent's call stopped waiting goes straight on
   to start R, as Julia's start does, so the pane goes from the install's step
   to "Starting R" and the agent's next call finds R ready (#148).
+- Stopping the agent doesn't stop the notebook (#227, interface 52). The user's
+  Stop in the chat, or the agent cancelling a call, leaves the notebook's run
+  going, and the session's next read or waited run waits for it as before. A user lost a 15-minute run by interrupting a turn
+  that was waiting in `read_cell`. To stop a run, the user asks the agent,
+  which calls `interrupt_notebook`, or uses the notebook page's Stop; with the
+  plugin, those are the only ways. `endeavor/stop_session`, which the app sent
+  on the chat's Stop, is gone; the app treats a core without it as one where
+  its runs go on.
 - An agent can stop a run with `interrupt_notebook` (#161; interface 11), as the
   notebook's Stop button does. Before it, an agent asked to "stop if it takes too long"
   had no way to, and its edits queued behind the run. It asks nothing in any mode and

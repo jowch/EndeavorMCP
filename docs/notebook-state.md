@@ -40,11 +40,11 @@ notebook's state goes when it shuts down, except its entry in `idle_stopped`.
   its run needs. Cells held for the user's OK to a package aren't running:
   they wait, queued (#506).
 
-## Runs and Stop
+## A session's runs
 
 - The runs sessions started that haven't ended (`run_finished`), with their
-  cells that hadn't finished when the tool answered: what that session's Stop
-  interrupts. A run the engine names goes on, with the cells that depend on
+  cells that hadn't finished when the tool answered: what that session's next
+  read or waited run waits for. A run the engine names goes on, with the cells that depend on
   it, until its `run_finished`; one it doesn't name goes on while one of its
   own cells hasn't finished.
 - The dependents a run will rerun count too: the engine queues one only once

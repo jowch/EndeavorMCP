@@ -201,25 +201,21 @@ and 3), and for the app:
   doesn't time out waiting for a response to start. In Manual the app adds
   `edits: true`, and the core holds a call that changes the notebook the same
   way, whatever the run policy.
-- When the agent cancels a call on a notebook (the user pressed Stop), it
-  interrupts the notebook's run, as Pluto's own Stop does, if that call was
-  running code or a run the same session started there is still going. The
-  cells end interrupted; a run only the user or another session started is
-  left alone. A session's run stops counting as its own when it ends
-  (`run_finished`), when the process ends, or on a Restart, even if a later
-  run (a restart's) is running its cells. A Stop while no call is under way (the agent was writing) sends
-  the runtime nothing from the agent, so the app also sends
-  `endeavor/stop_session` `{owner}` on Stop: it interrupts the session's runs
-  that are still going, by the same rule, and answers at once with the
-  notebooks it looks at. A core from before it answers that the method is
-  unknown, and its runs go on, as they did. The
-  interrupt lands 2 s or more after Stop: Pluto first waits 2 s for the run to
-  end by itself. As with Pluto's Stop, a cell that starts in that time (one
-  queued behind the session's) is the one interrupted. A cell that doesn't stop for
-  Ctrl+C (one long `sleep`) ends with its notebook's process, again as with
-  Pluto's Stop: the notebook then waits for a restart, and this isn't reported
-  as a crash (`exited`). A process that lives through the interrupt and ends
-  later is reported as a crash, as before.
+- When the agent cancels a call (the user pressed Stop in the chat), the
+  notebook's run goes on (#227): stopping the agent and stopping the notebook
+  are separate. A waited call that is cancelled still answers when its wait
+  ends, and the agent ignores the answer. The run is still the session's, so its
+  next read or waited run waits for it. A session's run stops counting as its
+  own when it ends (`run_finished`), when the process ends, or on a Restart,
+  even if a later run (a restart's) is running its cells.
+- `interrupt_notebook`, like the page's Stop, interrupts the notebook's run,
+  whoever started it. The interrupt lands 2 s or more after it is asked for:
+  Pluto first waits 2 s for the run to end by itself. A cell that starts in
+  that time (one queued behind the running one) is the one interrupted. A cell
+  that doesn't stop for Ctrl+C (one long `sleep`) ends with its notebook's
+  process, as with Pluto's Stop: the notebook then waits for a restart, and
+  this isn't reported as a crash (`exited`). A process that lives through the
+  interrupt and ends later is reported as a crash, as before.
 - The agent can stop a run itself with `interrupt_notebook` (#161), which is the
   notebook's Stop button: it interrupts the run whoever started it. It asks nothing in
   any mode, plan mode refuses it, and it stays in the session's own notebook. Its
@@ -231,8 +227,7 @@ and 3), and for the app:
 - The agent can restart a notebook with `restart_notebook` (#202), the page's Restart:
   the same `restart` call as `endeavor/restart_notebook`. It runs code, so Ask to run
   asks first, and plan mode refuses it. Pluto's restart then runs every cell, and that
-  run is the session's, as `allow_execution`'s is, so a read waits for it and the
-  session's Stop interrupts it. That run includes a cell that was running, stuck or
+  run is the session's, as `allow_execution`'s is, so a read waits for it. That run includes a cell that was running, stuck or
   not: the result names those (`running_again`) and says to edit them first. Ember's leaves every cell not run, and the result says
   how to run them.
 - The agent can close its notebook with `close_notebook`, the app's Stop notebook:

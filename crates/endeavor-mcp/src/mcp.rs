@@ -394,15 +394,6 @@ impl Bridge {
             }
             "endeavor/restart_notebook" => return Some(answer(self.notebooks.restart(&text("notebook_id", ""), false))),
             "endeavor/restore_cells" => return Some(answer(self.notebooks.restore_cells(&text("notebook_id", ""), &params["cells"]))),
-            "endeavor/stop_session" => {
-                let owner = text("owner", "");
-                let stopping = self.notebooks.session_runs(&owner);
-                for notebook in stopping.clone() {
-                    let (notebooks, owner) = (self.notebooks.clone(), owner.clone());
-                    std::thread::spawn(move || notebooks.stop_for(&owner, &notebook, false));
-                }
-                return Some(answer(Ok(json!({ "notebooks": stopping }))));
-            }
             "endeavor/move_notebook" => return Some(answer(self.notebooks.move_notebook(&text("notebook_id", ""), &text("path", "")))),
             "endeavor/environment" => return Some(answer(self.notebooks.environment(&text("notebook_id", "")))),
             "endeavor/export_notebook" => return Some(answer(self.notebooks.export(&text("notebook_id", ""), &text("format", "")))),
@@ -444,9 +435,6 @@ impl Bridge {
             self.starting_calls.lock().unwrap().remove(&caller.owner);
             if self.notebooks.asks.cancel(&caller.owner, request) {
                 self.notebooks.publish();
-            } else if let Some((notebook, runs_code)) = self.notebooks.cancelled(&caller.owner, request) {
-                let (notebooks, owner) = (self.notebooks.clone(), caller.owner.clone());
-                std::thread::spawn(move || notebooks.stop_for(&owner, &notebook, runs_code));
             }
         }
         answer(message, caller, |params| {
@@ -560,13 +548,6 @@ impl Bridge {
         let run = match self.ask_first(call, name, &mut arguments) {
             Ok(run) => run,
             Err(result) => return result,
-        };
-        let notebook = arguments.get("notebook_id").and_then(Value::as_str);
-        let _running = match notebook {
-            Some(notebook) if !caller.owner.is_empty() && !call.request.is_null() => {
-                Some(self.notebooks.running(&caller.owner, call.request, notebook, run && runs_code(name, &arguments)))
-            }
-            _ => None,
         };
         let reply = if run {
             self.notebooks.tool_watched(&caller.owner, name, &arguments, &folder, call.began, call.gone)
@@ -1262,7 +1243,7 @@ mod tests {
 
     #[test]
     fn the_notebook_tools_names_and_arguments_are_those_of_the_cores_interface() {
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (51, "31806aaaff1c73b0"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (52, "31806aaaff1c73b0"), "see the comment in this test");
     }
 
     fn code(source: &str) -> &str {
@@ -1299,10 +1280,10 @@ mod tests {
         let calls: Vec<String> = quoted_names(code(include_str!("mcp.rs")), "endeavor/").iter().map(|call| call["endeavor/".len()..].to_owned()).collect();
         let calls_then = [
             "allow_julia_install", "allow_r_install", "allow_uv_install", "answer_run", "end_when_idle", "environment", "export_notebook", "file_info", "julia_status", "keep_for_app", "leave_to_plugin", "move_notebook", "new_notebook", "r_status", "recent_sessions", "restart_notebook", "restore_cells", "run_preview", "set_folder",
-            "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result", "use_julia",
+            "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "tool_result", "use_julia",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (51, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (52, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]

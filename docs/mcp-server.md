@@ -102,9 +102,9 @@ transport, sessions and approval is in [endeavor-mcp.md](endeavor-mcp.md).
 - The same `run_shell` command again waits for the one already started: the
   user was asked once.
 - In Manual a denied change isn't made, even one that was to run after.
-- The user's Stop in the app, or the agent cancelling a call, interrupts the
-  session's runs. It is answered at once with the notebooks it looks at,
-  since Pluto's interrupt can take seconds, each on its own thread.
+- The user's Stop in the app, or the agent cancelling a call, leaves the
+  notebook's run going (#227). `interrupt_notebook` or the page's Stop stops a
+  run.
 
 ## Results and errors
 
