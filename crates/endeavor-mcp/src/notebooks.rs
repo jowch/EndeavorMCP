@@ -246,22 +246,6 @@ pub struct Notebooks {
     auto: Mutex<HashSet<String>>,
     openings: Mutex<HashMap<String, Arc<Opening>>>,
     left: Mutex<Vec<(String, Arc<Opening>)>>,
-    runs: Mutex<Vec<(String, Value, String, bool)>>,
-}
-
-pub struct Running<'a> {
-    notebooks: &'a Notebooks,
-    owner: String,
-    request: Value,
-}
-
-impl Drop for Running<'_> {
-    fn drop(&mut self) {
-        let mut runs = self.notebooks.runs.lock().unwrap();
-        if let Some(at) = runs.iter().position(|(owner, request, _, _)| *owner == self.owner && *request == self.request) {
-            runs.remove(at);
-        }
-    }
 }
 
 fn adapter_call(engines: &Engines, message: &Value) -> Result<Value, String> {
@@ -496,7 +480,6 @@ impl Notebooks {
             auto: Mutex::default(),
             openings: Mutex::default(),
             left: Mutex::default(),
-            runs: Mutex::default(),
         }
     }
 
@@ -1233,29 +1216,6 @@ impl Notebooks {
         Ok(json!({ "stopped": true, "safe_preview": safe_preview }))
     }
 
-    pub fn running(&self, owner: &str, request: &Value, notebook_id: &str, runs_code: bool) -> Running<'_> {
-        self.runs.lock().unwrap().push((owner.to_owned(), request.clone(), notebook_id.to_owned(), runs_code));
-        Running { notebooks: self, owner: owner.to_owned(), request: request.clone() }
-    }
-
-    pub fn cancelled(&self, owner: &str, request: &Value) -> Option<(String, bool)> {
-        let runs = self.runs.lock().unwrap();
-        runs.iter().find(|(o, r, _, _)| o == owner && r == request).map(|(_, _, notebook, runs_code)| (notebook.clone(), *runs_code))
-    }
-
-    pub fn stop_for(&self, owner: &str, notebook_id: &str, runs_code: bool) {
-        if !runs_code {
-            if !self.with_state(notebook_id, |state| state.started.iter().any(|started| started.owner == owner)) {
-                return;
-            }
-            let Ok(nb) = self.snapshot(notebook_id) else { return };
-            if !self.own_run_going(owner, &nb) {
-                return;
-            }
-        }
-        self.interrupt(notebook_id, owner);
-    }
-
     fn own_run_going(&self, owner: &str, nb: &Snapshot) -> bool {
         let busy = nb.cells.values().any(|c| c.running || c.queued);
         self.with_state(&nb.id, |state| {
@@ -1272,24 +1232,6 @@ impl Notebooks {
     fn own_run_will_run(&self, owner: &str, nb: &Snapshot, cell: &str) -> bool {
         let Some(c) = nb.cells.get(cell) else { return false };
         self.with_state(&nb.id, |state| state.started.iter().any(|started| started.owner == owner && started.follows.get(cell).is_some_and(|last| c.last_run == *last)))
-    }
-
-    pub fn session_runs(&self, owner: &str) -> Vec<String> {
-        if owner.is_empty() {
-            return Vec::new();
-        }
-        let state = self.state.lock().unwrap();
-        let mut ids: Vec<String> = state.notebooks.iter().filter(|(_, nb)| nb.started.iter().any(|started| started.owner == owner)).map(|(id, _)| id.clone()).collect();
-        ids.sort();
-        ids
-    }
-
-    pub fn interrupt(&self, notebook_id: &str, owner: &str) {
-        match self.call("interrupt", json!({ "notebook_id": notebook_id })) {
-            Ok(reply) if reply["interrupted"] == false => eprintln!("[ Info: Session {owner} stopped: nothing was running in notebook {notebook_id}"),
-            Ok(_) => eprintln!("[ Info: Interrupted notebook {notebook_id}: session {owner} stopped"),
-            Err(error) => eprintln!("┌ Warning: Couldn't interrupt notebook {notebook_id} for session {owner}'s Stop: {error}"),
-        }
     }
 
     pub fn run_anyway(&self, notebook_id: &str, cells: &Value) -> Result<Value, String> {

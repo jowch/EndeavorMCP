@@ -1866,7 +1866,7 @@ fn open_notebooks_run_of_the_notebook_is_the_sessions_run() {
     let path = temp_notebooks("open-run", 1).remove(0);
     *s.engine.opens_with.lock().unwrap() = vec![(X.into(), "x = 1".into()), (Y.into(), "y = x + linger()".into())];
     let id = s.call("7", "open_notebook", json!({ "path": path, "run_notebook": true })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
-    assert_eq!(s.notebooks.session_runs("7"), vec![id.clone()], "the session's Stop reaches the open's run");
+    assert!(started_by(&s, "7", &id), "the open's run is the session's");
     s.engine.with(&id, |nb| {
         nb.cells[0].queued = false;
         nb.cells[1].queued = false;
@@ -1899,7 +1899,7 @@ fn an_open_without_its_run_starts_no_run_of_the_sessions() {
     let path = temp_notebooks("open-preview", 1).remove(0);
     *s.engine.opens_with.lock().unwrap() = vec![(X.into(), "x = 1".into())];
     let id = s.call("7", "open_notebook", json!({ "path": path })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
-    assert_eq!(s.notebooks.session_runs("7"), Vec::<String>::new(), "safe preview runs nothing");
+    assert!(!started_by(&s, "7", &id), "safe preview runs nothing");
     s.engine.with(&id, |nb| nb.cells[0].running = true);
     let began = Instant::now();
     super::tools::tool_json(s.notebooks.tool("7", "read_cell", &json!({ "notebook_id": id, "cell_id": X }), &Folder::Process, began).unwrap());
@@ -2522,6 +2522,10 @@ fn arguments_are_refused_as_julia_refused_them() {
         Err("ArgumentError: not_staged::Cell 00000000-0000-0000-0000-000000000031 is not in pending_run; stage first or pass force=true".into())
     );
     assert!(s.call("", "submit_changes", json!({ "notebook_id": NB, "cell_ids": [X], "force": "yes" })).unwrap_err().starts_with("MethodError: no method matching !(::String)"));
+}
+
+fn started_by(s: &Setup, owner: &str, id: &str) -> bool {
+    s.notebooks.state.lock().unwrap().notebooks.get(id).is_some_and(|nb| nb.started.iter().any(|started| started.owner == owner))
 }
 
 fn temp_notebooks(name: &str, count: usize) -> Vec<String> {
@@ -3265,7 +3269,7 @@ fn an_open_during_a_summary_keeps_its_run() {
         let id = s.call("7", "open_notebook", json!({ "path": path, "run_notebook": true })).unwrap()["notebook_id"].as_str().unwrap().to_owned();
         release.send(()).unwrap();
         publishing.join().unwrap();
-        assert_eq!(s.notebooks.session_runs("7"), vec![id], "the open's run is still the session's");
+        assert!(started_by(&s, "7", &id), "the open's run is still the session's");
     });
 }
 
@@ -3508,67 +3512,44 @@ fn a_new_notebook_without_a_path_is_of_the_sessions_kind() {
 }
 
 #[test]
-fn a_stop_interrupts_the_sessions_own_run() {
+fn a_run_is_the_sessions_own_only_while_the_run_it_started_goes() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)")]);
-    let interrupts = || s.engine.calls.lock().unwrap().iter().filter(|m| *m == "interrupt").count();
+    let own = |owner: &str| s.notebooks.own_run_going(owner, &s.notebooks.snapshot(NB).unwrap());
     let running = |busy: bool| s.engine.with(NB, |nb| nb.cells[0].running = busy);
 
-    assert_eq!(s.notebooks.cancelled("7", &json!(5)), None, "no call under way");
-    {
-        let _call = s.notebooks.running("7", &json!(5), NB, false);
-        assert_eq!(s.notebooks.cancelled("8", &json!(5)), None, "another session's call of the same id");
-        assert_eq!(s.notebooks.cancelled("7", &json!(6)), None, "another call");
-        assert_eq!(s.notebooks.cancelled("7", &json!(5)), Some((NB.to_owned(), false)));
-    }
-    assert_eq!(s.notebooks.cancelled("7", &json!(5)), None, "the call ended");
-
-    s.notebooks.stop_for("7", NB, true);
-    assert_eq!(interrupts(), 1);
-
     running(true);
-    s.notebooks.stop_for("7", NB, false);
-    assert_eq!(interrupts(), 1, "the user's own run, or another session's, is left alone");
+    assert!(!own("7"), "the user's own run, or another session's");
     s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
     running(true);
-    s.notebooks.stop_for("8", NB, false);
-    assert_eq!(interrupts(), 1, "not another session's Stop");
-    s.notebooks.stop_for("7", NB, false);
-    assert_eq!(interrupts(), 2, "the run session 7 started");
+    assert!(!own("8"), "not another session's");
+    assert!(own("7"), "the run session 7 started");
     running(false);
-    s.notebooks.stop_for("7", NB, false);
-    assert_eq!(interrupts(), 2, "once it has ended");
+    assert!(!own("7"), "once it has ended");
     running(true);
-    s.notebooks.stop_for("7", NB, false);
-    assert_eq!(interrupts(), 2, "and it is forgotten then: this run isn't the session's");
+    assert!(!own("7"), "and it is forgotten then: this run isn't the session's");
 
     running(false);
     s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
     s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-2", "cells": [X] } }));
     running(true);
-    s.notebooks.stop_for("7", NB, false);
-    assert_eq!(interrupts(), 2, "the user's later run of a cell the session ran");
+    assert!(!own("7"), "the user's later run of a cell the session ran");
     s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
     s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-3", "cells": [] } }));
-    s.notebooks.stop_for("7", NB, false);
-    assert_eq!(interrupts(), 2, "a restart's run of a cell the session ran");
+    assert!(!own("7"), "a restart's run of a cell the session ran");
     s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-4", "cells": [X] } }));
     s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
-    s.notebooks.stop_for("7", NB, false);
-    assert_eq!(interrupts(), 2, "a quick run that already ended");
+    assert!(!own("7"), "a quick run that already ended");
     s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
     s.notebooks.notified(&json!({ "method": "process_exited", "params": { "notebook_id": NB, "running": [X] } }));
-    s.notebooks.stop_for("7", NB, false);
-    assert_eq!(interrupts(), 2, "after the process ended");
+    assert!(!own("7"), "after the process ended");
     s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
     s.notebooks.restart(NB, false).unwrap();
-    s.notebooks.stop_for("7", NB, false);
-    assert_eq!(interrupts(), 2, "after the app's Restart");
+    assert!(!own("7"), "after the app's Restart");
     running(false);
     s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true })).unwrap();
     running(true);
-    s.notebooks.stop_for("7", NB, false);
-    assert_eq!(interrupts(), 2, "a waited run that finished");
+    assert!(!own("7"), "a waited run that finished");
 }
 
 #[test]
@@ -3623,16 +3604,14 @@ fn interrupt_notebook_stops_the_run_and_says_what_it_stopped() {
 fn restart_notebook_restarts_and_a_julia_notebooks_run_is_the_sessions() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "x = 1"), (Y, "y = x")]);
-    let interrupts = || s.engine.calls.lock().unwrap().iter().filter(|m| *m == "interrupt").count();
 
     let restarted = s.call("7", "restart_notebook", json!({ "notebook_id": NB })).unwrap();
     assert_eq!((&restarted["restarted"], &restarted["process_status"]), (&json!(true), &json!("ready")), "{restarted}");
     assert!(restarted["message"].as_str().unwrap().contains("every cell runs"), "{restarted}");
     s.engine.with(NB, |nb| (nb.cells[0].running, nb.cells[1].queued) = (true, true));
-    s.notebooks.stop_for("8", NB, false);
-    assert_eq!(interrupts(), 0, "another session's Stop");
-    s.notebooks.stop_for("7", NB, false);
-    assert_eq!(interrupts(), 1, "the restart's run is session 7's");
+    let own = |owner: &str| s.notebooks.own_run_going(owner, &s.notebooks.snapshot(NB).unwrap());
+    assert!(!own("8"), "not another session's");
+    assert!(own("7"), "the restart's run is session 7's");
     assert_eq!(restarted.get("running_again"), None, "nothing was running");
 
     s.engine.with(NB, |nb| nb.cells[0].running = true);
@@ -3804,16 +3783,34 @@ fn set_input_cuts_the_text_of_a_dependent_that_reran_unless_it_was_edited_and_no
 }
 
 #[test]
-fn the_apps_stop_looks_at_the_notebooks_with_the_sessions_runs() {
+fn a_waited_run_whose_caller_goes_stops_waiting_and_stays_the_sessions() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)")]);
-    assert_eq!(s.notebooks.session_runs("7"), Vec::<String>::new());
+    let (started_tx, started) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    *s.engine.hold.lock().unwrap() = Some((started_tx, release_rx));
+    let began = Instant::now();
+    let gone = s.notebooks.tool_watched("7", "execute_cell", &json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true }), &Folder::Process, began, &|| true);
+    assert!(gone.is_err_and(|e| e.contains("client_gone")));
+    assert!(began.elapsed() < Duration::from_secs(3), "no wait for the run");
+    started.recv_timeout(Duration::from_secs(5)).expect("the run went to the engine");
+    s.engine.with(NB, |nb| nb.cells[0].running = true);
+    assert!(s.notebooks.own_run_going("7", &s.notebooks.snapshot(NB).unwrap()), "the run goes on, and is the session's");
+    assert!(!s.notebooks.own_run_going("8", &s.notebooks.snapshot(NB).unwrap()));
+    assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|m| *m == "interrupt").count(), 0, "nothing stopped it");
+    release.send(()).unwrap();
+}
+
+#[test]
+fn a_run_is_the_sessions_until_it_ends() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)")]);
+    assert!(!started_by(&s, "7", NB));
     s.call("7", "execute_cell", json!({ "notebook_id": NB, "cell_id": X })).unwrap();
-    assert_eq!(s.notebooks.session_runs("7"), [NB]);
-    assert_eq!(s.notebooks.session_runs("8"), Vec::<String>::new(), "another session's");
-    assert_eq!(s.notebooks.session_runs(""), Vec::<String>::new(), "no session");
+    assert!(started_by(&s, "7", NB));
+    assert!(!started_by(&s, "8", NB), "another session's");
     s.notebooks.notified(&json!({ "method": "run_finished", "params": { "notebook_id": NB, "run": "run-1", "cells": [] } }));
-    assert_eq!(s.notebooks.session_runs("7"), Vec::<String>::new(), "the run ended, its cell queued again or not");
+    assert!(!started_by(&s, "7", NB), "the run ended, its cell queued again or not");
 }
 
 #[test]

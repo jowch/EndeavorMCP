@@ -132,6 +132,7 @@ pub struct Bridge {
     sessions_showing_python: Mutex<std::collections::HashSet<String>>,
     results: Results,
     starting_calls: Mutex<HashMap<String, (String, Value, Instant)>>,
+    calls: Mutex<Vec<(String, Value, bool)>>,
     shell_env: Vec<(&'static str, Option<String>)>,
     pub standalone: Option<Standalone>,
     pub on_folder: std::sync::OnceLock<OnFolder>,
@@ -259,6 +260,7 @@ impl Bridge {
             sessions_showing_python: Mutex::default(),
             results: Results::default(),
             starting_calls: Mutex::default(),
+            calls: Mutex::default(),
             shell_env,
             standalone: None,
             on_folder: std::sync::OnceLock::new(),
@@ -394,15 +396,6 @@ impl Bridge {
             }
             "endeavor/restart_notebook" => return Some(answer(self.notebooks.restart(&text("notebook_id", ""), false))),
             "endeavor/restore_cells" => return Some(answer(self.notebooks.restore_cells(&text("notebook_id", ""), &params["cells"]))),
-            "endeavor/stop_session" => {
-                let owner = text("owner", "");
-                let stopping = self.notebooks.session_runs(&owner);
-                for notebook in stopping.clone() {
-                    let (notebooks, owner) = (self.notebooks.clone(), owner.clone());
-                    std::thread::spawn(move || notebooks.stop_for(&owner, &notebook, false));
-                }
-                return Some(answer(Ok(json!({ "notebooks": stopping }))));
-            }
             "endeavor/move_notebook" => return Some(answer(self.notebooks.move_notebook(&text("notebook_id", ""), &text("path", "")))),
             "endeavor/environment" => return Some(answer(self.notebooks.environment(&text("notebook_id", "")))),
             "endeavor/export_notebook" => return Some(answer(self.notebooks.export(&text("notebook_id", ""), &text("format", "")))),
@@ -444,9 +437,8 @@ impl Bridge {
             self.starting_calls.lock().unwrap().remove(&caller.owner);
             if self.notebooks.asks.cancel(&caller.owner, request) {
                 self.notebooks.publish();
-            } else if let Some((notebook, runs_code)) = self.notebooks.cancelled(&caller.owner, request) {
-                let (notebooks, owner) = (self.notebooks.clone(), caller.owner.clone());
-                std::thread::spawn(move || notebooks.stop_for(&owner, &notebook, runs_code));
+            } else {
+                self.cancel_call(&caller.owner, request);
             }
         }
         answer(message, caller, |params| {
@@ -456,7 +448,10 @@ impl Bridge {
             if let Some(auto) = caller.auto_mode.filter(|_| !caller.owner.is_empty()) {
                 self.notebooks.set_auto(&caller.owner, auto);
             }
-            let call = Call { caller, request: &message["id"], call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone, began };
+            let request = &message["id"];
+            let _under_way = self.call_under_way(&caller.owner, request);
+            let gone = || gone() || self.call_cancelled(&caller.owner, request);
+            let call = Call { caller, request, call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone: &gone, began };
             let result = self.call_tool(params, &call);
             if !caller.owner.is_empty() {
                 let arguments = params.get("arguments").unwrap_or(&Value::Null);
@@ -465,6 +460,24 @@ impl Bridge {
             self.notebooks.publish();
             result
         })
+    }
+
+    fn call_under_way(&self, owner: &str, request: &Value) -> Option<UnderWay<'_>> {
+        if owner.is_empty() || request.is_null() {
+            return None;
+        }
+        self.calls.lock().unwrap().push((owner.to_owned(), request.clone(), false));
+        Some(UnderWay { bridge: self, owner: owner.to_owned(), request: request.clone() })
+    }
+
+    fn cancel_call(&self, owner: &str, request: &Value) {
+        for (_, _, cancelled) in self.calls.lock().unwrap().iter_mut().filter(|(o, r, _)| o == owner && r == request) {
+            *cancelled = true;
+        }
+    }
+
+    fn call_cancelled(&self, owner: &str, request: &Value) -> bool {
+        self.calls.lock().unwrap().iter().any(|(o, r, cancelled)| *cancelled && o == owner && r == request)
     }
 
     fn view_call(&self, name: &str, params: &Value) -> Value {
@@ -560,13 +573,6 @@ impl Bridge {
         let run = match self.ask_first(call, name, &mut arguments) {
             Ok(run) => run,
             Err(result) => return result,
-        };
-        let notebook = arguments.get("notebook_id").and_then(Value::as_str);
-        let _running = match notebook {
-            Some(notebook) if !caller.owner.is_empty() && !call.request.is_null() => {
-                Some(self.notebooks.running(&caller.owner, call.request, notebook, run && runs_code(name, &arguments)))
-            }
-            _ => None,
         };
         let reply = if run {
             self.notebooks.tool_watched(&caller.owner, name, &arguments, &folder, call.began, call.gone)
@@ -784,6 +790,21 @@ pub(crate) fn checked_call(params: &Value, help: bool, machines: bool) -> Result
 
 pub(crate) fn method_not_found(id: &Value, method: &str) -> String {
     to_json(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Method not found: {method}") } }))
+}
+
+struct UnderWay<'a> {
+    bridge: &'a Bridge,
+    owner: String,
+    request: Value,
+}
+
+impl Drop for UnderWay<'_> {
+    fn drop(&mut self) {
+        let mut calls = self.bridge.calls.lock().unwrap();
+        if let Some(at) = calls.iter().position(|(owner, request, _)| *owner == self.owner && *request == self.request) {
+            calls.remove(at);
+        }
+    }
 }
 
 struct Call<'a> {
@@ -1262,7 +1283,7 @@ mod tests {
 
     #[test]
     fn the_notebook_tools_names_and_arguments_are_those_of_the_cores_interface() {
-        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (51, "31806aaaff1c73b0"), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, tools_fingerprint().as_str()), (52, "31806aaaff1c73b0"), "see the comment in this test");
     }
 
     fn code(source: &str) -> &str {
@@ -1299,10 +1320,10 @@ mod tests {
         let calls: Vec<String> = quoted_names(code(include_str!("mcp.rs")), "endeavor/").iter().map(|call| call["endeavor/".len()..].to_owned()).collect();
         let calls_then = [
             "allow_julia_install", "allow_r_install", "allow_uv_install", "answer_run", "end_when_idle", "environment", "export_notebook", "file_info", "julia_status", "keep_for_app", "leave_to_plugin", "move_notebook", "new_notebook", "r_status", "recent_sessions", "restart_notebook", "restore_cells", "run_preview", "set_folder",
-            "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "stop_session", "tool_result", "use_julia",
+            "set_idle_limit", "set_notebook", "set_policy", "set_session_folder", "shutdown", "start_julia", "stop_notebook", "tool_result", "use_julia",
         ];
         let fields_then = ["boot", "build", "exits_when_idle", "folder", "interface", "job", "launcher", "network", "no_folder", "node", "page_token", "pid", "port", "started", "token"];
-        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (51, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
+        assert_eq!((crate::core::INTERFACE, calls, record_fields()), (52, calls_then.map(String::from).to_vec(), fields_then.map(String::from).to_vec()), "see the comment in this test");
     }
 
     #[test]
@@ -1436,6 +1457,27 @@ Start a code cell that defines no name, such as a plot or a check, with a `# ` c
         assert_eq!(clean_label(" \n\u{7}"), None);
         assert_eq!(clean_label(&"é".repeat(100)), Some("é".repeat(80)));
         assert_eq!(clean_label(&format!("{} z", "y".repeat(79))), Some("y".repeat(79)), "no trailing space after the cut");
+    }
+
+    #[test]
+    fn a_cancel_marks_only_its_own_call_gone() {
+        let bridge = Bridge::new("t".into(), "e".into(), "");
+        let cancel = |owner: &str, request: u32| {
+            let caller = Caller { owner: owner.into(), ..Caller::default() };
+            bridge.dispatch(&json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": request } }), &caller, &|| false);
+        };
+        cancel("7", 5);
+        let call = bridge.call_under_way("7", &json!(5));
+        let other = bridge.call_under_way("8", &json!(5));
+        cancel("7", 6);
+        cancel("8", 4);
+        assert!(!bridge.call_cancelled("7", &json!(5)), "a cancel before the call, or of another call");
+        cancel("7", 5);
+        assert!(bridge.call_cancelled("7", &json!(5)));
+        assert!(!bridge.call_cancelled("8", &json!(5)), "another session's call of the same id");
+        drop((call, other));
+        assert!(bridge.calls.lock().unwrap().is_empty(), "forgotten when the call ends");
+        assert!(bridge.call_under_way("", &json!(5)).is_none() && bridge.call_under_way("7", &Value::Null).is_none(), "nothing to cancel it by");
     }
 
     #[test]
