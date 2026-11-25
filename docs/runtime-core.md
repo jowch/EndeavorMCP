@@ -203,8 +203,9 @@ and 3), and for the app:
   way, whatever the run policy.
 - When the agent cancels a call (the user pressed Stop in the chat), the
   notebook's run goes on (#227): stopping the agent and stopping the notebook
-  are separate. A waited call that is cancelled still answers when its wait
-  ends, and the agent ignores the answer. The run is still the session's, so its
+  are separate. The cancelled call stops waiting at once, as when its
+  connection closes; a waited run's call to the engine finishes on its own
+  thread, and the run stays the session's. The run is still the session's, so its
   next read or waited run waits for it. A session's run stops counting as its
   own when it ends (`run_finished`), when the process ends, or on a Restart,
   even if a later run (a restart's) is running its cells.

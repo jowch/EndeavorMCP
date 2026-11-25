@@ -734,8 +734,9 @@ fn the_runtime_end_to_end() {
         assert_eq!(rt.post("/mcp", SERVER, &cancel.to_string()).0, "HTTP/1.1 202 Accepted");
         let mut reply = String::new();
         call.read_to_string(&mut reply).unwrap();
-        assert!(started.elapsed() > Duration::from_secs(12), "the call ended {:.1} s after it began: {reply}", started.elapsed().as_secs_f64());
+        assert!(started.elapsed() < Duration::from_secs(6), "the call ended {:.1} s after it began: {reply}", started.elapsed().as_secs_f64());
         let read = rt.ok(SERVER, "read_cell", json!({ "notebook_id": previewed, "cell_id": added["cell_id"] }));
+        assert!(started.elapsed() > Duration::from_secs(14), "the read waited for the run, the session's still: {read}");
         assert_eq!((&read["errored"], &read["output"]), (&json!(false), &json!("1")), "the cell ran to its end: {read}");
         rt.ok(SERVER, "delete_cell", json!({ "notebook_id": previewed, "cell_id": added["cell_id"] }));
     });

@@ -3783,6 +3783,25 @@ fn set_input_cuts_the_text_of_a_dependent_that_reran_unless_it_was_edited_and_no
 }
 
 #[test]
+fn a_waited_run_whose_caller_goes_stops_waiting_and_stays_the_sessions() {
+    let s = setup();
+    s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)")]);
+    let (started_tx, started) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    *s.engine.hold.lock().unwrap() = Some((started_tx, release_rx));
+    let began = Instant::now();
+    let gone = s.notebooks.tool_watched("7", "execute_cell", &json!({ "notebook_id": NB, "cell_id": X, "wait_for_completion": true }), &Folder::Process, began, &|| true);
+    assert!(gone.is_err_and(|e| e.contains("client_gone")));
+    assert!(began.elapsed() < Duration::from_secs(3), "no wait for the run");
+    started.recv_timeout(Duration::from_secs(5)).expect("the run went to the engine");
+    s.engine.with(NB, |nb| nb.cells[0].running = true);
+    assert!(s.notebooks.own_run_going("7", &s.notebooks.snapshot(NB).unwrap()), "the run goes on, and is the session's");
+    assert!(!s.notebooks.own_run_going("8", &s.notebooks.snapshot(NB).unwrap()));
+    assert_eq!(s.engine.calls.lock().unwrap().iter().filter(|m| *m == "interrupt").count(), 0, "nothing stopped it");
+    release.send(()).unwrap();
+}
+
+#[test]
 fn a_run_is_the_sessions_until_it_ends() {
     let s = setup();
     s.engine.open(NB, "/n/a.jl", &[(X, "sleep(60)")]);

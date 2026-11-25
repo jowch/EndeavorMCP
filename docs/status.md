@@ -757,8 +757,9 @@ Next:
   to start R, as Julia's start does, so the pane goes from the install's step
   to "Starting R" and the agent's next call finds R ready (#148).
 - Stopping the agent doesn't stop the notebook (#227, interface 52). The user's
-  Stop in the chat, or the agent cancelling a call, leaves the notebook's run
-  going, and the session's next read or waited run waits for it as before. A user lost a 15-minute run by interrupting a turn
+  Stop in the chat, or the agent cancelling a call, ends that call's wait at
+  once and leaves the notebook's run going; the session's next read or waited
+  run waits for it as before. A user lost a 15-minute run by interrupting a turn
   that was waiting in `read_cell`. To stop a run, the user asks the agent,
   which calls `interrupt_notebook`, or uses the notebook page's Stop; with the
   plugin, those are the only ways. `endeavor/stop_session`, which the app sent

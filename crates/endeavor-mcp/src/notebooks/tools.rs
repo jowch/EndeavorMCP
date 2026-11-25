@@ -341,8 +341,29 @@ impl Call<'_> {
         let needed: Vec<String> = upstream.iter().filter(|id| nb.cells.get(*id).is_some_and(|c| c.last_run == 0.0 && !nb.is_running(c))).cloned().collect();
         let cells: Vec<String> = needed.iter().chain(targets).cloned().collect();
         let timeout = if wait { self.run_wait().as_secs_f64() } else { TIMEOUT_SECONDS };
-        let reply = self.nbs.call("run", json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": timeout, "ask_new": self.nbs.asks_new_packages(self.owner) }))?;
+        let params = json!({ "notebook_id": nb.id, "cells": cells, "wait": wait, "timeout": timeout, "ask_new": self.nbs.asks_new_packages(self.owner) });
+        let reply = if wait { self.waited_run(&nb.id, &cells, params)? } else { self.nbs.call("run", params)? };
         self.ran(nb, targets, &upstream, needed, cells, &reply, wait, &staged)
+    }
+
+    fn waited_run(&self, notebook_id: &str, cells: &[String], params: Value) -> Result<Value, String> {
+        let (reply, replied) = std::sync::mpsc::channel();
+        let (engines, message) = (self.nbs.engines.clone(), json!({ "method": "run", "params": params }));
+        std::thread::spawn(move || reply.send(super::adapter_call(&engines, &message)));
+        loop {
+            match replied.recv_timeout(Duration::from_millis(500)) {
+                Ok(reply) => return reply,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err("The notebook's run ended without an answer".into()),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if crate::mcp::waiting_on(crate::mcp::Waits::CELLS, self.gone) {
+                if !self.owner.is_empty() {
+                    let started = Started { owner: self.owner.to_owned(), run: None, cells: cells.iter().cloned().collect(), follows: HashMap::new() };
+                    self.nbs.with_state(notebook_id, |state| state.started.push(started));
+                }
+                return Err(argument_error("client_gone::The caller hung up during the wait"));
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

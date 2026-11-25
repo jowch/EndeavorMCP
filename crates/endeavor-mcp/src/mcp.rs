@@ -132,6 +132,7 @@ pub struct Bridge {
     sessions_showing_python: Mutex<std::collections::HashSet<String>>,
     results: Results,
     starting_calls: Mutex<HashMap<String, (String, Value, Instant)>>,
+    calls: Mutex<Vec<(String, Value, bool)>>,
     shell_env: Vec<(&'static str, Option<String>)>,
     pub standalone: Option<Standalone>,
     pub on_folder: std::sync::OnceLock<OnFolder>,
@@ -259,6 +260,7 @@ impl Bridge {
             sessions_showing_python: Mutex::default(),
             results: Results::default(),
             starting_calls: Mutex::default(),
+            calls: Mutex::default(),
             shell_env,
             standalone: None,
             on_folder: std::sync::OnceLock::new(),
@@ -435,6 +437,8 @@ impl Bridge {
             self.starting_calls.lock().unwrap().remove(&caller.owner);
             if self.notebooks.asks.cancel(&caller.owner, request) {
                 self.notebooks.publish();
+            } else {
+                self.cancel_call(&caller.owner, request);
             }
         }
         answer(message, caller, |params| {
@@ -444,7 +448,10 @@ impl Bridge {
             if let Some(auto) = caller.auto_mode.filter(|_| !caller.owner.is_empty()) {
                 self.notebooks.set_auto(&caller.owner, auto);
             }
-            let call = Call { caller, request: &message["id"], call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone, began };
+            let request = &message["id"];
+            let _under_way = self.call_under_way(&caller.owner, request);
+            let gone = || gone() || self.call_cancelled(&caller.owner, request);
+            let call = Call { caller, request, call_id: params["_meta"]["claudecode/toolUseId"].as_str(), gone: &gone, began };
             let result = self.call_tool(params, &call);
             if !caller.owner.is_empty() {
                 let arguments = params.get("arguments").unwrap_or(&Value::Null);
@@ -453,6 +460,24 @@ impl Bridge {
             self.notebooks.publish();
             result
         })
+    }
+
+    fn call_under_way(&self, owner: &str, request: &Value) -> Option<UnderWay<'_>> {
+        if owner.is_empty() || request.is_null() {
+            return None;
+        }
+        self.calls.lock().unwrap().push((owner.to_owned(), request.clone(), false));
+        Some(UnderWay { bridge: self, owner: owner.to_owned(), request: request.clone() })
+    }
+
+    fn cancel_call(&self, owner: &str, request: &Value) {
+        for (_, _, cancelled) in self.calls.lock().unwrap().iter_mut().filter(|(o, r, _)| o == owner && r == request) {
+            *cancelled = true;
+        }
+    }
+
+    fn call_cancelled(&self, owner: &str, request: &Value) -> bool {
+        self.calls.lock().unwrap().iter().any(|(o, r, cancelled)| *cancelled && o == owner && r == request)
     }
 
     fn view_call(&self, name: &str, params: &Value) -> Value {
@@ -765,6 +790,21 @@ pub(crate) fn checked_call(params: &Value, help: bool, machines: bool) -> Result
 
 pub(crate) fn method_not_found(id: &Value, method: &str) -> String {
     to_json(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Method not found: {method}") } }))
+}
+
+struct UnderWay<'a> {
+    bridge: &'a Bridge,
+    owner: String,
+    request: Value,
+}
+
+impl Drop for UnderWay<'_> {
+    fn drop(&mut self) {
+        let mut calls = self.bridge.calls.lock().unwrap();
+        if let Some(at) = calls.iter().position(|(owner, request, _)| *owner == self.owner && *request == self.request) {
+            calls.remove(at);
+        }
+    }
 }
 
 struct Call<'a> {
@@ -1417,6 +1457,27 @@ Start a code cell that defines no name, such as a plot or a check, with a `# ` c
         assert_eq!(clean_label(" \n\u{7}"), None);
         assert_eq!(clean_label(&"é".repeat(100)), Some("é".repeat(80)));
         assert_eq!(clean_label(&format!("{} z", "y".repeat(79))), Some("y".repeat(79)), "no trailing space after the cut");
+    }
+
+    #[test]
+    fn a_cancel_marks_only_its_own_call_gone() {
+        let bridge = Bridge::new("t".into(), "e".into(), "");
+        let cancel = |owner: &str, request: u32| {
+            let caller = Caller { owner: owner.into(), ..Caller::default() };
+            bridge.dispatch(&json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": request } }), &caller, &|| false);
+        };
+        cancel("7", 5);
+        let call = bridge.call_under_way("7", &json!(5));
+        let other = bridge.call_under_way("8", &json!(5));
+        cancel("7", 6);
+        cancel("8", 4);
+        assert!(!bridge.call_cancelled("7", &json!(5)), "a cancel before the call, or of another call");
+        cancel("7", 5);
+        assert!(bridge.call_cancelled("7", &json!(5)));
+        assert!(!bridge.call_cancelled("8", &json!(5)), "another session's call of the same id");
+        drop((call, other));
+        assert!(bridge.calls.lock().unwrap().is_empty(), "forgotten when the call ends");
+        assert!(bridge.call_under_way("", &json!(5)).is_none() && bridge.call_under_way("7", &Value::Null).is_none(), "nothing to cancel it by");
     }
 
     #[test]
