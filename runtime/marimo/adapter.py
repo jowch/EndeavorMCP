@@ -501,9 +501,15 @@ class Notebook:
         op, d = m.get("op"), m.get("data") or {}
         notify = self.adapter.notify
         if op == "kernel-ready":
+            if set(d.get("cell_ids") or []) != set(self.cells):
+                print(f"endeavor marimo: marimo sent {self.path}'s cells again with other ids: had {self.order}, now {d.get('cell_ids')}", file=sys.stderr)
             self.kernel_ready(d)
             notify("topology_changed", notebook_id=self.id)
         elif op == "notebook-document-transaction":
+            dropped = {ch["cellId"]: self.cells[ch["cellId"]]["code"] for ch in d["transaction"]["changes"] if ch["type"] == "delete-cell" and ch.get("cellId") in self.cells}
+            if dropped:
+                made = {ch["cellId"]: ch.get("code", "") for ch in d["transaction"]["changes"] if ch["type"] == "create-cell"}
+                print(f"endeavor marimo: marimo deleted cells of {self.path} ({d['transaction'].get('source')}): {dropped}; made {made}", file=sys.stderr)
             for ch in d["transaction"]["changes"]:
                 self.document_change(ch)
             notify("cell_state", notebook_id=self.id, cells=[self.cell_state(c) for c in self.order])
