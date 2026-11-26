@@ -3888,15 +3888,18 @@ fn python_notebooks_start_while_r_is_still_installing() {
     let notebooks = Arc::new(Notebooks::new(None, Box::new(|| 0.0)));
     let (r_may_finish, r_waits) = std::sync::mpsc::channel::<()>();
     let r_waits = Mutex::new(r_waits);
+    let (r_entered, r_holds_its_lock) = std::sync::mpsc::channel::<()>();
+    let r_entered = Mutex::new(r_entered);
     let _ = notebooks.starter.set(Box::new(move |backend, _, _, _| match backend {
         Backend::Ember => {
+            let _ = r_entered.lock().unwrap().send(());
             let _ = r_waits.lock().unwrap().recv_timeout(Duration::from_secs(30));
             Err("r_installing::Installing Ember for R notebooks".into())
         }
         _ => Err("python_not_found::Python notebooks need uv".into()),
     }));
     let r = { let notebooks = notebooks.clone(); std::thread::spawn(move || notebooks.start_engine(Backend::Ember, None, Duration::from_secs(30))) };
-    std::thread::sleep(Duration::from_millis(100));
+    r_holds_its_lock.recv_timeout(Duration::from_secs(10)).unwrap();
     let began = Instant::now();
     assert_eq!(notebooks.start_engine(Backend::Marimo, None, Duration::from_secs(30)), Err("python_not_found::Python notebooks need uv".into()));
     assert!(began.elapsed() < Duration::from_secs(5), "Python waited {:?} for R's install", began.elapsed());
