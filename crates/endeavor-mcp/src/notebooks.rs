@@ -232,7 +232,8 @@ pub struct Notebooks {
     engines: Arc<Engines>,
     notify: OnceLock<Sender<Value>>,
     pub starter: OnceLock<Starter>,
-    starting: Mutex<()>,
+    starting_r: Mutex<()>,
+    starting_python: Mutex<()>,
     notices: Mutex<Vec<String>>,
     clock: Box<dyn Fn() -> f64 + Send + Sync>,
     state: Mutex<State>,
@@ -467,7 +468,8 @@ impl Notebooks {
             engines: Arc::new(Engines::new(pluto)),
             notify: OnceLock::new(),
             starter: OnceLock::new(),
-            starting: Mutex::default(),
+            starting_r: Mutex::default(),
+            starting_python: Mutex::default(),
             notices: Mutex::default(),
             clock,
             state: Mutex::new(State { notebooks: HashMap::new(), seq: 0, idle_limit_hours: IDLE_HOURS, idle_stopped: Vec::new(), bindings: HashMap::new(), several: HashMap::new(), closed_own: HashSet::new(), seen: HashMap::new(), calls: HashMap::new() }),
@@ -526,7 +528,11 @@ impl Notebooks {
             return Ok(());
         }
         let began = Instant::now();
-        let _starting = (backend != Backend::Pluto).then(|| self.starting.lock().unwrap());
+        let _starting = match backend {
+            Backend::Pluto => None,
+            Backend::Ember => Some(self.starting_r.lock().unwrap()),
+            Backend::Marimo => Some(self.starting_python.lock().unwrap()),
+        };
         if self.engines.has(backend) {
             return Ok(());
         }
