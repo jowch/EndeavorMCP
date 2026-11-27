@@ -221,6 +221,7 @@ fn a_python_notebook_through_the_runtime() {
         .env("XDG_STATE_HOME", work.join("state-home"))
         .env("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS", "3")
         .env("ENDEAVOR_TEST_MARIMO_SLOW_SAVE_FILE", "busy.py")
+        .env("ENDEAVOR_TEST_MARIMO_LOSE_INSTALL_OUTPUT", "endeavor_e2e_quiet")
         .env("ENDEAVOR_TEST_MARIMO_WAIT_SECS", "0")
         .env("XDG_CONFIG_HOME", work.join("config"))
         .stdout(Stdio::piped())
@@ -897,6 +898,20 @@ fn a_python_notebook_through_the_runtime() {
         let left = agent.ok("read_cell", json!({ "notebook_id": id, "cell_id": absent }));
         assert!(left["errored"] == true && left["queued"] != true, "a cell whose install failed shows its error, not a queue: {left}");
         agent.ok("delete_cell", json!({ "notebook_id": id, "cell_id": absent }));
+        let quiet = agent.ok("add_cell", json!({ "notebook_id": id, "code": "import endeavor_e2e_quiet", "after_cell_id": user }))["cell_id"].as_str().unwrap().to_owned();
+        agent.ok("execute_cell", json!({ "notebook_id": id, "cell_id": quiet, "wait_for_completion": false }));
+        until(&mut agent, "asking");
+        agent.ok("approve_install", json!({ "notebook_id": id, "packages": ["endeavor_e2e_quiet"] }));
+        let began = Instant::now();
+        let env = loop {
+            let env = environment();
+            if env["failed"]["packages"].to_string().contains("quiet") || began.elapsed() > Duration::from_secs(600) {
+                break env;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        };
+        assert!(env["failed"]["log"].as_str().is_some_and(|log| log.contains("can't be imported after the install")), "an install whose output marimo lost still counts as failed: {env}");
+        agent.ok("delete_cell", json!({ "notebook_id": id, "cell_id": quiet }));
         agent.ok("close_notebook", json!({ "notebook_id": id }));
         let opened = agent.ok("open_notebook", json!({ "path": name }));
         let id = opened["notebook_id"].clone();
