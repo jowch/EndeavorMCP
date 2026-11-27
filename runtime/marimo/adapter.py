@@ -642,7 +642,8 @@ class Notebook:
             (f"os.environ['UV_EXCLUDE_NEWER'] = {date!r}\n" if date else "") + \
             "try:\n    async with ctx:\n" + \
             "".join(f"        ctx.packages.add(names.get({m!r}, {m!r}))\n" for m in sorted(modules)) + \
-            "finally:\n    os.environ.pop('UV_EXCLUDE_NEWER', None)\n"
+            "finally:\n    os.environ.pop('UV_EXCLUDE_NEWER', None)\n" + \
+            STILL_MISSING.format(modules=sorted(modules))
         rerun = [c for c in rerun if c in self.cells]
         for c in rerun:
             self.cells[c]["status"], self.cells[c]["queued_by_us"], self.cells[c]["awaiting_install"] = "queued", True, True
@@ -652,15 +653,18 @@ class Notebook:
             if delay:
                 await asyncio.sleep(delay)
             ok, out = await self.m.execute(await self.session_id(), code, timeout=1800)
+            if set(modules) & set((os.environ.get("ENDEAVOR_TEST_MARIMO_LOSE_INSTALL_OUTPUT") or "").split(",")):
+                out = ""
         except Exception as e:  # noqa: BLE001
             ok, out = False, str(e)
         finally:
             self.installing = None
         refused = re.findall(r"^failed to install (\S+)$", out or "", re.M)
         ok = ok and not refused
-        self.failed = None if ok else {"packages": sorted(refused or {pypi_name(m) for m in modules}), "log": out[-6000:]}
+        log = out or f"marimo didn't say why {', '.join(sorted({pypi_name(m) for m in modules}))} can't be imported after the install."
+        self.failed = None if ok else {"packages": sorted(refused or {pypi_name(m) for m in modules}), "log": log[-6000:]}
         if not ok:
-            print(f"endeavor marimo: couldn't install {sorted(modules)}: {out[-500:]}", file=sys.stderr)
+            print(f"endeavor marimo: couldn't install {sorted(modules)}: {log[-500:]}", file=sys.stderr)
             for c in rerun:
                 self.cells[c]["status"], self.cells[c]["awaiting_install"] = "idle", False
             return False
@@ -1263,6 +1267,13 @@ def imports(code):
 
 
 CODE_MODE = "import marimo._code_mode as cm\nctx = cm.get_context(skip_staleness_check=True)\n"
+
+STILL_MISSING = """import importlib as _importlib, importlib.util as _util
+_importlib.invalidate_caches()
+_still_missing = [_m for _m in {modules!r} if _util.find_spec(_m) is None]
+if _still_missing:
+    raise RuntimeError("still not importable after the install: " + ", ".join(_still_missing))
+"""
 
 
 SET_INPUT = CODE_MODE + """import json as _json

@@ -1425,6 +1425,7 @@ impl MarimoStarter {
         if !cfg!(debug_assertions) {
             command.env_remove("ENDEAVOR_TEST_MARIMO_INSTALL_DELAY_SECS");
             command.env_remove("ENDEAVOR_TEST_MARIMO_SLOW_SAVE_FILE");
+            command.env_remove("ENDEAVOR_TEST_MARIMO_LOSE_INSTALL_OUTPUT");
         }
         #[cfg(unix)]
         if let Some(mask) = self.mask {
