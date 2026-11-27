@@ -120,6 +120,7 @@ function watch_worker!(session, nb)::Nothing
         true
     end
     new && _install_stop_hook!(worker)
+    new && _bind_plots_in_main!(worker)
     new && @async Base.CoreLogging.with_logger(Base.CoreLogging.global_logger()) do
         wait(worker.proc)
         worker_exited!(session, nb, workspace)
@@ -156,6 +157,23 @@ const _STOP_HOOK = quote
         end
         isdefined(Main, :__endeavor_stop)
     end
+end
+
+const _PLOTS_IN_MAIN = quote
+    let bind = pkg -> (pkg.name == "Plots" && !isdefined(Main, :Plots) && Core.eval(Main, Expr(:const, Expr(:(=), :Plots, Base.loaded_modules[pkg]))); nothing)
+        foreach(bind, keys(Base.loaded_modules))
+        push!(Base.package_callbacks, bind)
+    end
+    nothing
+end
+
+function _bind_plots_in_main!(worker)::Nothing
+    @async try
+        Pluto.Malt.remote_eval_fetch(worker, _PLOTS_IN_MAIN)
+    catch e
+        Pluto.Malt.isrunning(worker) && @warn "Plots: couldn't prepare the notebook's process for plotly()" exception=e
+    end
+    return nothing
 end
 
 function _install_stop_hook!(worker)::Nothing
