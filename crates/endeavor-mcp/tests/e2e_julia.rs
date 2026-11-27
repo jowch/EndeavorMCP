@@ -307,7 +307,7 @@ fn the_runtime_end_to_end() {
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": big }));
         let output = read["output"].as_str().unwrap();
         assert!(output.len() < 16_200 && output.ends_with("199999\n200000") && output.contains("bytes are left out here. No tool shows them"), "read_cell: {:.300}", output);
-        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "md\"Euler: $e^{i\\pi} + 1 = 0$, and &amp;#123;\"", "after_cell_id": big }));
+        let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "md\"Euler: $e^{i\\pi} + 1 = 0$, and `&#123;`\"", "after_cell_id": big }));
         let math = added["cell_id"].as_str().unwrap().to_owned();
         rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": math, "wait_for_completion": true }));
         let added = rt.ok(MAC, "add_cell", json!({ "notebook_id": notebook, "code": "sleep(4)", "after_cell_id": math }));
@@ -315,7 +315,7 @@ fn the_runtime_end_to_end() {
         rt.ok(MAC, "execute_cell", json!({ "notebook_id": notebook, "cell_id": slow, "wait_for_completion": false }));
         let read = rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": math }));
         let text = read["output_text"].as_str().unwrap_or_else(|| panic!("{read}"));
-        assert!(text.contains("e^{i\\pi} + 1 = 0") && text.contains(", and &amp;#123;") && !text.contains("&#43;"), "Markdown's text: {text}");
+        assert!(text.contains("e^{i\\pi} + 1 = 0") && text.contains(", and &#123;") && !text.contains("&#43;"), "Markdown's text: {text}");
         rt.ok(MAC, "read_cell", json!({ "notebook_id": notebook, "cell_id": slow }));
         (notebook, path, cell)
     });
