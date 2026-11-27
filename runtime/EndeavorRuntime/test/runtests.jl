@@ -743,22 +743,26 @@ end
     end
 
     @testset "a notebook that loads Plots finds it in Main, as Plots' plotly() needs (#500)" begin
-        worker = Pluto.Malt.Worker()
-        depot = mktempdir()
-        mkpath(joinpath(depot, "Plots", "src"))
-        write(joinpath(depot, "Plots", "Project.toml"), "name = \"Plots\"\nuuid = \"91a5bcdd-55d7-5caf-9e0b-520d859cae80\"\n")
-        write(joinpath(depot, "Plots", "src", "Plots.jl"), "module Plots\nplotly() = Main.Plots\nend\n")
-        try
-            Pluto.Malt.remote_eval_fetch(worker, EndeavorRuntime._PLOTS_IN_MAIN)
-            Pluto.Malt.remote_eval_fetch(worker, :(pushfirst!(LOAD_PATH, $depot)))
-            @test Pluto.Malt.remote_eval_fetch(worker, :(isdefined(Main, :Plots))) == false
-            @test Pluto.Malt.remote_eval_fetch(worker, quote
-                notebook = Module(:notebook)
-                Core.eval(notebook, :(using Plots))
-                Core.eval(notebook, :(Plots.plotly() === Plots))
-            end)
-        finally
-            Pluto.Malt.stop(worker)
+        stub = mktempdir()
+        mkpath(joinpath(stub, "Plots", "src"))
+        write(joinpath(stub, "Plots", "Project.toml"), "name = \"Plots\"\nuuid = \"$(EndeavorRuntime._PLOTS.uuid)\"\n")
+        write(joinpath(stub, "Plots", "src", "Plots.jl"), "module Plots\nplotly() = Main.Plots\nend\n")
+        load_in_notebook = quote
+            notebook = Module(:notebook)
+            Core.eval(notebook, :(using Plots))
+            Core.eval(notebook, :(Plots.plotly() === Plots))
+        end
+        for loaded_first in (false, true)
+            worker = Pluto.Malt.Worker()
+            try
+                Pluto.Malt.remote_eval_fetch(worker, :(pushfirst!(LOAD_PATH, $stub)))
+                loaded_first && @test_throws Exception Pluto.Malt.remote_eval_fetch(worker, load_in_notebook)
+                Pluto.Malt.remote_eval_fetch(worker, EndeavorRuntime._PLOTS_IN_MAIN)
+                @test Pluto.Malt.remote_eval_fetch(worker, :(isdefined(Main, :Plots))) == loaded_first
+                @test Pluto.Malt.remote_eval_fetch(worker, load_in_notebook)
+            finally
+                Pluto.Malt.stop(worker)
+            end
         end
     end
 

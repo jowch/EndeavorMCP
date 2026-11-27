@@ -159,10 +159,12 @@ const _STOP_HOOK = quote
     end
 end
 
+const _PLOTS = Base.PkgId(UUID("91a5bcdd-55d7-5caf-9e0b-520d859cae80"), "Plots")
+
 const _PLOTS_IN_MAIN = quote
-    let bind = pkg -> (pkg.name == "Plots" && !isdefined(Main, :Plots) && Core.eval(Main, Expr(:const, Expr(:(=), :Plots, Base.loaded_modules[pkg]))); nothing)
-        foreach(bind, keys(Base.loaded_modules))
+    let bind = pkg -> (pkg == $_PLOTS && !isdefined(Main, :Plots) && Core.eval(Main, Expr(:const, Expr(:(=), :Plots, Base.loaded_modules[pkg]))); nothing)
         push!(Base.package_callbacks, bind)
+        foreach(bind, collect(keys(Base.loaded_modules)))
     end
     nothing
 end
